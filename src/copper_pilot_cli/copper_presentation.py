@@ -1,4 +1,4 @@
-"""Thin dcode-compatible presentation seam for hosted Copper turns."""
+"""Thin dcode-compatible presentation seam for hosted CopperPilot turns."""
 
 from __future__ import annotations
 
@@ -276,7 +276,7 @@ class LoadingWidget(Static):
 
 
 class StatusBar(Vertical):
-    """Compact dcode-style status bar for values Copper can report truthfully."""
+    """Compact dcode-style status bar for values CopperPilot can report truthfully."""
 
     DEFAULT_CSS = """
     StatusBar { height: 1; dock: bottom; background: $background; }

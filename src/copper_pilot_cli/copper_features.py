@@ -1,4 +1,4 @@
-"""Copper project skills, plans, attachments, and KiCad paste handling."""
+"""CopperPilot project skills, plans, attachments, and KiCad paste handling."""
 
 from __future__ import annotations
 

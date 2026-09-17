@@ -30,7 +30,7 @@ def harden_state_dir(path: Path) -> None:
 
 
 def is_internal_message(_message: object) -> bool:
-    """Copper checkpoints do not insert hidden local-agent messages."""
+    """CopperPilot checkpoints do not insert hidden local-agent messages."""
     return False
 
 

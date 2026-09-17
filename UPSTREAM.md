@@ -8,8 +8,8 @@ The terminal presentation layer began as a source fork of:
 - Revision: `1d3232c0852c47af09119edea10eeec887e4f0da`
 - License: MIT
 
-Copper Pilot replaces the upstream model-provider, local-agent server, and
-RemoteGraph runtime with a client for the hosted Copper Pilot agent. Upstream
+CopperPilot replaces the upstream model-provider, local-agent server, and
+RemoteGraph runtime with a client for the hosted CopperPilot agent. Upstream
 copyright and license notices must remain in distributions.
 
 When synchronizing upstream:
@@ -31,7 +31,7 @@ it is delegated to the pinned `deepagents` package's `FilesystemMiddleware` and
 
 Only dependency-light leaf code is vendored under
 `copper_pilot_cli._upstream.dcode_0_1_69`. Its `PROVENANCE.json` records the
-upstream path and hash. Copper-owned presentation adapters reproduce dcode's
+upstream path and hash. CopperPilot-owned presentation adapters reproduce dcode's
 loading, reasoning-collapse, successful-tool grouping, and inline-approval
 contracts without importing dcode's provider/runtime application stack.
 
@@ -39,6 +39,6 @@ Selection auto-copy and completion-key routing are adapted from
 `deepagents_code.clipboard`, `deepagents_code.app`, and the upstream
 `ChatInput`/autocomplete widgets. Only the detached-widget Textual guard is
 retained from upstream's private patch set. Consecutive successful reasoning
-and tool activity uses Copper's desktop `Worked for N` lifecycle; this is an
+and tool activity uses CopperPilot's desktop `Worked for N` lifecycle; this is an
 intentional presentation difference from dcode's separate reasoning and tool
 summaries.

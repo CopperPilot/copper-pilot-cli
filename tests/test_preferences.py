@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from types import SimpleNamespace
 
@@ -19,7 +20,9 @@ def test_shell_auto_allow_defaults_and_atomic_private_persistence(tmp_path, monk
 
     assert copper_preferences.shell_auto_allow_settings() == (False, True)
     config = tmp_path / "state/config.json"
-    assert stat.S_IMODE(config.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+    # POSIX 0600 is not represented in Windows st_mode (typically 0666).
+    if os.name != "nt":
+        assert stat.S_IMODE(config.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
     assert not config.with_suffix(".tmp").exists()
 
 

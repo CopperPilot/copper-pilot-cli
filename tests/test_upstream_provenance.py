@@ -16,7 +16,8 @@ def test_vendored_upstream_files_match_recorded_hashes() -> None:
     for entry in provenance["files"]:
         path = VENDORED / entry["local_path"]
         assert path.is_file(), entry["local_path"]
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        # Git on Windows may check out CRLF; provenance hashes are LF bytes.
+        digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         assert digest == entry["sha256"], entry["local_path"]
         assert entry["patch_status"] in {"unchanged", "patched"}
 

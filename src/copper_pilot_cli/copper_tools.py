@@ -1,4 +1,4 @@
-"""Compatibility exports for Copper's Deep Agents tool bridge."""
+"""Compatibility exports for CopperPilot's Deep Agents tool bridge."""
 
 from copper_pilot_cli.deepagents_tools import (
     ApprovalMode,

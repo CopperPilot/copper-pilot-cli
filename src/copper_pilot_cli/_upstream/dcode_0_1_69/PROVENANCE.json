@@ -36,11 +36,11 @@
   ],
   "intentional_differences": [
     "CopperPilot branding and hosted authentication",
-    "Copper hosted WebSocket transport instead of a local provider runtime",
+    "CopperPilot hosted WebSocket transport instead of a local provider runtime",
     "No LangSmith, MCP, plugins, sandboxes, local model setup, or computer use",
     "CLI-owned deterministic Auto policy with independent normal and dangerous shell settings",
     "Provider context-window metrics are omitted because the hosted protocol has no truthful values",
-    "Successful tool calls use dcode-style compact groups driven by Copper hosted events",
-    "Uninterrupted successful reasoning and tools collapse with Copper desktop Worked-for timing"
+    "Successful tool calls use dcode-style compact groups driven by CopperPilot hosted events",
+    "Uninterrupted successful reasoning and tools collapse with CopperPilot desktop Worked-for timing"
   ]
 }

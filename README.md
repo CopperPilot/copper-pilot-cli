@@ -66,7 +66,7 @@ Manual approval by default. Auto permits only deterministic routine actions;
 unknown actions still ask. YOLO must be selected explicitly.
 
 Filesystem, search, edit, and shell execution use Deep Agents' native
-`FilesystemMiddleware` tools and `LocalShellBackend`; Copper's adapter only
+`FilesystemMiddleware` tools and `LocalShellBackend`; CopperPilot's adapter only
 normalizes hosted tool names, approval decisions, and result envelopes.
 
 Computer use, model/provider selection, local model execution, LangSmith

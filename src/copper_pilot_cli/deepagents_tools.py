@@ -1,4 +1,4 @@
-"""Hosted Copper tool requests dispatched through Deep Agents native tools."""
+"""Hosted CopperPilot tool requests dispatched through Deep Agents native tools."""
 
 from __future__ import annotations
 
@@ -264,7 +264,7 @@ def routine_action(
 
 
 class LocalToolBroker:
-    """Thin Copper protocol adapter over Deep Agents filesystem tools."""
+    """Thin CopperPilot protocol adapter over Deep Agents filesystem tools."""
 
     def __init__(
         self,
@@ -424,7 +424,7 @@ class LocalToolBroker:
             arguments.pop("kill_on_timeout", None)
             arguments.pop("background", None)
         elif canonical_name == "read_file" and arguments.get("offset") is not None:
-            # Copper's desktop harness uses 1-indexed offsets; Deep Agents uses
+            # CopperPilot's desktop harness uses 1-indexed offsets; Deep Agents uses
             # zero-indexed offsets.
             arguments["offset"] = max(int(arguments["offset"]) - 1, 0)
         return arguments, external

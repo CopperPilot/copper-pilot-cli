@@ -1,4 +1,4 @@
-"""Credential-aware end-to-end tests against the hosted Copper Pilot service."""
+"""Credential-aware end-to-end tests against the hosted CopperPilot service."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from copper_pilot_cli.langchain import CopperPilotAgent
 def live_credential() -> DeviceCredential:
     credential = load_credential()
     if credential is None:
-        pytest.skip("Copper Pilot credentials were not found")
+        pytest.skip("CopperPilot credentials were not found")
     return credential
 
 

@@ -482,7 +482,7 @@ _TOOL_ACTIVITY = {
 
 
 def format_work_duration(elapsed_seconds: float) -> str:
-    """Format elapsed work using the Copper desktop client's duration contract."""
+    """Format elapsed work using the CopperPilot desktop client's duration contract."""
     total_seconds = max(1, round(max(0.0, elapsed_seconds)))
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -962,7 +962,7 @@ def _unicode_warning(arguments: dict[str, Any]) -> str:
 
 
 class ApprovalMenu(Container):
-    """Inline dcode-style approval menu driven by a Copper approval request."""
+    """Inline dcode-style approval menu driven by a CopperPilot approval request."""
 
     can_focus = True
     can_focus_children = False

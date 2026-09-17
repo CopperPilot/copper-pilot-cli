@@ -738,7 +738,7 @@ class CopperPilotApp(App[None]):
                         [
                             f"- Workspace: `{self.workspace}`",
                             f"- Thread: `{self.thread_id}`",
-                            f"- Copper mode: `{self.copper_mode.value}`",
+                            f"- CopperPilot mode: `{self.copper_mode.value}`",
                             f"- Approval: `{self.broker.mode.value}`",
                             f"- Schematic: `{context.schematic_path or 'none'}`",
                             f"- PCB: `{context.pcb_path or 'none'}`",
@@ -775,7 +775,7 @@ class CopperPilotApp(App[None]):
         elif command == "/mode":
             choice = await self._wait_for_modal(
                 ChoiceScreen(
-                    "Copper mode",
+                    "CopperPilot mode",
                     [(item.value, item.value.title()) for item in CopperMode],
                 )
             )
@@ -807,7 +807,7 @@ class CopperPilotApp(App[None]):
             await self._mount(
                 AssistantMessage(
                     "Local tools: read_file, write_file, edit_file, delete, "
-                    "glob, grep, execute. Copper aliases (bash, read, write, edit, "
+                    "glob, grep, execute. CopperPilot aliases (bash, read, write, edit, "
                     "delete_file) are normalized by the hosted-protocol adapter."
                 )
             )
@@ -874,7 +874,9 @@ class CopperPilotApp(App[None]):
                 await self._mount(AssistantMessage(message))
         elif command == "/theme":
             await self._mount(
-                AssistantMessage("CopperPilot uses the dcode dark theme with Copper accents.")
+                AssistantMessage(
+                    "CopperPilot uses the dcode dark theme with copper-colored accents."
+                )
             )
         elif command == "/version":
             await self._mount(AssistantMessage(f"CopperPilot CLI {__version__}"))

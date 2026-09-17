@@ -1,4 +1,4 @@
-"""Small authenticated HTTP surface used by the Copper TUI."""
+"""Small authenticated HTTP surface used by the CopperPilot TUI."""
 
 from __future__ import annotations
 

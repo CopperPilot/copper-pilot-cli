@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "copper-pilot-cli"
 version = "0.1.0"
-description = "Copper Pilot hosted agent for the terminal and LangChain"
+description = "CopperPilot hosted agent for the terminal and LangChain"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12,<4"
-authors = [{ name = "Copper Pilot" }]
+authors = [{ name = "CopperPilot" }]
 dependencies = [
   "aiosqlite>=0.22,<1",
   "certifi>=2024.8.30",
@@ -62,7 +62,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "--strict-config --strict-markers"
 markers = [
-  "live: credential-aware end-to-end tests against the hosted Copper Pilot service",
+  "live: credential-aware end-to-end tests against the hosted CopperPilot service",
 ]
 
 [tool.ruff]
