@@ -4,6 +4,12 @@ Changelog
 
 (unreleased)
 ------------
+- Fix(README.md) [AdityaNG]
+
+
+0.1.4 (2026-09-17)
+------------------
+- Release: version 0.1.4 🚀 [AdityaNG]
 - Fix(tests/test_release_gates.py) [AdityaNG]
 
 
