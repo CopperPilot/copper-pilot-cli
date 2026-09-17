@@ -1,0 +1,13 @@
+Copper Pilot CLI includes modified portions of Deep Agents Code.
+
+Deep Agents Code
+Copyright (c) LangChain, Inc.
+Licensed under the MIT License.
+
+Upstream source:
+https://github.com/langchain-ai/deepagents
+
+Pinned source revision:
+1d3232c0852c47af09119edea10eeec887e4f0da
+
+The LangChain name and trademarks are not used to endorse Copper Pilot.

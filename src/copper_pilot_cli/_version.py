@@ -1,0 +1,24 @@
+"""CopperPilot CLI version and update endpoints."""
+
+# Keep the `x-release-please-version` annotation — release-please uses it to
+# bump `__version__` in sync with `pyproject.toml` on every release PR.
+__version__ = "0.1.0"  # x-release-please-version
+
+DOCS_URL = "https://copperpilot.ai"
+"""URL for CopperPilot documentation."""
+
+PYPI_URL = "https://pypi.org/pypi/copper-pilot-cli/json"
+"""PyPI JSON API endpoint for version checks."""
+
+SDK_PYPI_URL = "https://pypi.org/pypi/deepagents/json"
+"""PyPI JSON API endpoint for reading `deepagents` SDK release metadata.
+
+The CLI only reads release-age metadata from this endpoint; it never
+performs SDK update checks.
+"""
+
+CHANGELOG_URL = "https://github.com/CopperPilot/copper-pilot-cli/releases"
+"""URL for the full changelog."""
+
+USER_AGENT = f"copper-pilot-cli/{__version__} update-check"
+"""User-Agent header sent with PyPI requests."""

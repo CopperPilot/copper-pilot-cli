@@ -1,0 +1,46 @@
+{
+  "project": "Deep Agents Code",
+  "repository": "https://github.com/langchain-ai/deepagents",
+  "package_version": "0.1.69",
+  "revision": "1d3232c0852c47af09119edea10eeec887e4f0da",
+  "license": "MIT",
+  "files": [
+    {
+      "local_path": "diff_utils.py",
+      "upstream_path": "libs/code/deepagents_code/diff_utils.py",
+      "sha256": "3085c4f249a22b06244c34e5f115ae005cb56456eecefd7f34c92d47861e8f8c",
+      "patch_status": "unchanged"
+    }
+  ],
+  "adapted_files": [
+    {
+      "local_path": "../../clipboard.py",
+      "upstream_paths": [
+        "libs/code/deepagents_code/clipboard.py",
+        "libs/code/deepagents_code/app.py"
+      ]
+    },
+    {
+      "local_path": "../../textual_patches.py",
+      "upstream_paths": [
+        "libs/code/deepagents_code/_textual_patches.py"
+      ]
+    },
+    {
+      "local_path": "../../copper_widgets.py",
+      "upstream_paths": [
+        "libs/code/deepagents_code/tui/widgets/chat_input.py",
+        "libs/code/deepagents_code/tui/widgets/autocomplete.py"
+      ]
+    }
+  ],
+  "intentional_differences": [
+    "CopperPilot branding and hosted authentication",
+    "Copper hosted WebSocket transport instead of a local provider runtime",
+    "No LangSmith, MCP, plugins, sandboxes, local model setup, or computer use",
+    "CLI-owned deterministic Auto policy with independent normal and dangerous shell settings",
+    "Provider context-window metrics are omitted because the hosted protocol has no truthful values",
+    "Successful tool calls use dcode-style compact groups driven by Copper hosted events",
+    "Uninterrupted successful reasoning and tools collapse with Copper desktop Worked-for timing"
+  ]
+}
