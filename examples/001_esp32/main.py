@@ -14,14 +14,14 @@ from helper import drc_violations, erc_errors, render_pcb, run
 PLAN = CopperMode.PLAN
 WORKSPACE_PATH = Path(__file__).resolve().parent
 
+
 def main() -> None:
     copper_pilot = CopperPilotAgent(workspace=WORKSPACE_PATH)
     run(copper_pilot, "Build me an ESP32 dev board.", PLAN)
     run(copper_pilot, "Let us build this plan.")
     run(
         copper_pilot,
-        "Inspect the PCB, check for any missing 3D models, "
-        "and apply them accordingly.",
+        "Inspect the PCB, check for any missing 3D models, and apply them accordingly.",
     )
     assert erc_errors() == 0
     assert drc_violations() == 0
