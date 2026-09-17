@@ -2,6 +2,17 @@ Changelog
 =========
 
 
+(unreleased)
+------------
+- Ci(pyproject.toml) [AdityaNG]
+- Fix(tests/test_tui.py) [AdityaNG]
+
+
+0.1.1 (2026-09-17)
+------------------
+- Release: version 0.1.1 🚀 [AdityaNG]
+
+
 0.1.0 (2026-09-17)
 ------------------
 - Release: version 0.1.0 🚀 [AdityaNG]
