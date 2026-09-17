@@ -159,3 +159,20 @@ def test_project_urls_include_community_links() -> None:
     urls = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["urls"]
     for key in ("Homepage", "Repository", "Issues", "Documentation", "Changelog"):
         assert key in urls, key
+
+
+def test_pypi_badge_metadata_is_declared() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project.get("license") == "MIT"
+    assert "LICENSE" in project.get("license-files", [])
+    classifiers = project.get("classifiers", [])
+    assert "License :: OSI Approved :: MIT License" in classifiers
+    for version in ("3.12", "3.13", "3.14"):
+        assert f"Programming Language :: Python :: {version}" in classifiers
+
+
+def test_readme_header_includes_download_badge() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "img.shields.io/pypi/l/copper-pilot-cli" in readme
+    assert "img.shields.io/pypi/pyversions/copper-pilot-cli" in readme
+    assert "img.shields.io/pepy/dt/copper-pilot-cli" in readme

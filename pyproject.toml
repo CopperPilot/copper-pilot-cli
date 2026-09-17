@@ -7,9 +7,18 @@ name = "copper-pilot-cli"
 dynamic = ["version"]
 description = "CopperPilot hosted agent for the terminal and LangChain"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12,<4"
 authors = [{ name = "CopperPilot" }]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
   "aiosqlite>=0.22,<1",
   "certifi>=2024.8.30",
