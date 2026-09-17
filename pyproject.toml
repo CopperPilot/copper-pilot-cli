@@ -68,6 +68,12 @@ include = [
   "/HISTORY.md",
   "/UPSTREAM.md",
   "/pyproject.toml",
+  "/examples",
+]
+exclude = [
+  "/examples/**/.copperpilot/tmp",
+  "/examples/**/.copperpilot/references",
+  "/examples/**/.copperpilot/oracle",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -92,6 +98,9 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
 ignore = ["S101"]
+
+[tool.ruff.lint.isort]
+known-local-folder = ["helper"]
 
 [tool.coverage.run]
 source = ["copper_pilot_cli"]

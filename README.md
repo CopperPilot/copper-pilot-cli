@@ -72,10 +72,21 @@ the parent directory is mode `0700` and the file is mode `0600`.
 ## LangChain
 
 ```python
+from copper_pilot_cli.copper_protocol import CopperMode
 from copper_pilot_cli.langchain import CopperPilotAgent
+from helper import drc_violations, erc_errors, render_pcb, run
 
-agent = CopperPilotAgent(workspace=".")
-result = agent.invoke({"messages": [{"role": "user", "content": "Review this design"}]})
+PLAN = CopperMode.PLAN
+
+copper_pilot = CopperPilotAgent(workspace="esp32")
+
+run(copper_pilot, "Build me an ESP32 dev board.", PLAN)
+run(copper_pilot, "Let us build this plan.")
+run(copper_pilot, "Inspect the PCB, check for any missing 3D models, and apply them accordingly.")
+
+assert erc_errors() == 0
+assert drc_violations() == 0
+render_pcb("esp32.png")
 ```
 
 `CopperPilotAgent` is a `Runnable`, not a chat model. It represents a complete
@@ -83,6 +94,9 @@ hosted agent run, including local tool requests. Use `as_langgraph()` for graph
 composition or `as_compiled_subagent()` for explicit delegation from an outer
 Deep Agent. The compatible `deepagents` runtime is installed and pinned by this
 package.
+
+That snippet is the runnable example in
+[`examples/001_esp32`](examples/001_esp32).
 
 ## Security boundary
 

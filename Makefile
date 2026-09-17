@@ -11,12 +11,12 @@ help:             ## Show the help.
 
 .PHONY: fmt
 fmt:              ## Format code using ruff.
-	$(ENV_PREFIX)python -m ruff format src tests
+	$(ENV_PREFIX)python -m ruff format src tests examples
 
 .PHONY: lint
 lint:             ## Check format, lint, and types.
-	$(ENV_PREFIX)python -m ruff format --check src tests
-	$(ENV_PREFIX)python -m ruff check src tests
+	$(ENV_PREFIX)python -m ruff format --check src tests examples
+	$(ENV_PREFIX)python -m ruff check src tests examples
 	$(ENV_PREFIX)python -m ty check src/copper_pilot_cli
 
 .PHONY: test
