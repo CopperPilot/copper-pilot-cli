@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/CopperPilot/copper-pilot-cli/main/docs/assets/logo.png" alt="CopperPilot" width="128">
+  <img src="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/logo.png?raw=true" alt="CopperPilot" width="128">
 </p>
 
 # CopperPilot CLI
@@ -7,7 +7,7 @@
 CopperPilot in your terminal: a thin, open-source client for CopperPilot electronics design agent, the best AI for PCB Design.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/CopperPilot/copper-pilot-cli/main/docs/assets/esp32-mini-1-h4.gif" alt="CopperPilot building an ESP32-MINI-1 board">
+  <img src="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/esp32-mini-1-h4.gif?raw=true" alt="CopperPilot building an ESP32-MINI-1 board">
 </p>
 
 ## Install and run
@@ -33,13 +33,31 @@ Both `copper-pilot` and `copper-pilot-cli` run the same program.
 ## Testing
 
 ```console
-pytest -m "not live"
+pip install -e ".[dev]"
+make fmt
+make lint
+make test
+```
+
+`make test` runs `pytest -m "not live"`. Live tests exercise the installed CLI,
+Textual composer, hosted Ask stream, and Agent/local-tool round trip:
+
+```console
 pytest -m live
 ```
 
-Live tests exercise the installed CLI, Textual composer, hosted Ask stream, and
-Agent/local-tool round trip. They load the normal private credential store and
-skip automatically when no CopperPilot credential is available.
+They load the normal private credential store and skip automatically when no
+CopperPilot credential is available.
+
+## Release
+
+Version is stored in `VERSION`. `make release` writes that file, regenerates
+`HISTORY.md`, commits both, tags `X.Y.Z`, and pushes. GitHub Actions then
+publishes to PyPI.
+
+```console
+make release   # prompts for X.Y.Z, then tag-push publishes to PyPI
+```
 
 ## Configuration
 

@@ -1,8 +1,16 @@
 """CopperPilot CLI version and update endpoints."""
 
-# Keep the `x-release-please-version` annotation — release-please uses it to
-# bump `__version__` in sync with `pyproject.toml` on every release PR.
-__version__ = "0.1.0"  # x-release-please-version
+from __future__ import annotations
+
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+try:
+    __version__ = version("copper-pilot-cli")
+except PackageNotFoundError:
+    __version__ = (
+        Path(__file__).resolve().parents[2].joinpath("VERSION").read_text(encoding="utf-8").strip()
+    )
 
 DOCS_URL = "https://copperpilot.ai"
 """URL for CopperPilot documentation."""

@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+
+      - name: Verify VERSION matches tag
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "${TAG}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Tag ${TAG} must be X.Y.Z without a v prefix"
+            exit 1
+          fi
+          if [[ "${TAG}" != "${FILE_VERSION}" ]]; then
+            echo "Tag ${TAG} does not match VERSION ${FILE_VERSION}"
+            exit 1
+          fi
+
+      - run: make lint
+      - run: make test
+      - run: python -m build
+
+      - name: Confirm installed version matches VERSION
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          INSTALLED="$(copper-pilot --version)"
+          ALIAS="$(copper-pilot-cli --version)"
+          if [[ "${INSTALLED}" != "${FILE_VERSION}" || "${ALIAS}" != "${FILE_VERSION}" ]]; then
+            echo "Installed versions '${INSTALLED}' / '${ALIAS}' do not match VERSION ${FILE_VERSION}"
+            exit 1
+          fi
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          if [[ ! -f HISTORY.md ]]; then
+            echo "Release ${GITHUB_REF_NAME}" > HISTORY.md
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: HISTORY.md

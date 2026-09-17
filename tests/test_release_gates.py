@@ -92,11 +92,32 @@ def test_diagnostics_redact_credentials_and_content() -> None:
     assert "private prompt" not in value
 
 
+def test_version_file_is_source_of_truth() -> None:
+    version_path = ROOT / "VERSION"
+    assert version_path.is_file()
+    file_version = version_path.read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", file_version)
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = data["project"]
+    hatch_version = data["tool"]["hatch"]["version"]
+    assert "version" not in project
+    assert project.get("dynamic") == ["version"]
+    assert hatch_version["source"] == "regex"
+    assert hatch_version["path"] == "VERSION"
+
+    from copper_pilot_cli import __version__
+
+    assert __version__ == file_version
+    assert importlib.metadata.version("copper-pilot-cli") == file_version
+
+
 def test_readme_media_uses_absolute_github_urls() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    prefix = "https://raw.githubusercontent.com/CopperPilot/copper-pilot-cli/main/"
+    prefix = "https://github.com/CopperPilot/copper-pilot-cli/blob/main/"
+    suffix = "?raw=true"
     sources = re.findall(r'<img\b[^>]*\bsrc="([^"]+)"', readme)
     assert sources, "README must include media for PyPI rendering"
     for src in sources:
-        assert src.startswith(prefix), src
-        assert (ROOT / src.removeprefix(prefix)).is_file(), src
+        assert src.startswith(prefix) and src.endswith(suffix), src
+        assert (ROOT / src.removeprefix(prefix).removesuffix(suffix)).is_file(), src
