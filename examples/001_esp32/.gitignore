@@ -1,0 +1,9 @@
+.copperpilot/tmp/
+.copperpilot/references/
+.copperpilot/oracle/
+__pycache__/
+fp-info-cache
+*.kicad_prl
+*-backups/
+*.bak
+*.lck
