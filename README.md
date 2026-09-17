@@ -13,9 +13,9 @@
 </div>
 
 <div align="center">
-  <a href="https://github.com/CopperPilot/copper-pilot-cli/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/copper-pilot-cli" alt="License"></a>
-  <a href="https://pypi.org/project/copper-pilot-cli/"><img src="https://img.shields.io/pypi/v/copper-pilot-cli" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/copper-pilot-cli/"><img src="https://img.shields.io/pypi/pyversions/copper-pilot-cli" alt="Python"></a>
+  <a href="https://github.com/CopperPilot/copper-pilot-cli/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/copper-pilot-cli.svg" alt="License"></a>
+  <a href="https://pypi.org/project/copper-pilot-cli/"><img src="https://img.shields.io/pypi/v/copper-pilot-cli.svg" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/copper-pilot-cli/"><img src="https://img.shields.io/pypi/pyversions/copper-pilot-cli.svg" alt="Python"></a>
   <a href="https://github.com/CopperPilot/copper-pilot-cli/actions/workflows/ci.yml"><img src="https://github.com/CopperPilot/copper-pilot-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </div>
 
