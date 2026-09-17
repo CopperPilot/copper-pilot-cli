@@ -183,7 +183,9 @@ class ChatInput(Vertical):
         yield OptionList(id="completions")
 
     def focus(self, scroll_visible: bool = True) -> ChatInput:
-        self.query_one(TextArea).focus(scroll_visible)
+        text_area = self.query(TextArea)
+        if text_area:
+            text_area.first().focus(scroll_visible)
         return self
 
     def update_slash_commands(self, commands: Sequence[Any]) -> None:

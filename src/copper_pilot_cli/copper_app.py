@@ -1004,7 +1004,7 @@ class CopperPilotApp(App[None]):
         finally:
             if self._loading is not None:
                 self._loading.resume()
-            if composer.is_mounted:
+            if composer.is_mounted and composer.query(TextArea):
                 composer.focus()
         if not isinstance(decision, ApprovalDecision):
             if tool:

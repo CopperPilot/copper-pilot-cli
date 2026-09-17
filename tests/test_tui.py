@@ -63,6 +63,20 @@ class FakeRuntime:
         yield (), "custom", {"type": "copper.text", "data": "chat response"}
 
 
+async def _wait_until(pilot, predicate, *, seconds: float = 2) -> None:
+    """Advance the event loop until `predicate()` is true.
+
+    Avoid `pilot.pause()` here: its `_wait_for_screen()` can deadlock with
+    cancelled-turn widget teardown (`AwaitRemove` / prune).
+    """
+    async with asyncio.timeout(seconds):
+        while not predicate():
+            await asyncio.sleep(0.02)
+            screen = getattr(pilot.app, "screen", None)
+            if screen is not None:
+                screen._on_timer_update()
+
+
 @pytest.mark.asyncio
 async def test_tui_mounts_branded_composer_and_status(tmp_path) -> None:
     app = CopperPilotApp(
@@ -359,12 +373,15 @@ async def test_cancel_during_active_turn_does_not_quit_or_crash(tmp_path) -> Non
     app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
     async with app.run_test(size=(100, 30)) as pilot:
         await app._submit("long task")
-        await pilot.pause()
-        assert app._turn_task is not None
+        await _wait_until(
+            pilot,
+            lambda: (
+                app._turn_task is not None and app._loading is not None and app._loading.is_mounted
+            ),
+        )
         await app.action_cancel_or_quit()
-        await pilot.pause()
+        await _wait_until(pilot, lambda: app._turn_task is None)
         assert runtime.cancelled is True
-        assert app._turn_task is None
 
 
 @pytest.mark.asyncio
@@ -391,10 +408,12 @@ async def test_cancel_settles_active_tool_and_removes_loading(tmp_path) -> None:
     app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
     async with app.run_test(size=(100, 30)) as pilot:
         await app._submit("long task")
-        await pilot.pause()
-        assert list(app.query(LoadingWidget))
+        await _wait_until(
+            pilot,
+            lambda: app._loading is not None and app._loading.is_mounted,
+        )
         await app.action_cancel_or_quit()
-        await pilot.pause()
+        await _wait_until(pilot, lambda: app._turn_task is None)
         assert app._tools["read-1"].status == "error"
         assert not list(app.query(LoadingWidget))
 
@@ -418,11 +437,15 @@ async def test_cancel_still_cleans_up_when_transport_cancel_fails(tmp_path) -> N
     app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
     async with app.run_test(size=(100, 30)) as pilot:
         await app._submit("long task")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: (
+                app._turn_task is not None and app._loading is not None and app._loading.is_mounted
+            ),
+        )
         await app.action_cancel_or_quit()
-        await pilot.pause()
+        await _wait_until(pilot, lambda: app._turn_task is None)
         assert runtime.cancelled is True
-        assert app._turn_task is None
 
 
 @pytest.mark.asyncio
@@ -437,9 +460,7 @@ async def test_hosted_error_event_is_rendered_only_once(tmp_path) -> None:
     app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
     async with app.run_test(size=(100, 30)) as pilot:
         await app._submit("fail")
-        async with asyncio.timeout(2):
-            while app._turn_task is not None:
-                await pilot.pause()
+        await _wait_until(pilot, lambda: app._turn_task is None)
         assert len(list(app.query(ErrorMessage))) == 1
 
 
@@ -626,7 +647,10 @@ async def test_tool_approval_uses_dcode_style_preview_and_resumes_row(tmp_path) 
             }
         )
         decision = asyncio.create_task(app.request_approval(request))
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),
+        )
         menu = app.query_one(ApprovalMenu)
         assert "copper" in str(menu.query_one(".approval-preview Static").render())
         await pilot.press("y")
@@ -656,7 +680,10 @@ async def test_inline_approval_tab_collects_rejection_feedback(tmp_path) -> None
             }
         )
         decision = asyncio.create_task(app.request_approval(request))
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),
+        )
         await pilot.press("tab")
         reason = app.query_one(ApprovalMenu).query_one(Input)
         assert reason.display is True
@@ -689,13 +716,17 @@ async def test_cancelling_auto_notice_keeps_current_approval_pending(tmp_path, m
             }
         )
         decision = asyncio.create_task(app.request_approval(request))
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),
+        )
         await pilot.press("a")
-        await pilot.pause()
-        assert isinstance(app.screen, ChoiceScreen)
+        await _wait_until(pilot, lambda: isinstance(app.screen, ChoiceScreen))
         app.screen.dismiss("cancel")
-        await pilot.pause()
-        assert list(app.query(ApprovalMenu))
+        await _wait_until(
+            pilot,
+            lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),
+        )
         assert decision.done() is False
         await pilot.press("y")
         assert await decision is True
