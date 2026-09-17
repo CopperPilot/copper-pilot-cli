@@ -4,6 +4,12 @@ Changelog
 
 (unreleased)
 ------------
+- Fix(tests/test_release_gates.py) [AdityaNG]
+
+
+0.1.3 (2026-09-17)
+------------------
+- Release: version 0.1.3 🚀 [AdityaNG]
 - Docs. [AdityaNG]
 
 
