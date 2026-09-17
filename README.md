@@ -1,14 +1,34 @@
-<p align="center">
-  <img src="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/logo.png?raw=true" alt="CopperPilot" width="128">
-</p>
+<div align="center">
+  <a href="https://copperpilot.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/logo-dark.png?raw=true">
+      <source media="(prefers-color-scheme: light)" srcset="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/logo-light.png?raw=true">
+      <img alt="CopperPilot" src="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/logo-light.png?raw=true" width="55%">
+    </picture>
+  </a>
+</div>
 
-# CopperPilot CLI
+<div align="center">
+  <h3>The AI for PCB design, in your terminal.</h3>
+</div>
+
+<div align="center">
+  <a href="https://github.com/CopperPilot/copper-pilot-cli/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/copper-pilot-cli" alt="License"></a>
+  <a href="https://pypi.org/project/copper-pilot-cli/"><img src="https://img.shields.io/pypi/v/copper-pilot-cli" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/copper-pilot-cli/"><img src="https://img.shields.io/pypi/pyversions/copper-pilot-cli" alt="Python"></a>
+  <a href="https://github.com/CopperPilot/copper-pilot-cli/actions/workflows/ci.yml"><img src="https://github.com/CopperPilot/copper-pilot-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</div>
+
+<div align="center">
+  <a href="https://x.com/copperpilot_ai"><img src="https://img.shields.io/twitter/follow/copperpilot_ai?style=social" alt="Follow on X"></a>
+  <a href="https://www.linkedin.com/company/copperpilot"><img src="https://img.shields.io/badge/LinkedIn-CopperPilot-0A66C2?logo=linkedin&logoColor=white" alt="LinkedIn"></a>
+  <a href="https://www.youtube.com/@CopperPilot"><img src="https://img.shields.io/badge/YouTube-@CopperPilot-FF0000?logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://www.instagram.com/copperpilot.ai/"><img src="https://img.shields.io/badge/Instagram-copperpilot.ai-E4405F?logo=instagram&logoColor=white" alt="Instagram"></a>
+</div>
+
+<br>
 
 CopperPilot in your terminal: a thin, open-source client for CopperPilot electronics design agent, the best AI for PCB Design.
-
-[![CI](https://github.com/CopperPilot/copper-pilot-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/CopperPilot/copper-pilot-cli/actions/workflows/ci.yml)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
   <img src="https://github.com/CopperPilot/copper-pilot-cli/blob/main/docs/assets/esp32-mini-1-h4.gif?raw=true" alt="CopperPilot building an ESP32-MINI-1 board">

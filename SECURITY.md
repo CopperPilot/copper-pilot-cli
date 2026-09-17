@@ -11,8 +11,7 @@ This CLI can run local filesystem and shell tools on the machine where it is
 installed. Report vulnerabilities privately so they can be fixed before they
 are public.
 
-Use [GitHub private vulnerability reporting](https://github.com/CopperPilot/copper-pilot-cli/security/advisories/new)
-or email [aditya@copperpilot.ai](mailto:aditya@copperpilot.ai).
+Use [GitHub private vulnerability reporting](https://github.com/CopperPilot/copper-pilot-cli/security/advisories/new).
 
 Include the affected version (`copper-pilot --version`), the impact, and a
 high-level description of how to trigger the issue.
