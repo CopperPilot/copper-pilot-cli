@@ -1,6 +1,14 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/CopperPilot/copper-pilot-cli/main/docs/assets/logo.png" alt="CopperPilot" width="128">
+</p>
+
 # CopperPilot CLI
 
 CopperPilot in your terminal: a thin, open-source client for CopperPilot electronics design agent, the best AI for PCB Design.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/CopperPilot/copper-pilot-cli/main/docs/assets/esp32-mini-1-h4.gif" alt="CopperPilot building an ESP32-MINI-1 board">
+</p>
 
 ## Install and run
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import importlib.metadata
+import re
 import tomllib
 from pathlib import Path
 
@@ -89,3 +90,13 @@ def test_diagnostics_redact_credentials_and_content() -> None:
     value = redact("Authorization: Bearer cf_live_secret\nprivate prompt")
     assert "cf_live_secret" not in value
     assert "private prompt" not in value
+
+
+def test_readme_media_uses_absolute_github_urls() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    prefix = "https://raw.githubusercontent.com/CopperPilot/copper-pilot-cli/main/"
+    sources = re.findall(r'<img\b[^>]*\bsrc="([^"]+)"', readme)
+    assert sources, "README must include media for PyPI rendering"
+    for src in sources:
+        assert src.startswith(prefix), src
+        assert (ROOT / src.removeprefix(prefix)).is_file(), src

@@ -1,1 +1,3 @@
 src/copper_pilot_cli/_upstream/** text eol=lf
+docs/assets/*.png binary
+docs/assets/*.gif binary
