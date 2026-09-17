@@ -36,6 +36,15 @@ def test_thread_delete_requires_explicit_yes_flag() -> None:
     assert args.yes
 
 
+def test_parser_help_describes_workspace_and_approval() -> None:
+    help_text = parser().format_help()
+    assert "Workspace directory" in help_text
+    assert "--yolo" in help_text
+    assert "--auto-approve" in help_text
+    assert "copper-pilot auth" in help_text
+    assert "list|delete" in help_text
+
+
 @pytest.mark.asyncio
 async def test_headless_returns_failure_for_unsuccessful_final(tmp_path, capsys) -> None:
     class Runtime:

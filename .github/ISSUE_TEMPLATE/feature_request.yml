@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an enhancement to the CLI or LangChain adapter
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is the terminal and LangChain client. It does not host
+        the agent, pick models, or run computer use. See
+        [CONTRIBUTING.md](https://github.com/CopperPilot/copper-pilot-cli/blob/main/CONTRIBUTING.md)
+        for package scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should the CLI do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about, if any.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, related issues, or example commands.
+    validations:
+      required: false

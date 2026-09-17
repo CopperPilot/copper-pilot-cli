@@ -1,0 +1,19 @@
+name: Documentation
+description: Report missing or incorrect docs
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Where
+      description: README, docs/cli.md, CONTRIBUTING.md, `--help`, or another path.
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing
+      description: What you expected to find, and what is there instead.
+    validations:
+      required: true

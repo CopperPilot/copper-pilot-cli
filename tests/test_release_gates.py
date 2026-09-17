@@ -112,6 +112,55 @@ def test_version_file_is_source_of_truth() -> None:
     assert importlib.metadata.version("copper-pilot-cli") == file_version
 
 
+def test_community_health_files_exist() -> None:
+    required = (
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+        "SUPPORT.md",
+        "HISTORY.md",
+        "LICENSE",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/ISSUE_TEMPLATE/docs.yml",
+        ".github/dependabot.yml",
+        "docs/cli.md",
+        "docs/development.md",
+    )
+    missing = [path for path in required if not (ROOT / path).is_file()]
+    assert missing == []
+
+
+def test_issue_templates_are_github_forms() -> None:
+    for name in ("bug_report.yml", "feature_request.yml", "docs.yml"):
+        text = (ROOT / ".github/ISSUE_TEMPLATE" / name).read_text(encoding="utf-8")
+        assert re.search(r"^name:", text, flags=re.MULTILINE)
+        assert re.search(r"^description:", text, flags=re.MULTILINE)
+    bug = (ROOT / ".github/ISSUE_TEMPLATE/bug_report.yml").read_text(encoding="utf-8")
+    assert "Steps to reproduce" in bug
+    assert "required: true" in bug
+
+
+def test_readme_links_community_docs() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for needle in (
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "SECURITY.md",
+        "CODE_OF_CONDUCT.md",
+        "docs/cli.md",
+    ):
+        assert needle in readme
+
+
+def test_project_urls_include_community_links() -> None:
+    urls = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["urls"]
+    for key in ("Homepage", "Repository", "Issues", "Documentation", "Changelog"):
+        assert key in urls, key
+
+
 def test_readme_media_uses_absolute_github_urls() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     prefix = "https://github.com/CopperPilot/copper-pilot-cli/blob/main/"

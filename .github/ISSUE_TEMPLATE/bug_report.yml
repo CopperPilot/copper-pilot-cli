@@ -1,0 +1,109 @@
+name: Bug report
+description: Report a reproducible CLI problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Fill every required field so we can reproduce it.
+        Do **not** paste API keys, `auth.json`, or private board files.
+        Security issues belong in a [private advisory](https://github.com/CopperPilot/copper-pilot-cli/security/advisories/new), not here.
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: What went wrong, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, in order. Someone else should be able to follow this.
+      placeholder: |
+        1. pip install copper-pilot-cli
+        2. copper-pilot auth login
+        3. copper-pilot ./my-board -n -m "Review this board"
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead. Include the error text if there is one.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CLI version
+      description: Output of `copper-pilot --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python3 --version`.
+      placeholder: "Python 3.12.8"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - pip (PyPI)
+        - Editable (`pip install -e .`)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact `copper-pilot` invocation, if any.
+      placeholder: copper-pilot ./my-board -n -m "Review this board" --json
+    validations:
+      required: false
+  - type: dropdown
+    id: approval
+    attributes:
+      label: Approval mode
+      description: Only needed if the bug involves local files or shell tools.
+      options:
+        - Manual (default)
+        - Auto (`--auto-approve`)
+        - YOLO (`--yolo`)
+        - Not applicable
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Redact secrets before pasting. Leave blank if there are none.
+      render: text
+    validations:
+      required: false

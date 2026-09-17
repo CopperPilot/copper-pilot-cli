@@ -40,24 +40,74 @@ console = Console()
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="copper-pilot")
-    result.add_argument("workspace", nargs="?", default=".")
-    result.add_argument("-m", "--message")
-    result.add_argument("-r", "--resume", nargs="?", const="recent")
-    result.add_argument("-n", "--non-interactive", action="store_true")
-    result.add_argument("--quiet", action="store_true")
-    result.add_argument("--no-stream", action="store_true")
-    result.add_argument("--json", action="store_true")
-    result.add_argument("--mode", choices=[item.value for item in CopperMode], default="agent")
-    result.add_argument("-y", "--auto-approve", action="store_true")
-    result.add_argument("--yolo", action="store_true")
+    result = argparse.ArgumentParser(
+        prog="copper-pilot",
+        description="CopperPilot hosted agent in the terminal.",
+        epilog="Subcommands: copper-pilot auth [login|logout|status]; "
+        "copper-pilot threads list|delete.",
+    )
+    result.add_argument(
+        "workspace",
+        nargs="?",
+        default=".",
+        help="Workspace directory (default: current directory)",
+    )
+    result.add_argument("-m", "--message", help="Message to send")
+    result.add_argument(
+        "-r",
+        "--resume",
+        nargs="?",
+        const="recent",
+        help="Resume a thread; omit the id to continue the most recent one",
+    )
+    result.add_argument(
+        "-n",
+        "--non-interactive",
+        action="store_true",
+        help="Run without the Textual UI (requires --message)",
+    )
+    result.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Hide status and reasoning lines in headless streaming output",
+    )
+    result.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Print the final assistant message instead of streaming",
+    )
+    result.add_argument("--json", action="store_true", help="Emit JSON events")
+    result.add_argument(
+        "--mode",
+        choices=[item.value for item in CopperMode],
+        default="agent",
+        help="Hosted chat mode (default: agent)",
+    )
+    result.add_argument(
+        "-y",
+        "--auto-approve",
+        action="store_true",
+        help="Permit routine local writes; still prompt for unknown actions",
+    )
+    result.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Permit local side effects without prompting",
+    )
     result.add_argument("--version", action="version", version=__version__)
     result.set_defaults(command=None)
     return result
 
 
 def command_parser(command: str) -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog=f"copper-pilot {command}")
+    result = argparse.ArgumentParser(
+        prog=f"copper-pilot {command}",
+        description=(
+            "Device login for the hosted CopperPilot agent."
+            if command == "auth"
+            else "List or delete CopperPilot chat threads."
+        ),
+    )
     result.set_defaults(workspace=".", message=None, command=command)
     if command == "auth":
         result.add_argument(
@@ -65,15 +115,30 @@ def command_parser(command: str) -> argparse.ArgumentParser:
             nargs="?",
             choices=["login", "logout", "status"],
             default="status",
+            help="login opens a browser; logout clears credentials; status is default",
         )
         return result
     thread_sub = result.add_subparsers(dest="thread_action", required=True)
-    listing = thread_sub.add_parser("list")
-    listing.add_argument("--all", action="store_true")
-    listing.add_argument("--limit", type=int, default=20)
-    deleting = thread_sub.add_parser("delete")
-    deleting.add_argument("thread_id")
-    deleting.add_argument("-y", "--yes", action="store_true")
+    listing = thread_sub.add_parser("list", help="List threads for this workspace")
+    listing.add_argument(
+        "--all",
+        action="store_true",
+        help="Include threads from other workspaces",
+    )
+    listing.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum rows to print (default: 20)",
+    )
+    deleting = thread_sub.add_parser("delete", help="Delete a thread")
+    deleting.add_argument("thread_id", help="Thread identifier to delete")
+    deleting.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Do not prompt for confirmation",
+    )
     return result
 
 

@@ -50,6 +50,9 @@ copper-pilot-cli = "copper_pilot_cli:cli_main"
 [project.urls]
 Homepage = "https://copperpilot.ai"
 Repository = "https://github.com/CopperPilot/copper-pilot-cli"
+Issues = "https://github.com/CopperPilot/copper-pilot-cli/issues"
+Documentation = "https://github.com/CopperPilot/copper-pilot-cli#readme"
+Changelog = "https://github.com/CopperPilot/copper-pilot-cli/releases"
 
 [tool.hatch.version]
 source = "regex"
@@ -67,6 +70,10 @@ include = [
   "/README.md",
   "/HISTORY.md",
   "/UPSTREAM.md",
+  "/CONTRIBUTING.md",
+  "/CODE_OF_CONDUCT.md",
+  "/SECURITY.md",
+  "/SUPPORT.md",
   "/pyproject.toml",
   "/examples",
 ]
