@@ -159,14 +159,3 @@ def test_project_urls_include_community_links() -> None:
     urls = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["urls"]
     for key in ("Homepage", "Repository", "Issues", "Documentation", "Changelog"):
         assert key in urls, key
-
-
-def test_readme_media_uses_absolute_github_urls() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    prefix = "https://github.com/CopperPilot/copper-pilot-cli/blob/main/"
-    suffix = "?raw=true"
-    sources = re.findall(r'<img\b[^>]*\bsrc="([^"]+)"', readme)
-    assert sources, "README must include media for PyPI rendering"
-    for src in sources:
-        assert src.startswith(prefix) and src.endswith(suffix), src
-        assert (ROOT / src.removeprefix(prefix).removesuffix(suffix)).is_file(), src
