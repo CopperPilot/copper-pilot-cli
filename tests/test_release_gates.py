@@ -171,8 +171,9 @@ def test_pypi_badge_metadata_is_declared() -> None:
         assert f"Programming Language :: Python :: {version}" in classifiers
 
 
-def test_readme_header_includes_download_badge() -> None:
+def test_readme_header_includes_pypi_badges() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "img.shields.io/pypi/l/copper-pilot-cli" in readme
+    assert "img.shields.io/pypi/v/copper-pilot-cli" in readme
     assert "img.shields.io/pypi/pyversions/copper-pilot-cli" in readme
-    assert "img.shields.io/pepy/dt/copper-pilot-cli" in readme
+    assert "img.shields.io/pepy/dt/copper-pilot-cli" not in readme
