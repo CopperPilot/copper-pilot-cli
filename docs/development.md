@@ -10,6 +10,9 @@ src/copper_pilot_cli/   Python package
 tests/                  pytest suite
 examples/               Runnable examples
 docs/                   User and developer docs
+skills/                 Portable Agent Skill for other harnesses
+plugins/                Claude Code plugin (not in the PyPI wheel)
+.claude-plugin/         Plugin marketplace manifest
 .github/                CI, issue forms, pull request template
 ```
 

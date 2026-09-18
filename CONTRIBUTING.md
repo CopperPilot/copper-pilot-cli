@@ -63,7 +63,8 @@ Never commit `~/.copper-pilot/.state/auth.json`, API keys, or private boards.
 3. Add or update tests. Coverage of new branches in `src/copper_pilot_cli`
    (except `_upstream/`) is expected.
 4. Update docs when behavior changes: [README.md](README.md),
-   [docs/cli.md](docs/cli.md), or [docs/development.md](docs/development.md).
+   [docs/cli.md](docs/cli.md), [docs/harness.md](docs/harness.md), or
+   [docs/development.md](docs/development.md).
 5. Run `make fmt && make lint && make test`.
 6. Open a pull request with the template. Fill in the test plan.
 
@@ -78,9 +79,13 @@ Keep this client a hosted-agent frontend. Do not add:
 - Model or provider pickers
 - Local model execution
 - Computer use
-- MCP or plugin controls
+- An MCP **host**, generic plugin runtime, or MCP **client** stack
 - LangSmith tracing or content telemetry
 - Sandbox runtimes
+
+A thin MCP **server** (`copper-pilot mcp`) and a Claude Code plugin that only
+wraps that server are in scope. They delegate to the hosted agent; they do not
+reimplement it.
 
 Upstream Textual presentation is vendored under
 `src/copper_pilot_cli/_upstream/` with provenance in [UPSTREAM.md](UPSTREAM.md)

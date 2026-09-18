@@ -1,0 +1,17 @@
+{
+  "name": "copper-pilot-cli",
+  "owner": {
+    "name": "CopperPilot"
+  },
+  "metadata": {
+    "description": "CopperPilot Claude Code plugin: delegate electronics design to the hosted agent.",
+    "version": "0.1.5"
+  },
+  "plugins": [
+    {
+      "name": "copper-pilot",
+      "source": "./plugins/copper-pilot",
+      "description": "MCP conductor plus @copper-pilot and /copper-pilot-review."
+    }
+  ]
+}

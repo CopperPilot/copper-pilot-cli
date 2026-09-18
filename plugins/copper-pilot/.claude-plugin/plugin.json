@@ -1,0 +1,12 @@
+{
+  "name": "copper-pilot",
+  "displayName": "CopperPilot",
+  "description": "Delegate electronics design tasks to the CopperPilot hosted agent.",
+  "version": "0.1.5",
+  "author": {
+    "name": "CopperPilot"
+  },
+  "homepage": "https://copperpilot.ai",
+  "repository": "https://github.com/CopperPilot/copper-pilot-cli",
+  "license": "MIT"
+}

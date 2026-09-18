@@ -62,6 +62,27 @@ Both `copper-pilot` and `copper-pilot-cli` run the same program.
 `copper-pilot --help` lists flags; [docs/cli.md](docs/cli.md) is the full
 command reference.
 
+## Use from Claude Code, Cursor, or Codex
+
+CopperPilot stays the electronics agent. Copy
+[`skills/copper-pilot-review/SKILL.md`](skills/copper-pilot-review/SKILL.md) into
+your harness, or expose the same agent over MCP:
+
+```console
+claude mcp add copper-pilot -- copper-pilot mcp
+```
+
+Claude Code can also install the in-repo plugin:
+
+```text
+/plugin marketplace add CopperPilot/copper-pilot-cli
+/plugin install copper-pilot
+```
+
+That plugin starts `copper-pilot mcp` and adds `@copper-pilot` plus
+`/copper-pilot-review`. Setup for Cursor, Codex, and approvals:
+[docs/harness.md](docs/harness.md).
+
 ## Configuration
 
 - Production API: `https://copperpilot.ai`
@@ -113,8 +134,9 @@ Filesystem, search, edit, and shell execution use Deep Agents' native
 normalizes hosted tool names, approval decisions, and result envelopes.
 
 Computer use, model/provider selection, local model execution, LangSmith
-tracing, content telemetry, MCP/plugin controls, and server implementation code
-are not part of this package.
+tracing, content telemetry, MCP **host**/plugin-runtime controls, and server
+implementation code are not part of this package. A thin MCP **server**
+(`copper-pilot mcp`) that delegates to the hosted agent is.
 
 See [UPSTREAM.md](UPSTREAM.md) and [NOTICE](NOTICE) for the retained Textual
 client attribution.

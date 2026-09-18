@@ -36,6 +36,17 @@ def test_thread_delete_requires_explicit_yes_flag() -> None:
     assert args.yes
 
 
+def test_mcp_subcommand_has_no_positional_workspace() -> None:
+    args = command_parser("mcp").parse_args([])
+    assert args.command == "mcp"
+    assert args.workspace == "."
+
+
+def test_mcp_help_describes_stdio_server() -> None:
+    help_text = command_parser("mcp").format_help()
+    assert "stdio MCP server" in help_text
+
+
 def test_parser_help_describes_workspace_and_approval() -> None:
     help_text = parser().format_help()
     assert "Workspace directory" in help_text
@@ -43,6 +54,7 @@ def test_parser_help_describes_workspace_and_approval() -> None:
     assert "--auto-approve" in help_text
     assert "copper-pilot auth" in help_text
     assert "list|delete" in help_text
+    assert "copper-pilot mcp" in help_text
 
 
 @pytest.mark.asyncio
@@ -99,3 +111,4 @@ async def test_no_stream_headless_uses_checkpointed_runtime_state(tmp_path, caps
     assert runtime.streamed is True
     assert "checkpointed response" in output
     assert "[/ETH_TRD2_N]" in output
+    assert '"thread_id": "thread"' in output

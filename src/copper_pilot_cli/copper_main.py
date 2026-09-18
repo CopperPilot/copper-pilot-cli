@@ -44,7 +44,7 @@ def parser() -> argparse.ArgumentParser:
         prog="copper-pilot",
         description="CopperPilot hosted agent in the terminal.",
         epilog="Subcommands: copper-pilot auth [login|logout|status]; "
-        "copper-pilot threads list|delete.",
+        "copper-pilot threads list|delete; copper-pilot mcp.",
     )
     result.add_argument(
         "workspace",
@@ -100,15 +100,18 @@ def parser() -> argparse.ArgumentParser:
 
 
 def command_parser(command: str) -> argparse.ArgumentParser:
+    descriptions = {
+        "auth": "Device login for the hosted CopperPilot agent.",
+        "threads": "List or delete CopperPilot chat threads.",
+        "mcp": "Run a stdio MCP server that delegates to the hosted agent.",
+    }
     result = argparse.ArgumentParser(
         prog=f"copper-pilot {command}",
-        description=(
-            "Device login for the hosted CopperPilot agent."
-            if command == "auth"
-            else "List or delete CopperPilot chat threads."
-        ),
+        description=descriptions.get(command, ""),
     )
     result.set_defaults(workspace=".", message=None, command=command)
+    if command == "mcp":
+        return result
     if command == "auth":
         result.add_argument(
             "action",
@@ -265,6 +268,7 @@ async def _headless(
                     {
                         "messages": [{"role": "assistant", "content": assistant_content}],
                         "events": events,
+                        "thread_id": thread_id,
                     }
                 )
             )
@@ -330,9 +334,17 @@ def cli_main() -> None:
     argv = sys.argv[1:]
     args = (
         command_parser(argv[0]).parse_args(argv[1:])
-        if argv and argv[0] in {"auth", "threads"}
+        if argv and argv[0] in {"auth", "threads", "mcp"}
         else parser().parse_args(argv)
     )
+    if args.command == "mcp":
+        from copper_pilot_cli.copper_mcp import run_mcp
+
+        try:
+            run_mcp()
+        except KeyboardInterrupt:
+            raise SystemExit(130) from None
+        return
     try:
         raise SystemExit(asyncio.run(async_main(args)))
     except (AuthenticationError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
