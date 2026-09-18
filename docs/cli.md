@@ -6,6 +6,7 @@
 copper-pilot --help
 copper-pilot auth --help
 copper-pilot threads --help
+copper-pilot mcp --help
 ```
 
 Python 3.12 or newer is required. Install with `pip install copper-pilot-cli`.
@@ -43,6 +44,30 @@ copper-pilot ./my-board --mode plan -m "Propose a power tree"
 ```
 
 Headless mode is also used when `--message` is set and stdout is not a TTY.
+With `--json --no-stream`, the document includes `thread_id` so a later run can
+pass `--resume`.
+
+## MCP
+
+```console
+copper-pilot mcp
+```
+
+Serves a stdio MCP conductor for Claude Code, Cursor, Codex, and other MCP
+hosts. Uses the stored device-login credential. Does not open a browser. Do not
+write to stdout; the protocol owns it.
+
+| Tool | Role |
+|------|------|
+| `status` | Login state and discovered schematic/PCB paths. No hosted call. |
+| `ask` | `--mode ask`. Auto approval. Optional `thread_id`. |
+| `plan` | `--mode plan`. Auto approval. |
+| `run` | `--mode agent`. `approval` is `auto` (default) or `yolo`. |
+| `resume` | Continue `thread_id`. Same approval as `run`. |
+| `threads_list` | List threads for this workspace (`limit`, `all_workspaces`). |
+
+Workspace is the tool argument, else `CLAUDE_PROJECT_DIR`, else the process
+current directory. Manual approval is TUI-only. See [harness.md](harness.md).
 
 ## Auth
 

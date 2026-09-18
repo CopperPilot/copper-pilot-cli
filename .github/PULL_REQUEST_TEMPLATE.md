@@ -12,4 +12,4 @@ What changed and why.
 
 - [ ] Tests added or updated
 - [ ] Docs updated (README, `docs/cli.md`, or `CONTRIBUTING.md`) when behavior changes
-- [ ] No new server, model-picker, computer-use, MCP, sandbox, or LangSmith surface
+- [ ] No new hosted-server, model-picker, computer-use, MCP host/client, sandbox, or LangSmith surface. A thin `copper-pilot mcp` server that delegates to the hosted agent is allowed.

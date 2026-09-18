@@ -16,7 +16,6 @@ def test_no_forbidden_server_references_or_runtime_surfaces() -> None:
     forbidden_content = ("copper-pilot-server", "copper_pilot_core")
     forbidden_files = (
         "model_provider",
-        "mcp",
         "sandbox",
         "computer_use",
         "langsmith",
@@ -28,6 +27,23 @@ def test_no_forbidden_server_references_or_runtime_surfaces() -> None:
         assert not any(token in relative for token in forbidden_files), relative
         text = file.read_text(encoding="utf-8").lower()
         assert not any(token in text for token in forbidden_content), relative
+
+
+def test_package_does_not_import_mcp_client_or_host() -> None:
+    forbidden_imports = ("mcp.client", "mcp.cli")
+    for file in PACKAGE.rglob("*.py"):
+        tree = ast.parse(file.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.lower() for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.lower())
+        assert not any(
+            name == token or name.startswith(f"{token}.")
+            for name in imported
+            for token in forbidden_imports
+        ), file.relative_to(PACKAGE)
 
 
 def test_presentation_does_not_import_upstream_runtime_authority() -> None:
@@ -83,6 +99,7 @@ def test_both_console_aliases_are_installed() -> None:
 def test_deepagents_runtime_is_pinned_as_a_required_dependency() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert "deepagents==0.7.14" in project["dependencies"]
+    assert any(item.startswith("mcp>=") for item in project["dependencies"])
     assert "deepagents" not in project.get("optional-dependencies", {})
 
 
@@ -128,6 +145,8 @@ def test_community_health_files_exist() -> None:
         ".github/dependabot.yml",
         "docs/cli.md",
         "docs/development.md",
+        "docs/harness.md",
+        "skills/copper-pilot-review/SKILL.md",
     )
     missing = [path for path in required if not (ROOT / path).is_file()]
     assert missing == []
@@ -151,6 +170,7 @@ def test_readme_links_community_docs() -> None:
         "SECURITY.md",
         "CODE_OF_CONDUCT.md",
         "docs/cli.md",
+        "docs/harness.md",
     ):
         assert needle in readme
 
