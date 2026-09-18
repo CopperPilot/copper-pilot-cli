@@ -4,6 +4,20 @@ Changelog
 
 (unreleased)
 ------------
+- Merge pull request #6 from CopperPilot/feat/plugins. [Aditya]
+
+  feat: add MCP conductor and Claude Code plugin
+- Clarify server restrictions in PR template. [Aditya]
+
+  Updated checklist item to clarify server restrictions.
+- Feat: add MCP conductor and Claude Code plugin. [AdityaNG, Cursor]
+
+  Let Claude Code, Cursor, and Codex delegate electronics work to the hosted agent via copper-pilot mcp, a portable review skill, and an in-repo plugin.
+
+
+0.1.5 (2026-09-17)
+------------------
+- Release: version 0.1.5 🚀 [AdityaNG]
 - Fix(README.md) [AdityaNG]
 
 
