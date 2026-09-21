@@ -26,6 +26,7 @@ from helper import (
     lock_diff_tracks,
     lock_placement,
     models_3d_list_matches,
+    models_3d_poses_match,
     netlist_matches,
     pcb_matches_schematic,
     pcb_segment_count,
@@ -111,6 +112,19 @@ MODELS_3D_PROMPT = (
     "JTHDA-19F08, USB4105, USB-A wrl, 5033981892, SRP5030CC, PTS645, ACM1210, "
     "and KiCad SMD passives). Goal: the unique 3D model list matches the plan; "
     "re-render the top side."
+)
+MODELS_3D_AUDIT_PROMPT = (
+    "Audit 3D model offsets and rotations on cm5_camera/cm5_camera.kicad_pcb "
+    "against the plan 3D pose table. Camera_IMX219-D160.step at 0,0,0 rotate "
+    "0 0 0 (sophisticated module, not a brick; 90° from the trivial stock "
+    "orientation). JTHDA Mini-HDMI 0,-6.8,0 rotate -90 0 0. Micro SD 503398 "
+    "-135.95,-16.5,154.5 rotate 0,-180,-180. CM4.step 52.25,-52,0 rotate 0 0 -90 "
+    "on the DF40 courtyard, not offset by a module-width. DF40C-100DS at "
+    "-0.46,-28.385,0 and 33.46,-28.385,0 rotate -90 0 0. USB-A vertical STEP "
+    "must be a front socket, not a through-hole. H3 (B.Cu RUN header) 3D points "
+    "away from the compute module; do not leave a 1x03 in the CM keepout. "
+    "Generate detailed camera/CM/USB STEPs if the library models are coarse. "
+    "Goal: poses match the table; re-render top and bottom."
 )
 
 
@@ -216,6 +230,9 @@ def main() -> None:
         run(copper_pilot, MODELS_3D_PROMPT)
     assert footprints_have_3d_models()
     assert models_3d_list_matches()
+    if not already_done(models_3d_poses_match):
+        run(copper_pilot, MODELS_3D_AUDIT_PROMPT)
+    assert models_3d_poses_match()
     render_pcb("cm5_camera.png")
     assert high_speed_not_on_planes()
     assert drc_violations() == 0

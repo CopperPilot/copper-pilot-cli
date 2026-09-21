@@ -1,0 +1,4 @@
+(version 1)
+(rule "100Ohm_Diff layer constraint"
+	(constraint disallowed_layers In1.Cu In3.Cu In4.Cu)
+	(condition "A.NetClass == '100Ohm_Diff'"))

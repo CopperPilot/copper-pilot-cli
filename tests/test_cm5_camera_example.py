@@ -54,6 +54,9 @@ todos:
   - id: pcb-drc-3d
     content: Run DRC and assign 3D models then render.
     status: open
+  - id: pcb-3d-pose-audit
+    content: Audit 3D model offsets and rotations against the pose table, then render.
+    status: open
 overall_status: open
 ---
 
@@ -485,6 +488,27 @@ def test_models_3d_list_matches() -> None:
     assert helper.models_3d_list_matches(pcb_text=blob) is True
 
 
+def test_models_3d_poses_match() -> None:
+    parts = []
+    for pose in helper.REQUIRED_3D_POSES:
+        ox, oy, oz = pose["offset"]
+        rx, ry, rz = pose["rotate"]
+        parts.append(
+            f'(model "{pose["file"]}" (offset (xyz {ox} {oy} {oz})) '
+            f"(scale (xyz 1 1 1)) (rotate (xyz {rx} {ry} {rz})))"
+        )
+    assert helper.models_3d_poses_match(pcb_text="(kicad_pcb " + " ".join(parts) + ")") is True
+
+
+def test_models_3d_poses_match_rejects_camera_rotation() -> None:
+    blob = (
+        '(model "Camera_IMX219-D160.step" (offset (xyz 0 0 0)) '
+        "(scale (xyz 1 1 1)) (rotate (xyz 0 0 90)))"
+    )
+    with pytest.raises(AssertionError, match="Camera_IMX219"):
+        helper.models_3d_poses_match(pcb_text=blob)
+
+
 def test_pcb_matches_schematic() -> None:
     assert helper.pcb_matches_schematic(schematic_text=SCHEMATIC_REFS, pcb_text=PCB_REFS) is True
 
@@ -498,6 +522,10 @@ def test_libraries_ready(tmp_path: Path) -> None:
     )
     (tmp_path / "sym-lib-table").write_text("(sym_lib_table)\n", encoding="utf-8")
     (tmp_path / "fp-lib-table").write_text("(fp_lib_table)\n", encoding="utf-8")
+    decoy = tmp_path / "tmp" / "decoy.kicad_sym"
+    decoy.parent.mkdir()
+    decoy.write_text("SHOULD_NOT_APPEAR_XYZ", encoding="utf-8")
+    assert "SHOULD_NOT_APPEAR_XYZ" not in helper._iter_library_haystack(tmp_path)
     assert helper.libraries_ready(tmp_path) is True
 
 
@@ -607,6 +635,14 @@ def test_drc_allows_hdmi_shield_tabs_only() -> None:
                 },
                 {"severity": "error", "type": "hole_clearance"},
                 {"severity": "error", "type": "clearance"},
+                {
+                    "severity": "error",
+                    "type": "shorting_items",
+                    "items": [
+                        {"description": "PTH pad SH of J2 on F.Cu"},
+                        {"description": "Pad 199 of Module1 on B.Cu"},
+                    ],
+                },
             ],
             "unconnected_items": [
                 {
@@ -630,6 +666,7 @@ def test_drc_allows_hdmi_shield_tabs_only() -> None:
     assert types.count("copper_edge_clearance") == 1
     assert "hole_clearance" in types
     assert "clearance" in types
+    assert "shorting_items" not in types
     assert len(summary["unconnected_items"]) == 1
 
 

@@ -1,0 +1,2984 @@
+{
+  "outline": {
+    "xmin": 21.5,
+    "ymin": 25.0,
+    "xmax": 76.5,
+    "ymax": 65.0,
+    "w": 55.0,
+    "h": 40.0
+  },
+  "holes_mm": [
+    {
+      "x": 3.5,
+      "y": 3.5
+    },
+    {
+      "x": 3.5,
+      "y": 36.5
+    },
+    {
+      "x": 51.5,
+      "y": 3.5
+    },
+    {
+      "x": 51.5,
+      "y": 36.5
+    }
+  ],
+  "symbol_count": 91,
+  "footprint_count": 90,
+  "bom": [
+    {
+      "ref": "C1",
+      "value": "2.2uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 22.0,
+      "y": 22.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C10",
+      "value": "100nF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 19.5,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C11",
+      "value": "10uF",
+      "lib_id": "C",
+      "footprint": "C_0805_2012Metric",
+      "models": [
+        "C_0805_2012Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 46.0,
+      "y": 36.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C12",
+      "value": "2.2uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 27.0,
+      "y": 22.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C14",
+      "value": "100nF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 29.5,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C15",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 27.0,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C16",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 17.5,
+      "y": 12.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C17",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 30.2,
+      "y": 7.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C18",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 23.0,
+      "y": 7.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C19",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 20.5,
+      "y": 8.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C2",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 22.0,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C20",
+      "value": "10pF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 41.5,
+      "y": 13.48,
+      "rot": 90.0
+    },
+    {
+      "ref": "C21",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 43.5,
+      "y": 12.48,
+      "rot": 90.0
+    },
+    {
+      "ref": "C22",
+      "value": "10uF",
+      "lib_id": "C",
+      "footprint": "C_0805_2012Metric",
+      "models": [
+        "C_0805_2012Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 46.5,
+      "y": 10.0,
+      "rot": -90.0
+    },
+    {
+      "ref": "C23",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 34.5,
+      "y": 38.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C24",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 43.5,
+      "y": 10.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C25",
+      "value": "22uF",
+      "lib_id": "C",
+      "footprint": "C_0805_2012Metric",
+      "models": [
+        "C_0805_2012Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 17.5,
+      "y": 16.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C26",
+      "value": "22uF",
+      "lib_id": "C",
+      "footprint": "C_0805_2012Metric",
+      "models": [
+        "C_0805_2012Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 17.5,
+      "y": 22.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C27",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 21.5,
+      "y": 8.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C28",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 8.0,
+      "y": 6.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C29",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 38.5,
+      "y": 12.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C3",
+      "value": "100nF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 24.5,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C30",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 36.0,
+      "y": 10.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C31",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 33.0,
+      "y": 10.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C32",
+      "value": "0.1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 35.0,
+      "y": 21.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C4",
+      "value": "10uF",
+      "lib_id": "C",
+      "footprint": "C_0805_2012Metric",
+      "models": [
+        "C_0805_2012Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 49.5,
+      "y": 36.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C5",
+      "value": "2.2uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 32.0,
+      "y": 22.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "C6",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 16.5,
+      "y": 12.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C7",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 26.5,
+      "y": 9.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C8",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 18.5,
+      "y": 12.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "C9",
+      "value": "1uF",
+      "lib_id": "C",
+      "footprint": "C_0402_1005Metric",
+      "models": [
+        "C_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 17.0,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "DSI1",
+      "value": "DSI_15P",
+      "lib_id": "DSI_15P",
+      "footprint": "Molex_200528-0150_1x15-1MP_P1.00mm_Horizontal",
+      "models": [
+        "TE_1-84952-5_1x15-1MP_P1.0mm_Horizontal.step"
+      ],
+      "layer": "F.Cu",
+      "x": 27.0,
+      "y": 4.39,
+      "rot": 180.0
+    },
+    {
+      "ref": "FB1",
+      "value": "120R",
+      "lib_id": "L",
+      "footprint": "R_0603_1608Metric",
+      "models": [
+        "R_0603_1608Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 17.0,
+      "y": 22.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "H3",
+      "value": "Conn_01x03",
+      "lib_id": "Conn_01x03",
+      "footprint": "PinHeader_1x03_P2.54mm_Vertical",
+      "models": [
+        "PinHeader_1x03_P2.54mm_Vertical.step"
+      ],
+      "layer": "B.Cu",
+      "x": 45.5,
+      "y": 24.54,
+      "rot": 180.0
+    },
+    {
+      "ref": "H4",
+      "value": "Conn_01x03",
+      "lib_id": "Conn_01x03",
+      "footprint": "PinHeader_1x03_P2.54mm_Vertical",
+      "models": [
+        "PinHeader_1x03_P2.54mm_Vertical.step"
+      ],
+      "layer": "F.Cu",
+      "x": 49.0,
+      "y": 19.38,
+      "rot": 0.0
+    },
+    {
+      "ref": "H5",
+      "value": "Conn_01x03",
+      "lib_id": "Conn_01x03",
+      "footprint": "PinHeader_1x03_P2.54mm_Vertical",
+      "models": [
+        "PinHeader_1x03_P2.54mm_Vertical.step"
+      ],
+      "layer": "F.Cu",
+      "x": 53.0,
+      "y": 24.5,
+      "rot": 180.0
+    },
+    {
+      "ref": "HDMI1",
+      "value": "HDMI_Mini_C",
+      "lib_id": "HDMI_Mini_C",
+      "footprint": "HDMI_Mini-C_Molex_47151-0001",
+      "models": [
+        "JTHDA-19F08.STEP"
+      ],
+      "layer": "F.Cu",
+      "x": 8.0,
+      "y": 5.52,
+      "rot": 180.0
+    },
+    {
+      "ref": "J1",
+      "value": "Camera_Module_IMX219-D160",
+      "lib_id": "IMX219_30P",
+      "footprint": "Camera_Module_IMX219-D160",
+      "models": [
+        "Camera_IMX219-D160.step"
+      ],
+      "layer": "F.Cu",
+      "x": 37.212,
+      "y": 18.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "J2",
+      "value": "USB_A_Vertical",
+      "lib_id": "USB_A_Vertical",
+      "footprint": "MOLEX_USB_67298-4090",
+      "models": [
+        "USB_A_Molex_105057-0001_Vertical.wrl"
+      ],
+      "layer": "F.Cu",
+      "x": 43.5,
+      "y": 6.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "Key1",
+      "value": "SW_Push_SPST",
+      "lib_id": "SW_Push_SPST",
+      "footprint": "SW_SPST_PTS645Sx43SMTR92",
+      "models": [
+        "SW_SPST_PTS645Sx43SMTR92.step"
+      ],
+      "layer": "F.Cu",
+      "x": 45.52,
+      "y": 36.25,
+      "rot": 0.0
+    },
+    {
+      "ref": "L1",
+      "value": "MCF1210BF2-900T01",
+      "lib_id": "MCF1210BF2-900T01",
+      "footprint": "L_CommonModeChoke_Coilank_ACM1210",
+      "models": [
+        "L_CommonModeChoke_Coilank_ACM1210.step"
+      ],
+      "layer": "F.Cu",
+      "x": 34.5,
+      "y": 8.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "L2",
+      "value": "MCF1210BF2-900T01",
+      "lib_id": "MCF1210BF2-900T01",
+      "footprint": "L_CommonModeChoke_Coilank_ACM1210",
+      "models": [
+        "L_CommonModeChoke_Coilank_ACM1210.step"
+      ],
+      "layer": "F.Cu",
+      "x": 28.5,
+      "y": 8.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "L3",
+      "value": "MCF1210BF2-900T01",
+      "lib_id": "MCF1210BF2-900T01",
+      "footprint": "L_CommonModeChoke_Coilank_ACM1210",
+      "models": [
+        "L_CommonModeChoke_Coilank_ACM1210.step"
+      ],
+      "layer": "F.Cu",
+      "x": 31.5,
+      "y": 8.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "L5",
+      "value": "LED Red",
+      "lib_id": "LED",
+      "footprint": "LED_0603_1608Metric",
+      "models": [
+        "LED_0603_1608Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 2.0,
+      "y": 21.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "L6",
+      "value": "LED Green",
+      "lib_id": "LED",
+      "footprint": "LED_0603_1608Metric",
+      "models": [
+        "LED_0603_1608Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 6.0,
+      "y": 21.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "L7",
+      "value": "4.7uH",
+      "lib_id": "L",
+      "footprint": "L_Bourns_SRP5030CC",
+      "models": [
+        "SRP5030CC.stp"
+      ],
+      "layer": "F.Cu",
+      "x": 51.0,
+      "y": 12.0,
+      "rot": -90.0
+    },
+    {
+      "ref": "Module1",
+      "value": "ComputeModule4-CM4",
+      "lib_id": "ComputeModule4-CM4",
+      "footprint": "Raspberry-Pi-4-Compute-Module",
+      "models": [
+        "DF40C-100DS.stp",
+        "DF40C-100DS.stp",
+        "CM4.step"
+      ],
+      "layer": "B.Cu",
+      "x": 51.3,
+      "y": 36.42,
+      "rot": 90.0
+    },
+    {
+      "ref": "PI1",
+      "value": "Raspberry_Pi_40Pin_GPIO",
+      "lib_id": "Raspberry_Pi_40Pin_GPIO",
+      "footprint": "PinHeader_2x20_P2.54mm_Vertical",
+      "models": [
+        "PinHeader_2x20_P2.54mm_Vertical.step"
+      ],
+      "layer": "F.Cu",
+      "x": 3.5,
+      "y": 30.775,
+      "rot": 90.0
+    },
+    {
+      "ref": "Q1",
+      "value": "DMG1012T",
+      "lib_id": "DMG1012T",
+      "footprint": "Texas_DRT-3",
+      "models": [
+        "Texas_DRT-3.step"
+      ],
+      "layer": "B.Cu",
+      "x": 14.0,
+      "y": 18.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "Q2",
+      "value": "DMG1012T",
+      "lib_id": "DMG1012T",
+      "footprint": "Texas_DRT-3",
+      "models": [
+        "Texas_DRT-3.step"
+      ],
+      "layer": "B.Cu",
+      "x": 11.0,
+      "y": 18.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "R1",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 8.5,
+      "y": 13.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R10",
+      "value": "22R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 41.5,
+      "y": 16.01,
+      "rot": 90.0
+    },
+    {
+      "ref": "R11",
+      "value": "10k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 10.0,
+      "y": 21.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R12",
+      "value": "1k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 4.0,
+      "y": 21.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R13",
+      "value": "1k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 8.0,
+      "y": 21.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R14",
+      "value": "10k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 32.0,
+      "y": 7.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R15",
+      "value": "100k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 32.0,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R16",
+      "value": "10R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 44.5,
+      "y": 12.45,
+      "rot": 90.0
+    },
+    {
+      "ref": "R17",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 34.5,
+      "y": 14.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R19",
+      "value": "100k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 47.5,
+      "y": 15.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R2",
+      "value": "5.1k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 43.5,
+      "y": 33.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R20",
+      "value": "100k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 44.5,
+      "y": 10.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R21",
+      "value": "20k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 41.5,
+      "y": 11.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R22",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 5.0,
+      "y": 7.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R24",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 5.0,
+      "y": 9.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R28",
+      "value": "47k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 5.0,
+      "y": 11.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R29",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 11.5,
+      "y": 13.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R3",
+      "value": "5.1k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 43.0,
+      "y": 36.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R30",
+      "value": "10k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 35.0,
+      "y": 18.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R31",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 13.5,
+      "y": 13.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R32",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 15.5,
+      "y": 13.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R33",
+      "value": "0R",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 5.0,
+      "y": 13.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R34",
+      "value": "10k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 39.0,
+      "y": 10.5,
+      "rot": 90.0
+    },
+    {
+      "ref": "R35",
+      "value": "4.7k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 23.5,
+      "y": 8.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R36",
+      "value": "4.7k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "F.Cu",
+      "x": 22.5,
+      "y": 8.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R4",
+      "value": "4.7k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 14.0,
+      "y": 16.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R5",
+      "value": "2.2k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 14.0,
+      "y": 21.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R7",
+      "value": "4.7k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 11.0,
+      "y": 16.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "R8",
+      "value": "2.2k",
+      "lib_id": "R",
+      "footprint": "R_0402_1005Metric",
+      "models": [
+        "R_0402_1005Metric.step"
+      ],
+      "layer": "B.Cu",
+      "x": 11.0,
+      "y": 21.0,
+      "rot": 90.0
+    },
+    {
+      "ref": "TF1",
+      "value": "Micro_SD_Card_Det",
+      "lib_id": "Micro_SD_Card_Det",
+      "footprint": "SDCARD_MOLEX_503398-1892",
+      "models": [
+        "5033981892.stp"
+      ],
+      "layer": "F.Cu",
+      "x": 7.5,
+      "y": 18.5,
+      "rot": -90.0
+    },
+    {
+      "ref": "Type_C1",
+      "value": "USB_C_Receptacle_USB2.0_16P",
+      "lib_id": "USB_C_Receptacle_USB2.0_16P",
+      "footprint": "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "models": [
+        "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step"
+      ],
+      "layer": "F.Cu",
+      "x": 9.5,
+      "y": 37.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "U1",
+      "value": "RT9193-28GB",
+      "lib_id": "RT9193",
+      "footprint": "SOT-23-5",
+      "models": [
+        "SOT-23-5.step"
+      ],
+      "layer": "B.Cu",
+      "x": 22.0,
+      "y": 18.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "U2",
+      "value": "RT9193-18GB",
+      "lib_id": "RT9193",
+      "footprint": "SOT-23-5",
+      "models": [
+        "SOT-23-5.step"
+      ],
+      "layer": "B.Cu",
+      "x": 17.0,
+      "y": 18.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "U3",
+      "value": "RT9013-12",
+      "lib_id": "RT9013-12",
+      "footprint": "SOT-23-5",
+      "models": [
+        "SOT-23-5.step"
+      ],
+      "layer": "B.Cu",
+      "x": 27.0,
+      "y": 18.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "U4",
+      "value": "DIO7003HCST5",
+      "lib_id": "DIO7003HCST5",
+      "footprint": "SOT-23-5",
+      "models": [
+        "SOT-23-5.step"
+      ],
+      "layer": "B.Cu",
+      "x": 27.0,
+      "y": 7.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "U5",
+      "value": "MP1658GTF-Z",
+      "lib_id": "MP1658GTF-Z",
+      "footprint": "TSOT-23-6",
+      "models": [
+        "TSOT-23-6.step"
+      ],
+      "layer": "F.Cu",
+      "x": 44.638,
+      "y": 15.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "U6",
+      "value": "FSUSB42MX",
+      "lib_id": "FSUSB42MX",
+      "footprint": "UQFN-10_1.4x1.8mm_P0.4mm",
+      "models": [
+        "UQFN-10_1.4x1.8mm_P0.4mm.step"
+      ],
+      "layer": "B.Cu",
+      "x": 8.0,
+      "y": 10.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "U7",
+      "value": "DIO7003HCST5",
+      "lib_id": "DIO7003HCST5",
+      "footprint": "SOT-23-5",
+      "models": [
+        "SOT-23-5.step"
+      ],
+      "layer": "B.Cu",
+      "x": 32.0,
+      "y": 18.5,
+      "rot": 0.0
+    },
+    {
+      "ref": "U8",
+      "value": "STMPS2171STR",
+      "lib_id": "STMPS2171STR",
+      "footprint": "SOT-23-5",
+      "models": [
+        "SOT-23-5.step"
+      ],
+      "layer": "B.Cu",
+      "x": 37.0,
+      "y": 7.0,
+      "rot": 0.0
+    },
+    {
+      "ref": "X1",
+      "value": "OSC_24MHz",
+      "lib_id": "OSC_24MHz",
+      "footprint": "Crystal_SMD_3225-4Pin_3.2x2.5mm",
+      "models": [
+        "Crystal_SMD_3225-4Pin_3.2x2.5mm.step"
+      ],
+      "layer": "F.Cu",
+      "x": 41.65,
+      "y": 19.9,
+      "rot": 90.0
+    }
+  ],
+  "placement": {
+    "C1": {
+      "x": 22.0,
+      "y": 22.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "2.2uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C10": {
+      "x": 19.5,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "100nF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C11": {
+      "x": 46.0,
+      "y": 36.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0805_2012Metric",
+      "value": "10uF",
+      "models": [
+        "C_0805_2012Metric.step"
+      ]
+    },
+    "C12": {
+      "x": 27.0,
+      "y": 22.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "2.2uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C14": {
+      "x": 29.5,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "100nF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C15": {
+      "x": 27.0,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C16": {
+      "x": 17.5,
+      "y": 12.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C17": {
+      "x": 30.2,
+      "y": 7.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C18": {
+      "x": 23.0,
+      "y": 7.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C19": {
+      "x": 20.5,
+      "y": 8.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C2": {
+      "x": 22.0,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C20": {
+      "x": 41.5,
+      "y": 13.48,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "10pF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C21": {
+      "x": 43.5,
+      "y": 12.48,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C22": {
+      "x": 46.5,
+      "y": 10.0,
+      "rot": -90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0805_2012Metric",
+      "value": "10uF",
+      "models": [
+        "C_0805_2012Metric.step"
+      ]
+    },
+    "C23": {
+      "x": 34.5,
+      "y": 38.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C24": {
+      "x": 43.5,
+      "y": 10.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C25": {
+      "x": 17.5,
+      "y": 16.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0805_2012Metric",
+      "value": "22uF",
+      "models": [
+        "C_0805_2012Metric.step"
+      ]
+    },
+    "C26": {
+      "x": 17.5,
+      "y": 22.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0805_2012Metric",
+      "value": "22uF",
+      "models": [
+        "C_0805_2012Metric.step"
+      ]
+    },
+    "C27": {
+      "x": 21.5,
+      "y": 8.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C28": {
+      "x": 8.0,
+      "y": 6.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C29": {
+      "x": 38.5,
+      "y": 12.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C3": {
+      "x": 24.5,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "100nF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C30": {
+      "x": 36.0,
+      "y": 10.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C31": {
+      "x": 33.0,
+      "y": 10.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C32": {
+      "x": 35.0,
+      "y": 21.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "0.1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C4": {
+      "x": 49.5,
+      "y": 36.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0805_2012Metric",
+      "value": "10uF",
+      "models": [
+        "C_0805_2012Metric.step"
+      ]
+    },
+    "C5": {
+      "x": 32.0,
+      "y": 22.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "2.2uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C6": {
+      "x": 16.5,
+      "y": 12.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C7": {
+      "x": 26.5,
+      "y": 9.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C8": {
+      "x": 18.5,
+      "y": 12.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "C9": {
+      "x": 17.0,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "C_0402_1005Metric",
+      "value": "1uF",
+      "models": [
+        "C_0402_1005Metric.step"
+      ]
+    },
+    "DSI1": {
+      "x": 27.0,
+      "y": 4.39,
+      "rot": 180.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "Molex_200528-0150_1x15-1MP_P1.00mm_Horizontal",
+      "value": "DSI_15P",
+      "models": [
+        "TE_1-84952-5_1x15-1MP_P1.0mm_Horizontal.step"
+      ]
+    },
+    "FB1": {
+      "x": 17.0,
+      "y": 22.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "R_0603_1608Metric",
+      "value": "120R",
+      "models": [
+        "R_0603_1608Metric.step"
+      ]
+    },
+    "H3": {
+      "x": 45.5,
+      "y": 24.54,
+      "rot": 180.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "PinHeader_1x03_P2.54mm_Vertical",
+      "value": "Conn_01x03",
+      "models": [
+        "PinHeader_1x03_P2.54mm_Vertical.step"
+      ]
+    },
+    "H4": {
+      "x": 49.0,
+      "y": 19.38,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "PinHeader_1x03_P2.54mm_Vertical",
+      "value": "Conn_01x03",
+      "models": [
+        "PinHeader_1x03_P2.54mm_Vertical.step"
+      ]
+    },
+    "H5": {
+      "x": 53.0,
+      "y": 24.5,
+      "rot": 180.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "PinHeader_1x03_P2.54mm_Vertical",
+      "value": "Conn_01x03",
+      "models": [
+        "PinHeader_1x03_P2.54mm_Vertical.step"
+      ]
+    },
+    "HDMI1": {
+      "x": 8.0,
+      "y": 5.52,
+      "rot": 180.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "HDMI_Mini-C_Molex_47151-0001",
+      "value": "HDMI_Mini_C",
+      "models": [
+        "JTHDA-19F08.STEP"
+      ]
+    },
+    "J1": {
+      "x": 37.212,
+      "y": 18.0,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "Camera_Module_IMX219-D160",
+      "value": "Camera_Module_IMX219-D160",
+      "models": [
+        "Camera_IMX219-D160.step"
+      ]
+    },
+    "J2": {
+      "x": 43.5,
+      "y": 6.5,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "MOLEX_USB_67298-4090",
+      "value": "USB_A_Vertical",
+      "models": [
+        "USB_A_Molex_105057-0001_Vertical.wrl"
+      ]
+    },
+    "Key1": {
+      "x": 45.52,
+      "y": 36.25,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "SW_SPST_PTS645Sx43SMTR92",
+      "value": "SW_Push_SPST",
+      "models": [
+        "SW_SPST_PTS645Sx43SMTR92.step"
+      ]
+    },
+    "L1": {
+      "x": 34.5,
+      "y": 8.0,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "L_CommonModeChoke_Coilank_ACM1210",
+      "value": "MCF1210BF2-900T01",
+      "models": [
+        "L_CommonModeChoke_Coilank_ACM1210.step"
+      ]
+    },
+    "L2": {
+      "x": 28.5,
+      "y": 8.0,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "L_CommonModeChoke_Coilank_ACM1210",
+      "value": "MCF1210BF2-900T01",
+      "models": [
+        "L_CommonModeChoke_Coilank_ACM1210.step"
+      ]
+    },
+    "L3": {
+      "x": 31.5,
+      "y": 8.0,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "L_CommonModeChoke_Coilank_ACM1210",
+      "value": "MCF1210BF2-900T01",
+      "models": [
+        "L_CommonModeChoke_Coilank_ACM1210.step"
+      ]
+    },
+    "L5": {
+      "x": 2.0,
+      "y": 21.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "LED_0603_1608Metric",
+      "value": "LED Red",
+      "models": [
+        "LED_0603_1608Metric.step"
+      ]
+    },
+    "L6": {
+      "x": 6.0,
+      "y": 21.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "LED_0603_1608Metric",
+      "value": "LED Green",
+      "models": [
+        "LED_0603_1608Metric.step"
+      ]
+    },
+    "L7": {
+      "x": 51.0,
+      "y": 12.0,
+      "rot": -90.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "L_Bourns_SRP5030CC",
+      "value": "4.7uH",
+      "models": [
+        "SRP5030CC.stp"
+      ]
+    },
+    "Module1": {
+      "x": 51.3,
+      "y": 36.42,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 1.0,
+      "footprint": "Raspberry-Pi-4-Compute-Module",
+      "value": "ComputeModule4-CM4",
+      "models": [
+        "DF40C-100DS.stp",
+        "DF40C-100DS.stp",
+        "CM4.step"
+      ]
+    },
+    "PI1": {
+      "x": 3.5,
+      "y": 30.775,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "PinHeader_2x20_P2.54mm_Vertical",
+      "value": "Raspberry_Pi_40Pin_GPIO",
+      "models": [
+        "PinHeader_2x20_P2.54mm_Vertical.step"
+      ]
+    },
+    "Q1": {
+      "x": 14.0,
+      "y": 18.5,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "Texas_DRT-3",
+      "value": "DMG1012T",
+      "models": [
+        "Texas_DRT-3.step"
+      ]
+    },
+    "Q2": {
+      "x": 11.0,
+      "y": 18.5,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "Texas_DRT-3",
+      "value": "DMG1012T",
+      "models": [
+        "Texas_DRT-3.step"
+      ]
+    },
+    "R1": {
+      "x": 8.5,
+      "y": 13.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R10": {
+      "x": 41.5,
+      "y": 16.01,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "22R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R11": {
+      "x": 10.0,
+      "y": 21.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "10k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R12": {
+      "x": 4.0,
+      "y": 21.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "1k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R13": {
+      "x": 8.0,
+      "y": 21.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "1k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R14": {
+      "x": 32.0,
+      "y": 7.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "10k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R15": {
+      "x": 32.0,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "100k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R16": {
+      "x": 44.5,
+      "y": 12.45,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "10R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R17": {
+      "x": 34.5,
+      "y": 14.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R19": {
+      "x": 47.5,
+      "y": 15.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "100k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R2": {
+      "x": 43.5,
+      "y": 33.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "5.1k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R20": {
+      "x": 44.5,
+      "y": 10.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "100k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R21": {
+      "x": 41.5,
+      "y": 11.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "20k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R22": {
+      "x": 5.0,
+      "y": 7.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R24": {
+      "x": 5.0,
+      "y": 9.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R28": {
+      "x": 5.0,
+      "y": 11.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "47k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R29": {
+      "x": 11.5,
+      "y": 13.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R3": {
+      "x": 43.0,
+      "y": 36.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "5.1k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R30": {
+      "x": 35.0,
+      "y": 18.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "10k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R31": {
+      "x": 13.5,
+      "y": 13.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R32": {
+      "x": 15.5,
+      "y": 13.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R33": {
+      "x": 5.0,
+      "y": 13.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "0R",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R34": {
+      "x": 39.0,
+      "y": 10.5,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "10k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R35": {
+      "x": 23.5,
+      "y": 8.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "4.7k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R36": {
+      "x": 22.5,
+      "y": 8.0,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "4.7k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R4": {
+      "x": 14.0,
+      "y": 16.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "4.7k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R5": {
+      "x": 14.0,
+      "y": 21.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "2.2k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R7": {
+      "x": 11.0,
+      "y": 16.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "4.7k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "R8": {
+      "x": 11.0,
+      "y": 21.0,
+      "rot": 90.0,
+      "layer": "B.Cu",
+      "tol": 2.0,
+      "footprint": "R_0402_1005Metric",
+      "value": "2.2k",
+      "models": [
+        "R_0402_1005Metric.step"
+      ]
+    },
+    "TF1": {
+      "x": 7.5,
+      "y": 18.5,
+      "rot": -90.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "SDCARD_MOLEX_503398-1892",
+      "value": "Micro_SD_Card_Det",
+      "models": [
+        "5033981892.stp"
+      ]
+    },
+    "Type_C1": {
+      "x": 9.5,
+      "y": 37.5,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.0,
+      "footprint": "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "value": "USB_C_Receptacle_USB2.0_16P",
+      "models": [
+        "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step"
+      ]
+    },
+    "U1": {
+      "x": 22.0,
+      "y": 18.5,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "SOT-23-5",
+      "value": "RT9193-28GB",
+      "models": [
+        "SOT-23-5.step"
+      ]
+    },
+    "U2": {
+      "x": 17.0,
+      "y": 18.5,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "SOT-23-5",
+      "value": "RT9193-18GB",
+      "models": [
+        "SOT-23-5.step"
+      ]
+    },
+    "U3": {
+      "x": 27.0,
+      "y": 18.5,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "SOT-23-5",
+      "value": "RT9013-12",
+      "models": [
+        "SOT-23-5.step"
+      ]
+    },
+    "U4": {
+      "x": 27.0,
+      "y": 7.0,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "SOT-23-5",
+      "value": "DIO7003HCST5",
+      "models": [
+        "SOT-23-5.step"
+      ]
+    },
+    "U5": {
+      "x": 44.638,
+      "y": 15.5,
+      "rot": 0.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "TSOT-23-6",
+      "value": "MP1658GTF-Z",
+      "models": [
+        "TSOT-23-6.step"
+      ]
+    },
+    "U6": {
+      "x": 8.0,
+      "y": 10.0,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "UQFN-10_1.4x1.8mm_P0.4mm",
+      "value": "FSUSB42MX",
+      "models": [
+        "UQFN-10_1.4x1.8mm_P0.4mm.step"
+      ]
+    },
+    "U7": {
+      "x": 32.0,
+      "y": 18.5,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "SOT-23-5",
+      "value": "DIO7003HCST5",
+      "models": [
+        "SOT-23-5.step"
+      ]
+    },
+    "U8": {
+      "x": 37.0,
+      "y": 7.0,
+      "rot": 0.0,
+      "layer": "B.Cu",
+      "tol": 1.5,
+      "footprint": "SOT-23-5",
+      "value": "STMPS2171STR",
+      "models": [
+        "SOT-23-5.step"
+      ]
+    },
+    "X1": {
+      "x": 41.65,
+      "y": 19.9,
+      "rot": 90.0,
+      "layer": "F.Cu",
+      "tol": 1.5,
+      "footprint": "Crystal_SMD_3225-4Pin_3.2x2.5mm",
+      "value": "OSC_24MHz",
+      "models": [
+        "Crystal_SMD_3225-4Pin_3.2x2.5mm.step"
+      ]
+    }
+  },
+  "required_nets": {
+    "1V2": [
+      "C15",
+      "C7",
+      "J1",
+      "U3"
+    ],
+    "1V8": [
+      "C16",
+      "C6",
+      "C9",
+      "J1",
+      "Q1",
+      "Q2",
+      "R5",
+      "R8",
+      "U2",
+      "X1"
+    ],
+    "2V8": [
+      "C2",
+      "C8",
+      "J1",
+      "U1"
+    ],
+    "BT_EN": [
+      "Module1",
+      "R32"
+    ],
+    "CAM0_CLK_N": [
+      "L3",
+      "Module1"
+    ],
+    "CAM0_CLK_P": [
+      "L3",
+      "Module1"
+    ],
+    "CAM0_D0_N": [
+      "L1",
+      "Module1"
+    ],
+    "CAM0_D0_P": [
+      "L1",
+      "Module1"
+    ],
+    "CAM0_D1_N": [
+      "L2",
+      "Module1"
+    ],
+    "CAM0_D1_P": [
+      "L2",
+      "Module1"
+    ],
+    "CAM_FB1_OUT": [
+      "C1",
+      "FB1",
+      "U1"
+    ],
+    "CAM_GPIO": [
+      "Module1",
+      "R17"
+    ],
+    "CAM_GPIO'": [
+      "J1",
+      "R15",
+      "R17",
+      "U1",
+      "U2",
+      "U3"
+    ],
+    "CC1": [
+      "R3",
+      "Type_C1"
+    ],
+    "CC2": [
+      "R2",
+      "Type_C1"
+    ],
+    "CM4_1V8": [
+      "H5",
+      "Module1"
+    ],
+    "CM4_3V3": [
+      "C28",
+      "H5",
+      "Module1",
+      "U6"
+    ],
+    "CM4_5V": [
+      "C11",
+      "C17",
+      "C22",
+      "C23",
+      "C30",
+      "C4",
+      "Module1",
+      "PI1",
+      "R14",
+      "R19",
+      "R34",
+      "Type_C1",
+      "U4",
+      "U5",
+      "U8"
+    ],
+    "CSI_CLK_N": [
+      "J1",
+      "L3"
+    ],
+    "CSI_CLK_P": [
+      "J1",
+      "L3"
+    ],
+    "CSI_D0_N": [
+      "J1",
+      "L1"
+    ],
+    "CSI_D0_P": [
+      "J1",
+      "L1"
+    ],
+    "CSI_D1_N": [
+      "J1",
+      "L2"
+    ],
+    "CSI_D1_P": [
+      "J1",
+      "L2"
+    ],
+    "DSI1_CLK_N": [
+      "DSI1",
+      "Module1"
+    ],
+    "DSI1_CLK_P": [
+      "DSI1",
+      "Module1"
+    ],
+    "DSI1_D0_N": [
+      "DSI1",
+      "Module1"
+    ],
+    "DSI1_D0_P": [
+      "DSI1",
+      "Module1"
+    ],
+    "DSI1_D1_N": [
+      "DSI1",
+      "Module1"
+    ],
+    "DSI1_D1_P": [
+      "DSI1",
+      "Module1"
+    ],
+    "EEPROM_WP": [
+      "Module1",
+      "R29"
+    ],
+    "GPIO10": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO11": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO12": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO13": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO14": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO15": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO16": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO17": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO18": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO19": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO2": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO20": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO21": [
+      "Key1",
+      "Module1",
+      "PI1",
+      "R11"
+    ],
+    "GPIO22": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO23": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO24": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO25": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO26": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO27": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO3": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO4": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO5": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO6": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO7": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO8": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO9": [
+      "Module1",
+      "PI1"
+    ],
+    "GPIO_VREF": [
+      "H5",
+      "Module1",
+      "R4",
+      "R7"
+    ],
+    "HDMI0_CEC": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_CLK_N": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_CLK_P": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_HOTPLUG": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_SCL": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_SDA": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_TX0_N": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_TX0_P": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_TX1_N": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_TX1_P": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_TX2_N": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI0_TX2_P": [
+      "HDMI1",
+      "Module1"
+    ],
+    "HDMI_5V": [
+      "C18",
+      "HDMI1",
+      "U4"
+    ],
+    "HDMI_5V_EN": [
+      "R14",
+      "U4"
+    ],
+    "ID_SC": [
+      "Module1",
+      "PI1"
+    ],
+    "ID_SD": [
+      "Module1",
+      "PI1"
+    ],
+    "L5_K": [
+      "L5",
+      "R12"
+    ],
+    "L6_K": [
+      "L6",
+      "R13"
+    ],
+    "LED_G": [
+      "Module1",
+      "R13"
+    ],
+    "MCLK": [
+      "C20",
+      "J1",
+      "R10"
+    ],
+    "MP1658_BST": [
+      "C24",
+      "R16",
+      "U5"
+    ],
+    "MP1658_BST_R": [
+      "C21",
+      "R16"
+    ],
+    "MP1658_EN": [
+      "R19",
+      "U5"
+    ],
+    "MP1658_FB": [
+      "R20",
+      "R21",
+      "U5"
+    ],
+    "MP1658_SW": [
+      "C24",
+      "L7",
+      "U5"
+    ],
+    "PI_BOOT": [
+      "H4",
+      "Module1"
+    ],
+    "PI_GLOBAL_EN": [
+      "H3",
+      "Module1"
+    ],
+    "PI_RUN": [
+      "H3",
+      "Module1"
+    ],
+    "PWR_3V3": [
+      "C12",
+      "C19",
+      "C25",
+      "C26",
+      "C27",
+      "C31",
+      "C5",
+      "DSI1",
+      "FB1",
+      "L5",
+      "L6",
+      "L7",
+      "PI1",
+      "R11",
+      "R20",
+      "R35",
+      "R36",
+      "U2",
+      "U3",
+      "U7"
+    ],
+    "SCL0": [
+      "DSI1",
+      "Module1",
+      "Q1",
+      "R35",
+      "R4"
+    ],
+    "SCL_1V8": [
+      "J1",
+      "Q1",
+      "R5"
+    ],
+    "SDA0": [
+      "DSI1",
+      "Module1",
+      "Q2",
+      "R36",
+      "R7"
+    ],
+    "SDA_1V8": [
+      "J1",
+      "Q2",
+      "R8"
+    ],
+    "SD_3.3V": [
+      "C32",
+      "TF1",
+      "U7"
+    ],
+    "SD_CLK": [
+      "Module1",
+      "TF1"
+    ],
+    "SD_CMD": [
+      "Module1",
+      "TF1"
+    ],
+    "SD_DAT0": [
+      "Module1",
+      "TF1"
+    ],
+    "SD_DAT1": [
+      "Module1",
+      "TF1"
+    ],
+    "SD_DAT2": [
+      "Module1",
+      "TF1"
+    ],
+    "SD_DAT3": [
+      "Module1",
+      "TF1"
+    ],
+    "SD_PWREN": [
+      "Module1",
+      "R30",
+      "U7"
+    ],
+    "SD_VDD_Override": [
+      "Module1",
+      "R1"
+    ],
+    "U1_BP": [
+      "C3",
+      "U1"
+    ],
+    "U2_BP": [
+      "C10",
+      "U2"
+    ],
+    "U3_BP": [
+      "C14",
+      "U3"
+    ],
+    "USB0_B_N": [
+      "R22",
+      "U6"
+    ],
+    "USB0_B_P": [
+      "R24",
+      "U6"
+    ],
+    "USB0_ID": [
+      "Module1",
+      "R33"
+    ],
+    "USB0_N": [
+      "Module1",
+      "R22"
+    ],
+    "USB0_P": [
+      "Module1",
+      "R24"
+    ],
+    "USBB_N": [
+      "Type_C1",
+      "U6"
+    ],
+    "USBB_P": [
+      "Type_C1",
+      "U6"
+    ],
+    "USBD0_N": [
+      "J2",
+      "U6"
+    ],
+    "USBD0_P": [
+      "J2",
+      "U6"
+    ],
+    "USB_5V": [
+      "C29",
+      "J2",
+      "U8"
+    ],
+    "USB_FAULT": [
+      "R34",
+      "U8"
+    ],
+    "USB_SEL": [
+      "H4",
+      "R28",
+      "U6"
+    ],
+    "WIFI_EN": [
+      "Module1",
+      "R31"
+    ],
+    "X1_OUT": [
+      "R10",
+      "X1"
+    ],
+    "GND": [
+      "HDMI1",
+      "Type_C1",
+      "Module1"
+    ]
+  },
+  "unique_footprints": [
+    "C_0402_1005Metric",
+    "C_0805_2012Metric",
+    "Camera_Module_IMX219-D160",
+    "Crystal_SMD_3225-4Pin_3.2x2.5mm",
+    "HDMI_Mini-C_Molex_47151-0001",
+    "LED_0603_1608Metric",
+    "L_Bourns_SRP5030CC",
+    "L_CommonModeChoke_Coilank_ACM1210",
+    "MOLEX_USB_67298-4090",
+    "Molex_200528-0150_1x15-1MP_P1.00mm_Horizontal",
+    "PinHeader_1x03_P2.54mm_Vertical",
+    "PinHeader_2x20_P2.54mm_Vertical",
+    "R_0402_1005Metric",
+    "R_0603_1608Metric",
+    "Raspberry-Pi-4-Compute-Module",
+    "SDCARD_MOLEX_503398-1892",
+    "SOT-23-5",
+    "SW_SPST_PTS645Sx43SMTR92",
+    "TSOT-23-6",
+    "Texas_DRT-3",
+    "UQFN-10_1.4x1.8mm_P0.4mm",
+    "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal"
+  ],
+  "unique_models": [
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_PTS645Sx43SMTR92.step",
+      "file": "SW_SPST_PTS645Sx43SMTR92.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0402_1005Metric.step",
+      "file": "C_0402_1005Metric.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "file": "C_0805_2012Metric.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Connector_FFC-FPC.3dshapes/TE_1-84952-5_1x15-1MP_P1.0mm_Horizontal.step",
+      "file": "TE_1-84952-5_1x15-1MP_P1.0mm_Horizontal.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_2x20_P2.54mm_Vertical.step",
+      "file": "PinHeader_2x20_P2.54mm_Vertical.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Crystal.3dshapes/Crystal_SMD_3225-4Pin_3.2x2.5mm.step",
+      "file": "Crystal_SMD_3225-4Pin_3.2x2.5mm.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Inductor_SMD.3dshapes/L_CommonModeChoke_Coilank_ACM1210.step",
+      "file": "L_CommonModeChoke_Coilank_ACM1210.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/LED_SMD.3dshapes/LED_0603_1608Metric.step",
+      "file": "LED_0603_1608Metric.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/UQFN-10_1.4x1.8mm_P0.4mm.step",
+      "file": "UQFN-10_1.4x1.8mm_P0.4mm.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/SOT-23-5.step",
+      "file": "SOT-23-5.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/TSOT-23-6.step",
+      "file": "TSOT-23-6.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/Texas_DRT-3.step",
+      "file": "Texas_DRT-3.step"
+    },
+    {
+      "path": "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step",
+      "file": "R_0402_1005Metric.step"
+    },
+    {
+      "path": "${KICAD9_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x03_P2.54mm_Vertical.step",
+      "file": "PinHeader_1x03_P2.54mm_Vertical.step"
+    },
+    {
+      "path": "${KICAD9_3DMODEL_DIR}/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step",
+      "file": "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step"
+    },
+    {
+      "path": "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+      "file": "R_0603_1608Metric.step"
+    },
+    {
+      "path": "${KIPRJMOD}/3dmodels/USB_A_Molex_105057-0001_Vertical.wrl",
+      "file": "USB_A_Molex_105057-0001_Vertical.wrl"
+    },
+    {
+      "path": "./3dmodels/CM4.step",
+      "file": "CM4.step"
+    },
+    {
+      "path": "./3dmodels/Camera_IMX219-D160.step",
+      "file": "Camera_IMX219-D160.step"
+    },
+    {
+      "path": "./CM5.3dshapes/5033981892.stp",
+      "file": "5033981892.stp"
+    },
+    {
+      "path": "./CM5.3dshapes/DF40C-100DS.stp",
+      "file": "DF40C-100DS.stp"
+    },
+    {
+      "path": "./CM5.3dshapes/JTHDA-19F08.STEP",
+      "file": "JTHDA-19F08.STEP"
+    },
+    {
+      "path": "./CM5.3dshapes/SRP5030CC.stp",
+      "file": "SRP5030CC.stp"
+    }
+  ],
+  "3d_poses": [
+    {
+      "file": "Camera_IMX219-D160.step",
+      "offset": [0.0, 0.0, 0.0],
+      "rotate": [0.0, 0.0, 0.0]
+    },
+    {
+      "file": "JTHDA-19F08.STEP",
+      "offset": [0.0, -6.8, 0.0],
+      "rotate": [-90.0, 0.0, 0.0]
+    },
+    {
+      "file": "5033981892.stp",
+      "offset": [-135.95, -16.5, 154.5],
+      "rotate": [0.0, -180.0, -180.0]
+    },
+    {
+      "file": "CM4.step",
+      "offset": [52.25, -52.0, 0.0],
+      "rotate": [0.0, 0.0, -90.0]
+    },
+    {
+      "file": "DF40C-100DS.stp",
+      "offset": [-0.46, -28.385, 0.0],
+      "rotate": [-90.0, 0.0, 0.0]
+    },
+    {
+      "file": "DF40C-100DS.stp",
+      "offset": [33.46, -28.385, 0.0],
+      "rotate": [-90.0, 0.0, 0.0]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+.copperpilot/tmp/
+.copperpilot/references/
+.copperpilot/oracle/
+.copperpilot/skills/
+__pycache__/
+fp-info-cache
+*.kicad_prl
+*-backups/
+*.bak
+*.lck
+.history
+*.rpt
+generate_schematic.py
+build_pcb.py
+/3dmodels/
+/CM5.3dshapes/
