@@ -673,7 +673,7 @@ def discard_stale_plan(workspace: Path | None = None) -> None:
 def _iter_library_haystack(root: Path) -> str:
     chunks: list[str] = []
     for path in root.rglob("*"):
-        if any(part in SKIP_DIR_NAMES for part in path.parts):
+        if any(part in SKIP_DIR_NAMES for part in path.relative_to(root).parts):
             continue
         chunks.append(path.name)
         if not path.is_file():

@@ -522,6 +522,10 @@ def test_libraries_ready(tmp_path: Path) -> None:
     )
     (tmp_path / "sym-lib-table").write_text("(sym_lib_table)\n", encoding="utf-8")
     (tmp_path / "fp-lib-table").write_text("(fp_lib_table)\n", encoding="utf-8")
+    decoy = tmp_path / "tmp" / "decoy.kicad_sym"
+    decoy.parent.mkdir()
+    decoy.write_text("SHOULD_NOT_APPEAR_XYZ", encoding="utf-8")
+    assert "SHOULD_NOT_APPEAR_XYZ" not in helper._iter_library_haystack(tmp_path)
     assert helper.libraries_ready(tmp_path) is True
 
 
