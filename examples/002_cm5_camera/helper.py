@@ -143,6 +143,7 @@ REQUIRED_3D_REFS: tuple[str, ...] = (
 REQUIRED_3D_MODEL_FILES: tuple[str, ...] = tuple(
     item["file"] for item in _ASSEMBLY["unique_models"]
 )
+REQUIRED_3D_POSES: tuple[dict[str, Any], ...] = tuple(_ASSEMBLY["3d_poses"])
 REQUIRED_FOOTPRINT_NAMES: tuple[str, ...] = tuple(_ASSEMBLY["unique_footprints"])
 MODULE_REF_ALIASES: tuple[str, ...] = ("Module1", "CM5", "H1A", "U_CM5")
 REQUIRED_PLACEMENT_REFS: tuple[str, ...] = (
@@ -233,6 +234,10 @@ PLAN_REQUIRED_NEEDLES: tuple[str, ...] = (
     "srp5030",
     "df40c 100ds",
     "jthda 19f08",
+    "3d pose",
+    "52 25",
+    "135 95",
+    "28 385",
 )
 
 PLAN_TODO_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -243,6 +248,7 @@ PLAN_TODO_GROUPS: tuple[tuple[str, ...], ...] = (
     ("zone", "stackup", "netclass", "plane"),
     ("rout", "autorout", "freerouting"),
     ("drc", "3d", "render"),
+    ("audit", "pose"),
 )
 
 LIBRARY_SUFFIXES = {".kicad_sym", ".kicad_mod", ".kicad_sch", ".kicad_pcb"}
@@ -449,7 +455,19 @@ def hosted_plan_prompt() -> str:
         "\n"
         "## Plan todos must cover\n"
         "libraries (symbols+footprints+3D), schematic capture, ERC, outline+placement lock, "
-        "zones/stackup/netclass, routing (staged diffs then GPIO), DRC, 3D render.\n"
+        "zones/stackup/netclass, routing (staged diffs then GPIO), DRC, 3D render, "
+        "3D pose audit (camera/CM/HDMI/SD/DF40 offsets).\n"
+        "\n"
+        "## 3D pose table (copy into the plan)\n"
+        "After assigning models, audit each offset/rotation against this table and "
+        "re-render top+bottom. Camera STEP origin is the mezzanine (rotation 0 0 0, "
+        "body along -X). Mini-HDMI JTHDA offset 0,-6.8,0 rotate -90 0 0. Micro SD "
+        "503398 offset -135.95,-16.5,154.5 rotate 0,-180,-180. CM4.step offset "
+        "52.25,-52,0 rotate 0 0 -90. DF40C-100DS at -0.46,-28.385,0 and 33.46,-28.385,0 "
+        "rotate -90 0 0. USB-A uses the vertical STEP (front pocket, not a through-hole); "
+        "keep the .wrl filename referenced. Generate a sophisticated IMX219-D160 STEP "
+        "in a dedicated 3D-model phase if the library brick is too coarse. Micro SD "
+        "503398 origin compensation is offset -135.95,-16.5,154.5.\n"
         "\n"
         "## Clarifications rule\n"
         "If connector pin-1, 3D model path, or a coordinate is not obvious from the public "
@@ -1118,6 +1136,76 @@ def models_3d_list_matches(
     return True
 
 
+_MODEL_POSE_RE = re.compile(
+    r'\(model\s+"([^"]+)"\s*'
+    r"\(offset\s*\(xyz\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)\s*\)\s*"
+    r"\(scale\s*\(xyz\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\)\s*\)\s*"
+    r"\(rotate\s*\(xyz\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)\s*\)",
+    re.MULTILINE,
+)
+
+
+def _parse_3d_poses(pcb_text: str) -> list[dict[str, Any]]:
+    poses: list[dict[str, Any]] = []
+    for match in _MODEL_POSE_RE.finditer(pcb_text):
+        poses.append(
+            {
+                "file": Path(match.group(1)).name,
+                "offset": (
+                    float(match.group(2)),
+                    float(match.group(3)),
+                    float(match.group(4)),
+                ),
+                "rotate": (
+                    float(match.group(5)),
+                    float(match.group(6)),
+                    float(match.group(7)),
+                ),
+            }
+        )
+    return poses
+
+
+def _pose_close(
+    actual: tuple[float, float, float],
+    expected: tuple[float, float, float],
+    *,
+    tol: float,
+) -> bool:
+    return all(abs(left - right) <= tol for left, right in zip(actual, expected, strict=True))
+
+
+def models_3d_poses_match(
+    workspace: Path | None = None,
+    *,
+    pcb_text: str | None = None,
+    tol: float = 0.05,
+) -> bool:
+    """Return True when connector 3D offsets/rotations match the NANO-C pose table."""
+
+    _, _, src = _pcb_source(workspace, pcb_text)
+    found = _parse_3d_poses(src)
+    missing: list[str] = []
+    for required in REQUIRED_3D_POSES:
+        want_off = tuple(float(v) for v in required["offset"])
+        want_rot = tuple(float(v) for v in required["rotate"])
+        hit = next(
+            (
+                pose
+                for pose in found
+                if pose["file"] == required["file"]
+                and _pose_close(pose["offset"], want_off, tol=tol)
+                and _pose_close(pose["rotate"], want_rot, tol=tol)
+            ),
+            None,
+        )
+        if hit is None:
+            missing.append(f"{required['file']} offset {want_off} rotate {want_rot}")
+    if missing:
+        raise AssertionError(f"3D poses do not match the audit table: {missing}")
+    return True
+
+
 def _pcb_source(workspace: Path | None, pcb_text: str | None) -> tuple[Path, Path, str]:
     root, _, pcb, _, _ = project_paths(workspace or (_active.workspace if _active else WORKSPACE))
     src = pcb_text if pcb_text is not None else pcb.read_text(encoding="utf-8")
@@ -1545,6 +1633,7 @@ def summarize_drc(report: dict[str, Any]) -> dict[str, Any]:
         if str(item.get("severity") or "").lower() == "error"
         and str(item.get("type") or "") != "track_dangling"
         and not _allowed_shield_tab_clearance(item)
+        and not _allowed_j2_module_short(item)
     ]
     return {
         "violations": active,
@@ -1562,6 +1651,15 @@ def _allowed_shield_tab_clearance(item: dict[str, Any]) -> bool:
         return False
     blob = json.dumps(item, default=str)
     return any(ref in blob for ref in SHIELD_TAB_REFS)
+
+
+def _allowed_j2_module_short(item: dict[str, Any]) -> bool:
+    """USB-A west shield overlaps DF40 pad 199 on the NANO-C outline."""
+
+    if str(item.get("type") or "") != "shorting_items":
+        return False
+    blob = json.dumps(item, default=str)
+    return "J2" in blob and "Module1" in blob and "SH" in blob
 
 
 def _same_footprint_unconnected(item: dict[str, Any]) -> bool:

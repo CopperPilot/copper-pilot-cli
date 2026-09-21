@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "cm5_camera")(type "KiCad")(uri "${KIPRJMOD}/cm5_camera.pretty")(options "")(descr "CM5 Camera Project Footprint Library"))
+)
