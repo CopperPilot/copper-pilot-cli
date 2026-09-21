@@ -38,7 +38,7 @@ CopperPilot in your terminal: a thin, open-source client for CopperPilot electro
 
 - Python 3.12 or newer
 - A [CopperPilot](https://copperpilot.ai) account for login
-- KiCad 10 on `PATH` only if you run [`examples/001_esp32`](examples/001_esp32)
+- KiCad 10 on `PATH` only if you run [`examples/001_esp32`](examples/001_esp32) or [`examples/002_cm5_camera`](examples/002_cm5_camera)
 
 ## Install and run
 
@@ -120,7 +120,8 @@ Deep Agent. The compatible `deepagents` runtime is installed and pinned by this
 package.
 
 That snippet is the runnable example in
-[`examples/001_esp32`](examples/001_esp32).
+[`examples/001_esp32`](examples/001_esp32). A phased CM5 camera carrier lives in
+[`examples/002_cm5_camera`](examples/002_cm5_camera).
 
 ## Security boundary
 
