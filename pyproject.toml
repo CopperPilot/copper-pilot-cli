@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
   "aiosqlite>=0.22,<1",
   "certifi>=2024.8.30",
-  "deepagents==0.7.14",
+  "deepagents==0.7.15",
   "httpx>=0.28,<1",
   "langchain-core>=1.6,<2",
   "langgraph>=1.2,<2",
