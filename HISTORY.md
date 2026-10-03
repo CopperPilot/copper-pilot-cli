@@ -4,6 +4,39 @@ Changelog
 
 (unreleased)
 ------------
+- Merge pull request #11 from
+  CopperPilot/feat/python_versions_support_expansion. [Aditya]
+
+  Support Python 3.11 and future releases
+- Ci: probe Python 3.15 weekly instead of on pull requests. [AdityaNG]
+
+  Keep the upstream install failure visible without turning required pull request checks red.
+- Feat(py11) [AdityaNG]
+- Merge pull request #7 from CopperPilot/feat/example_002_cm5_camera.
+  [Aditya]
+
+  feat(examples/002_cm5_camera): add 3D pose audit and generated carrier
+- Fix(examples/002_cm5_camera): render the README PCB as a dimetric 3D
+  view. [AdityaNG, Cursor]
+
+  Use an orthogonal high-quality camera with a slight isometric tilt so the
+  hero PNG shows connector height instead of a flat top-down shot.
+- Fix(examples/002_cm5_camera): skip library dirs relative to the
+  workspace. [AdityaNG, Cursor]
+
+  Absolute path parts named tmp (Linux /tmp pytest roots) were skipping the
+  entire haystack, so libraries_ready failed on Ubuntu CI.
+- Feat(examples/002_cm5_camera): add 3D pose audit and generated
+  carrier. [AdityaNG, Cursor]
+
+  Lock connector 3D offsets, Module1 pad orientation, and the generated
+  KiCad project so the example reproduces NANO-C assembly parity.
+- Feat(examples/002_cm5_camera/main.py): new example. [AdityaNG]
+
+
+0.1.6 (2026-09-18)
+------------------
+- Release: version 0.1.6 🚀 [AdityaNG]
 - Merge pull request #6 from CopperPilot/feat/plugins. [Aditya]
 
   feat: add MCP conductor and Claude Code plugin
