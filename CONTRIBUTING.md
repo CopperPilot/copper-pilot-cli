@@ -8,7 +8,7 @@ CopperPilot agent. It is not the desktop app or the hosted backend.
 
 ## Prerequisites
 
-- Python 3.12 or newer
+- Python 3.11 or newer
 - [pip](https://pip.pypa.io/en/stable/)
 - [make](https://www.gnu.org/software/make/) (optional; the same commands are
   listed below)

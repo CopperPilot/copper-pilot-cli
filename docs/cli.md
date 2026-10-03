@@ -9,7 +9,7 @@ copper-pilot threads --help
 copper-pilot mcp --help
 ```
 
-Python 3.12 or newer is required. Install with `pip install copper-pilot-cli`.
+Python 3.11 or newer is required. Install with `pip install copper-pilot-cli`.
 
 ## Chat
 

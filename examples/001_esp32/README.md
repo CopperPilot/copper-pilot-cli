@@ -26,4 +26,4 @@ render_pcb("esp32.png")
 python examples/001_esp32/main.py
 ```
 
-Python 3.12, `pip install -e .`, `copper-pilot auth login`, and KiCad 10 on `PATH`.
+Python 3.11+, `pip install -e .`, `copper-pilot auth login`, and KiCad 10 on `PATH`.

@@ -21,7 +21,7 @@ See [UPSTREAM.md](../UPSTREAM.md) and [NOTICE](../NOTICE).
 
 ## Environment
 
-Python 3.12 or newer. From the repository root:
+Python 3.11 or newer. From the repository root:
 
 ```console
 python3 -m venv .venv
@@ -39,6 +39,12 @@ pip install -e ".[dev]"
 
 CI also runs `pip-audit`, `piplicenses` (fails on GPL/AGPL/UNKNOWN), a wheel
 build, and `copper-pilot --version` / `copper-pilot-cli --version`.
+Required CI covers every supported stable Python minor on Linux and the minimum
+supported minor on macOS and Windows. Python 3.15 is probed weekly, outside
+pull requests, by `.github/workflows/forward-python.yml`. When that scheduled
+run is green, add the `Programming Language :: Python :: 3.15` classifier, add
+3.15 to the required CI matrix, and retarget the scheduled probe at the next
+unreleased Python.
 
 ## Tests
 
