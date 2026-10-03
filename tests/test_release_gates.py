@@ -100,7 +100,7 @@ def test_both_console_aliases_are_installed() -> None:
 
 def test_deepagents_runtime_is_pinned_as_a_required_dependency() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    assert "deepagents==0.7.14" in project["dependencies"]
+    assert "deepagents==0.7.19" in project["dependencies"]
     assert any(item.startswith("mcp>=") for item in project["dependencies"])
     assert "deepagents" not in project.get("optional-dependencies", {})
 
