@@ -192,4 +192,4 @@ assert leftover == 0, f"{leftover} unconnected items remain"
 python examples/002_cm5_camera/main.py
 ```
 
-Python 3.12, `pip install -e .`, `copper-pilot auth login`, and KiCad 10 on `PATH`.
+Python 3.11+, `pip install -e .`, `copper-pilot auth login`, and KiCad 10 on `PATH`.

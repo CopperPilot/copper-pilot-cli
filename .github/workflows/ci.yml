@@ -11,12 +11,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python: ["3.12", "3.13", "3.14"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
-            python: "3.12"
+            python: "3.11"
           - os: windows-latest
-            python: "3.12"
+            python: "3.11"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,5 +40,22 @@ jobs:
         if: runner.os != 'Windows'
       - run: python -m pip install --force-reinstall --no-deps (Get-ChildItem dist/*.whl)
         if: runner.os == 'Windows'
+      - run: copper-pilot --version
+      - run: copper-pilot-cli --version
+
+  forward-python:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -m "not live"
+      - run: python -m build
+      - run: python -m pip install --force-reinstall --no-deps dist/*.whl
       - run: copper-pilot --version
       - run: copper-pilot-cli --version

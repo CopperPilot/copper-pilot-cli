@@ -6,6 +6,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from packaging.specifiers import SpecifierSet
+
 from copper_pilot_cli.diagnostics import redact
 
 ROOT = Path(__file__).parents[1]
@@ -187,8 +189,19 @@ def test_pypi_badge_metadata_is_declared() -> None:
     assert "LICENSE" in project.get("license-files", [])
     classifiers = project.get("classifiers", [])
     assert "License :: OSI Approved :: MIT License" in classifiers
-    for version in ("3.12", "3.13", "3.14"):
+    for version in ("3.11", "3.12", "3.13", "3.14"):
         assert f"Programming Language :: Python :: {version}" in classifiers
+
+
+def test_python_version_policy_supports_311_and_future_releases() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requires_python = project["requires-python"]
+    supported = SpecifierSet(requires_python)
+
+    assert requires_python == ">=3.11"
+    assert "3.10" not in supported
+    for version in ("3.11", "3.12", "3.13", "3.14", "3.15", "4.0", "99.0"):
+        assert version in supported
 
 
 def test_readme_header_includes_pypi_badges() -> None:

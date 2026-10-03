@@ -36,7 +36,7 @@ CopperPilot in your terminal: a thin, open-source client for CopperPilot electro
 
 ## Prerequisites
 
-- Python 3.12 or newer
+- Python 3.11 or newer
 - A [CopperPilot](https://copperpilot.ai) account for login
 - KiCad 10 on `PATH` only if you run [`examples/001_esp32`](examples/001_esp32) or [`examples/002_cm5_camera`](examples/002_cm5_camera)
 

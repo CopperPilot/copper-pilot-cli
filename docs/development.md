@@ -21,7 +21,7 @@ See [UPSTREAM.md](../UPSTREAM.md) and [NOTICE](../NOTICE).
 
 ## Environment
 
-Python 3.12 or newer. From the repository root:
+Python 3.11 or newer. From the repository root:
 
 ```console
 python3 -m venv .venv
@@ -39,6 +39,9 @@ pip install -e ".[dev]"
 
 CI also runs `pip-audit`, `piplicenses` (fails on GPL/AGPL/UNKNOWN), a wheel
 build, and `copper-pilot --version` / `copper-pilot-cli --version`.
+Required CI covers every supported stable Python minor on Linux and the minimum
+supported minor on macOS and Windows. A non-blocking Python 3.15 prerelease job
+provides early warning about upcoming interpreter or dependency incompatibilities.
 
 ## Tests
 
