@@ -20,6 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from copper_pilot_cli._version import __version__
+
 logger = logging.getLogger(__name__)
 
 MAX_CHAT_START_BYTES = 12 * 1024 * 1024
@@ -33,6 +35,38 @@ MAX_STREAM_BYTES = 64 * 1024 * 1024
 
 class ProtocolError(RuntimeError):
     """The hosted protocol was malformed or incomplete."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status: int | None = None,
+        block_reason: str | None = None,
+        can_purchase_overage: bool | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.block_reason = block_reason
+        self.can_purchase_overage = can_purchase_overage
+        self.retryable = retryable
+
+    def as_event_data(self) -> dict[str, Any]:
+        """Return a JSON-safe error payload for headless and MCP consumers."""
+        result: dict[str, Any] = {"message": str(self)}
+        for key in (
+            "code",
+            "status",
+            "block_reason",
+            "can_purchase_overage",
+            "retryable",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                result[key] = value
+        return result
 
 
 class CopperMode(StrEnum):
@@ -157,14 +191,19 @@ def _truncate_utf8(text: str, limit: int) -> str:
     return encoded[:limit].decode(errors="ignore") + "\n[truncated]"
 
 
-def bound_context(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+def bound_context(
+    messages: Sequence[ChatMessage],
+    *,
+    max_message_bytes: int = MAX_CONTEXT_MESSAGE_BYTES,
+    max_total_bytes: int = MAX_CONTEXT_TOTAL_BYTES,
+) -> list[ChatMessage]:
     """Apply the desktop client's bounded newest-first history policy."""
     bounded: list[ChatMessage] = []
     total = 0
     for message in reversed(messages[-MAX_CONTEXT_ENTRIES:]):
-        content = _truncate_utf8(_strip_data_uris(message.content), MAX_CONTEXT_MESSAGE_BYTES)
+        content = _truncate_utf8(_strip_data_uris(message.content), max_message_bytes)
         size = len(content.encode())
-        if bounded and total + size > MAX_CONTEXT_TOTAL_BYTES:
+        if bounded and total + size > max_total_bytes:
             break
         bounded.append(ChatMessage(role=message.role, content=content))
         total += size
@@ -181,17 +220,37 @@ def bound_context(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
 
 
 def make_chat_start(request: ChatRequest) -> dict[str, Any]:
-    """Serialize and size-check a protocol-v1 chat start frame."""
-    payload = request.model_copy(update={"context": bound_context(request.context)})
-    frame = {
-        "type": "chat_start",
-        "protocol_version": 1,
-        "request": payload.model_dump(mode="json", exclude_none=True),
-    }
-    size = len(json.dumps(frame, separators=(",", ":")).encode())
-    if size > MAX_CHAT_START_BYTES:
-        raise ProtocolError(f"Chat start frame is too large ({size} bytes).")
-    return frame
+    """Serialize a protocol-v1 frame, progressively shrinking chat history."""
+    attempts = (
+        (MAX_CONTEXT_MESSAGE_BYTES, MAX_CONTEXT_TOTAL_BYTES, MAX_CHAT_START_BYTES),
+        (MAX_CONTEXT_MESSAGE_BYTES // 2, MAX_CONTEXT_TOTAL_BYTES // 2, STRICT_CHAT_START_BYTES),
+        (8 * 1024, 128 * 1024, STRICT_CHAT_START_BYTES),
+        (4 * 1024, 64 * 1024, STRICT_CHAT_START_BYTES),
+    )
+    last_size = 0
+    for max_message_bytes, max_total_bytes, frame_limit in attempts:
+        payload = request.model_copy(
+            update={
+                "context": bound_context(
+                    request.context,
+                    max_message_bytes=max_message_bytes,
+                    max_total_bytes=max_total_bytes,
+                )
+            }
+        )
+        frame = {
+            "type": "chat_start",
+            "protocol_version": 1,
+            "request": payload.model_dump(mode="json", exclude_none=True),
+        }
+        last_size = len(json.dumps(frame, separators=(",", ":")).encode())
+        if last_size <= frame_limit:
+            return frame
+    raise ProtocolError(
+        f"Chat history is too large to send ({last_size} bytes). "
+        "Try starting a new chat or removing large inline images from prior turns.",
+        code="PAYLOAD_TOO_LARGE",
+    )
 
 
 def websocket_url(base_url: str, *, agentic: bool = True) -> str:
@@ -217,6 +276,13 @@ def sanitize_status(value: str) -> str:
     text = _TERMINAL_ESCAPE.sub("", text)
     text = "".join(character for character in text if character in "\n\t" or ord(character) >= 32)
     return _truncate_utf8(text, 16 * 1024)
+
+
+def error_message(value: Any) -> str:
+    """Read a user-facing message from old string or structured error data."""
+    if isinstance(value, dict):
+        return str(value.get("message") or "Hosted chat failed.")
+    return str(value or "Hosted chat failed.")
 
 
 ToolHandler = Callable[[ToolRequest], Awaitable[Any]]
@@ -273,7 +339,7 @@ class HostedChatClient:
             raise ProtocolError("A chat stream is already active.")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "User-Agent": "CopperPilot CLI/0.1.0",
+            "User-Agent": f"CopperPilot CLI/{__version__}",
             "X-CopperPilot-Fingerprint": self.fingerprint,
         }
         saw_final = False
@@ -327,8 +393,30 @@ class HostedChatClient:
                     if frame_type == "error":
                         message = frame.get("public_message") or frame.get("message")
                         safe_message = sanitize_status(str(message or "Hosted chat failed."))
-                        yield CopperEvent(EventKind.ERROR, safe_message)
-                        raise ProtocolError(safe_message)
+                        error = ProtocolError(
+                            safe_message,
+                            code=str(frame["code"]) if frame.get("code") is not None else None,
+                            status=frame.get("status")
+                            if isinstance(frame.get("status"), int)
+                            else None,
+                            block_reason=(
+                                str(frame["block_reason"])
+                                if frame.get("block_reason") is not None
+                                else None
+                            ),
+                            can_purchase_overage=(
+                                frame.get("can_purchase_overage")
+                                if isinstance(frame.get("can_purchase_overage"), bool)
+                                else None
+                            ),
+                            retryable=(
+                                frame.get("retryable")
+                                if isinstance(frame.get("retryable"), bool)
+                                else None
+                            ),
+                        )
+                        yield CopperEvent(EventKind.ERROR, error.as_event_data())
+                        raise error
                     if frame_type not in {"event", "final"}:
                         raise ProtocolError(f"Unknown frame type: {frame_type!r}")
                     try:

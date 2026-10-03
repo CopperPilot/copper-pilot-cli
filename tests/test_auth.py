@@ -7,6 +7,7 @@ import stat
 import httpx
 import pytest
 
+from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_auth import (
     AuthenticationError,
     DeviceCredential,
@@ -54,6 +55,7 @@ async def test_device_login_polls_until_ready(monkeypatch, tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         if request.method == "POST":
+            assert json.loads(request.content)["client_version"] == __version__
             return httpx.Response(200, json={"flow_token": "valid-token", "expires_in": 3})
         calls += 1
         if calls == 1:

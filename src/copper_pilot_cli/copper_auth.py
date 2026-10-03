@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import httpx
 
+from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_config import api_base_url, paths
 
 _STORE_VERSION = 1
@@ -169,7 +170,7 @@ async def validate_credential(credential: DeviceCredential) -> bool:
 class DeviceLogin:
     """Run CopperPilot's browser-based device login flow."""
 
-    def __init__(self, base_url: str | None = None, client_version: str = "0.1.0") -> None:
+    def __init__(self, base_url: str | None = None, client_version: str = __version__) -> None:
         self.base_url = (base_url or api_base_url()).rstrip("/")
         self.client_version = client_version
 
