@@ -14,7 +14,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
 from copper_pilot_cli.copper_graph import create_copper_graph
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
-from copper_pilot_cli.copper_protocol import CopperMode, EventKind
+from copper_pilot_cli.copper_protocol import CopperMode, EventKind, error_message
 from copper_pilot_cli.copper_tools import ApprovalMode, LocalToolBroker
 from copper_pilot_cli.copper_workspace import (
     canonical_workspace,
@@ -95,7 +95,7 @@ def _turn_failed(events: list[dict[str, Any]]) -> tuple[bool, str | None]:
         payload = event.get("data")
         if kind == EventKind.ERROR.value:
             failed = True
-            error = str(payload)
+            error = error_message(payload)
         elif kind == EventKind.FINAL.value and isinstance(payload, dict):
             if payload.get("success") is False or payload.get("error"):
                 failed = True

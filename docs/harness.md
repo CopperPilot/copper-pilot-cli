@@ -105,4 +105,8 @@ always use Auto. `run` and `resume` default to Auto.
 Missing credentials: MCP tools return `login_required` and tell the user to run
 `copper-pilot auth login`. The server does not open a browser.
 
-See [docs/cli.md](cli.md) for the full command reference.
+A hosted usage block sets `ok` and `success` to false. `error` remains the
+server's public message. The matching digest entry keeps the structured
+`data` object (`status`, `code`, `block_reason`, `can_purchase_overage`, and
+`retryable` when the server sends them). Checkout stays on the CopperPilot
+billing page. See [docs/cli.md](cli.md).

@@ -6,6 +6,7 @@ import ssl
 
 import pytest
 
+from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_protocol import (
     MAX_CHAT_START_BYTES,
     ChatMessage,
@@ -55,6 +56,14 @@ def test_context_strips_inline_attachments_and_keeps_newest() -> None:
 def test_oversized_start_frame_is_rejected() -> None:
     with pytest.raises(ProtocolError):
         make_chat_start(request(query="x" * (MAX_CHAT_START_BYTES + 1)))
+
+
+def test_chat_start_progressively_shrinks_escaped_history() -> None:
+    messages = [ChatMessage(role="user", content="\x01" * (64 * 1024)) for _ in range(70)]
+    frame = make_chat_start(request(query="x" * (1024 * 1024), context=messages))
+    encoded_size = len(json.dumps(frame, separators=(",", ":")).encode())
+    assert encoded_size <= 8 * 1024 * 1024
+    assert len(frame["request"]["context"]) < len(messages)
 
 
 @pytest.mark.parametrize(
@@ -235,6 +244,7 @@ async def test_hosted_stream_correlates_tool_result(monkeypatch) -> None:
     assert socket.sent[1]["type"] == "tool_result"
     assert socket.sent[1]["tool_call_id"] == "call-1"
     assert isinstance(connect_options["ssl"], ssl.SSLContext)
+    assert connect_options["additional_headers"]["User-Agent"] == (f"CopperPilot CLI/{__version__}")
     assert events[-2].data == "**Done**"
     assert "query" not in events[-1].data
     assert "initial_file_tree" not in events[-1].data
@@ -279,3 +289,60 @@ async def test_final_envelope_preserves_usage_and_turn_correlation(monkeypatch) 
         "cache_tokens": 12,
     }
     assert (usage.turn_id, usage.sequence, usage.resume_attempt) == ("turn-1", 9, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "block_reason", "can_purchase_overage", "retryable"),
+    [
+        (402, "weekly", True, False),
+        (429, "busy", False, True),
+    ],
+)
+async def test_usage_error_preserves_structured_metadata(
+    monkeypatch, status, block_reason, can_purchase_overage, retryable
+) -> None:
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, _value):
+            return None
+
+        async def recv(self):
+            return json.dumps(
+                {
+                    "type": "error",
+                    "code": f"http_{status}",
+                    "status": status,
+                    "message": "internal",
+                    "public_message": "Usage limit reached.",
+                    "block_reason": block_reason,
+                    "can_purchase_overage": can_purchase_overage,
+                    "retryable": retryable,
+                }
+            )
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: Socket())
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+    stream = client.stream(request(), lambda _request: None)
+
+    event = await anext(stream)
+    assert event.kind is EventKind.ERROR
+    assert event.data == {
+        "message": "Usage limit reached.",
+        "code": f"http_{status}",
+        "status": status,
+        "block_reason": block_reason,
+        "can_purchase_overage": can_purchase_overage,
+        "retryable": retryable,
+    }
+    with pytest.raises(ProtocolError) as caught:
+        await anext(stream)
+    assert caught.value.status == status
+    assert caught.value.block_reason == block_reason
+    assert caught.value.can_purchase_overage is can_purchase_overage
+    assert caught.value.retryable is retryable

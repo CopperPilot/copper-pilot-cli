@@ -56,6 +56,40 @@ unreleased Python.
 
 Do not commit credentials, `.venv/`, or `dist/`.
 
+## Hosted protocol
+
+The client speaks protocol v1. Agent turns, and plan turns that carry plan
+context, use `/api/copperpilot/analyze/agent/ws`. Ask turns and plan turns
+without that context use `/api/copperpilot/analyze/chat/ws`.
+
+`make_chat_start` in `copper_protocol.py` bounds history before the socket
+send, matching the desktop harness:
+
+| Attempt | Message cap | History cap | Frame cap |
+|---------|-------------|-------------|-----------|
+| 1 | 64 KiB | 4 MiB | 12 MiB |
+| 2 | 32 KiB | 2 MiB | 8 MiB |
+| 3 | 8 KiB | 128 KiB | 8 MiB |
+| 4 | 4 KiB | 64 KiB | 8 MiB |
+
+History is kept newest-first. Inline `data:` attachments are replaced before
+the byte caps apply. A query or workspace snapshot that still cannot fit
+raises `ProtocolError` with `code="PAYLOAD_TOO_LARGE"`.
+
+A WebSocket `error` frame keeps `code`, `status`, `block_reason`,
+`can_purchase_overage`, and `retryable` on both `ProtocolError` and the
+`copper.error` event. Absent fields stay absent. The interactive UI and MCP
+`error` string use `public_message`; `--json` and the MCP event digest keep
+the object.
+
+Device login and the WebSocket `User-Agent` (`CopperPilot CLI/<version>`)
+read the installed package version. That version comes from `VERSION`.
+
+`POST /api/copperpilot/analyze/token_limits` is the account-usage read. It
+returns percentages and reset state even when chat is blocked. Do not add
+token counts, plan allocations, Stripe checkout, or a per-chat context meter
+here. The server does not expose those on this contract.
+
 ## Release
 
 Version is the contents of [`VERSION`](../VERSION). `make release` writes that

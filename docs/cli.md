@@ -118,6 +118,37 @@ searches run freely. Writes, edits, deletes, and shell commands are gated:
 
 `--yolo` wins over `--auto-approve`. Saved preferences never enable YOLO.
 
+## Usage limits
+
+The hosted service owns weekly and window usage. The CLI does not show raw
+token balances, sell credits, or complete checkout.
+
+Inside the interactive app, `/tokens` prints the current window as a
+percentage, the next refresh time, and any additional-usage state.
+`/tokens json` prints the member-safe API payload instead.
+
+A blocked turn stays readable in `--json` output. An error event uses `data`
+as an object:
+
+```json
+{
+  "type": "error",
+  "data": {
+    "message": "Usage limit reached.",
+    "code": "http_402",
+    "status": 402,
+    "block_reason": "weekly",
+    "can_purchase_overage": true,
+    "retryable": false
+  }
+}
+```
+
+`block_reason` is `window`, `weekly`, `cost_cap`, `busy`, or `billing` when
+the server sends one. A `busy` block and an ordinary rate limit use status
+`429` with `retryable: true`. `can_purchase_overage` only says whether the
+billing page can offer additional usage. The Textual UI prints `message`.
+
 ## Configuration
 
 | Setting | Location |

@@ -27,7 +27,7 @@ from copper_pilot_cli import copper_theme
 from copper_pilot_cli import textual_patches as _textual_patches  # noqa: F401
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.clipboard import copy_selection_to_clipboard
-from copper_pilot_cli.copper_api import token_limits
+from copper_pilot_cli.copper_api import format_token_limits, token_limits
 from copper_pilot_cli.copper_auth import DeviceLogin, clear_credential
 from copper_pilot_cli.copper_features import (
     LocalSkill,
@@ -58,7 +58,7 @@ from copper_pilot_cli.copper_presentation import (
     TurnState,
     WelcomeBanner,
 )
-from copper_pilot_cli.copper_protocol import CopperMode, HostedChatClient
+from copper_pilot_cli.copper_protocol import CopperMode, HostedChatClient, error_message
 from copper_pilot_cli.copper_tools import (
     ApprovalMode,
     ApprovalRequest,
@@ -704,11 +704,12 @@ class CopperPilotApp(App[None]):
                 await self._mount(ErrorMessage(str(data.get("error") or "Hosted chat failed.")))
         elif kind == "copper.error":
             self._turn_error_rendered = True
-            self._settle_active_tools(str(data))
+            message = error_message(data)
+            self._settle_active_tools(message)
             if self._work_run is not None:
                 self._work_run.mark_failed()
             self._finalize_work_run()
-            await self._mount(ErrorMessage(str(data)))
+            await self._mount(ErrorMessage(message))
 
     async def _command(self, value: str) -> None:
         command, _, argument = value.partition(" ")
@@ -718,7 +719,7 @@ class CopperPilotApp(App[None]):
             await self._mount(
                 AssistantMessage(
                     "Commands: `/mode`, `/resume`, `/approval`, `/context`, `/copy`, "
-                    "`/cwd`, `/build`, `/hooks`, `/auth`, `/tools`, `/tokens`, "
+                    "`/cwd`, `/build`, `/hooks`, `/auth`, `/tools`, `/tokens [json]`, "
                     "`/theme`, `/update`, `/version`, `/feedback`, `/clear`, `/quit`"
                 )
             )
@@ -831,7 +832,7 @@ class CopperPilotApp(App[None]):
                 await self._mount(AssistantMessage("Logged out. Use `/auth login` to reconnect."))
             elif action == "login":
                 try:
-                    credential = await DeviceLogin().login()
+                    credential = await DeviceLogin(client_version=__version__).login()
                 except Exception as exc:
                     await self._mount(ErrorMessage(str(exc)))
                 else:
@@ -855,11 +856,12 @@ class CopperPilotApp(App[None]):
                 except Exception as exc:
                     await self._mount(ErrorMessage(str(exc)))
                 else:
-                    await self._mount(
-                        AssistantMessage(
-                            "```json\n" + json.dumps(limits, indent=2, default=str) + "\n```"
-                        )
+                    content = (
+                        "```json\n" + json.dumps(limits, indent=2, default=str) + "\n```"
+                        if argument.strip().lower() == "json"
+                        else format_token_limits(limits)
                     )
+                    await self._mount(AssistantMessage(content))
         elif command == "/update":
             try:
                 update = await check_for_update()
