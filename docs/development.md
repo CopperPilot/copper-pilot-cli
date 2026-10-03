@@ -40,8 +40,11 @@ pip install -e ".[dev]"
 CI also runs `pip-audit`, `piplicenses` (fails on GPL/AGPL/UNKNOWN), a wheel
 build, and `copper-pilot --version` / `copper-pilot-cli --version`.
 Required CI covers every supported stable Python minor on Linux and the minimum
-supported minor on macOS and Windows. A non-blocking Python 3.15 prerelease job
-provides early warning about upcoming interpreter or dependency incompatibilities.
+supported minor on macOS and Windows. Python 3.15 is probed weekly, outside
+pull requests, by `.github/workflows/forward-python.yml`. When that scheduled
+run is green, add the `Programming Language :: Python :: 3.15` classifier, add
+3.15 to the required CI matrix, and retarget the scheduled probe at the next
+unreleased Python.
 
 ## Tests
 
