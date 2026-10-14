@@ -10,6 +10,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Input, OptionList, Static, TextArea
 
 import copper_pilot_cli.copper_app as copper_app_module
+import copper_pilot_cli.copper_widgets as copper_widgets_module
 from copper_pilot_cli.copper_app import ChoiceScreen, CopperPilotApp, QuestionScreen
 from copper_pilot_cli.copper_presentation import (
     ChatScroll,
@@ -278,6 +279,49 @@ async def test_thread_picker_filter_row_does_not_crowd_the_thread_list(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_thread_picker_starts_on_list_and_supports_keyboard_selection(
+    tmp_path, monkeypatch
+) -> None:
+    async def threads(**_kwargs):
+        return [
+            {
+                "thread_id": "thread",
+                "message_count": 1,
+                "updated_at": "2026-10-14",
+                "initial_prompt": "Current",
+            },
+            {
+                "thread_id": "resumed-thread",
+                "message_count": 2,
+                "updated_at": "2026-10-14",
+                "initial_prompt": "Target",
+            },
+        ]
+
+    monkeypatch.setattr(copper_widgets_module, "list_threads", threads)
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 40)) as pilot:
+        resume = asyncio.create_task(app.action_resume_thread())
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ThreadSelectorScreen)
+                and app.screen.query_one("#threads", OptionList).option_count == 2
+            ),
+        )
+        options = app.screen.query_one("#threads", OptionList)
+        assert options.has_focus
+        assert options.highlighted == 0
+        await pilot.press("down")
+        assert options.highlighted == 1
+        await pilot.press("tab")
+        assert app.screen.query_one("#thread-filter", Input).has_focus
+        await pilot.press("shift+tab", "enter")
+        await resume
+        assert app.thread_id == "resumed-thread"
+
+
+@pytest.mark.asyncio
 async def test_mode_command_opens_and_resolves_modal_from_input_handler(tmp_path) -> None:
     app = CopperPilotApp(
         FakeRuntime(),
@@ -292,9 +336,13 @@ async def test_mode_command_opens_and_resolves_modal_from_input_handler(tmp_path
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
-        app.screen.dismiss("plan")
+        options = app.screen.query_one(OptionList)
+        assert options.has_focus
+        assert options.highlighted == 0
+        await pilot.press("down", "enter")
         await pilot.pause()
         assert app.copper_mode is CopperMode.PLAN
+        assert app.query_one(TextArea).has_focus
 
 
 @pytest.mark.asyncio
@@ -307,10 +355,14 @@ async def test_effort_command_is_thread_state_and_updates_agent(tmp_path) -> Non
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
-        app.screen.dismiss("intelligence")
+        options = app.screen.query_one(OptionList)
+        assert options.has_focus
+        assert options.highlighted == 0
+        await pilot.press("down", "enter")
         await pilot.pause()
         assert app.copper_effort is CopperEffort.INTELLIGENCE
         assert app.runtime.agent.effort is CopperEffort.INTELLIGENCE
+        assert app.query_one(TextArea).has_focus
 
 
 @pytest.mark.asyncio
@@ -690,12 +742,12 @@ async def test_hosted_ask_user_modal_round_trip(tmp_path) -> None:
         await pilot.pause()
         assert isinstance(app.screen, QuestionScreen)
         answer = app.screen.query_one(Input)
-        answer.value = "VCC_5V"
-        answer.focus()
+        assert answer.has_focus
+        await pilot.press("c", "o", "p", "p", "e", "r")
         await pilot.press("enter")
         assert await answer_task == {
             "status": "answered",
-            "answer": "VCC_5V",
+            "answer": "copper",
             "source": "custom",
         }
 
@@ -711,11 +763,31 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         )
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
-        app.screen.dismiss("option:0")
+        options = app.screen.query_one(OptionList)
+        assert options.has_focus
+        assert options.highlighted == 0
+        await pilot.press("down", "enter")
         assert await answer_task == {
             "status": "answered",
-            "answer": "USB-C",
+            "answer": "Micro USB",
             "source": "option",
+        }
+
+        custom_task = asyncio.create_task(
+            app.request_question({"question": "Other connector?", "options": ["USB-C", "Micro"]})
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceScreen)
+        await pilot.press("down", "down", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, QuestionScreen)
+        custom = app.screen.query_one("#answer", Input)
+        assert custom.has_focus
+        await pilot.press("b", "a", "r", "r", "e", "l", "enter")
+        assert await custom_task == {
+            "status": "answered",
+            "answer": "barrel",
+            "source": "custom",
         }
 
         skip_task = asyncio.create_task(
@@ -723,7 +795,9 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         )
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
-        app.screen.dismiss("skip")
+        options = app.screen.query_one(OptionList)
+        assert options.has_focus
+        await pilot.press("down", "down", "down", "enter")
         assert await skip_task == {"status": "skipped"}
 
 
@@ -755,7 +829,10 @@ async def test_tool_approval_uses_dcode_style_preview_and_resumes_row(tmp_path) 
         )
         menu = app.query_one(ApprovalMenu)
         assert "copper" in str(menu.query_one(".approval-preview Static").render())
-        await pilot.press("y")
+        assert menu._selected == 0
+        await pilot.press("down")
+        assert menu._selected == 1
+        await pilot.press("up", "enter")
         assert await decision is True
         assert app._tools["write-1"].status == "running"
 
@@ -824,7 +901,9 @@ async def test_cancelling_auto_notice_keeps_current_approval_pending(tmp_path, m
         )
         await pilot.press("a")
         await _wait_until(pilot, lambda: isinstance(app.screen, ChoiceScreen))
-        app.screen.dismiss("cancel")
+        options = app.screen.query_one(OptionList)
+        assert options.has_focus
+        await pilot.press("enter")
         await _wait_until(
             pilot,
             lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),

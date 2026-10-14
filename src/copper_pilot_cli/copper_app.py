@@ -104,6 +104,7 @@ logger = logging.getLogger(__name__)
 class ChoiceScreen(ModalScreen[str | None]):
     """Small reusable command/approval picker."""
 
+    AUTO_FOCUS = "OptionList"
     DEFAULT_CSS = """
     ChoiceScreen {
         align: center middle;
@@ -141,6 +142,7 @@ class ChoiceScreen(ModalScreen[str | None]):
 class QuestionScreen(ModalScreen[str | None]):
     """Free-form hosted ask-user prompt."""
 
+    AUTO_FOCUS = "#answer"
     DEFAULT_CSS = """
     QuestionScreen { align: center middle; }
     QuestionScreen > #question-box {

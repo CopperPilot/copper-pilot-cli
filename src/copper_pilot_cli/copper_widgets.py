@@ -1165,6 +1165,7 @@ class ErrorMessage(Static):
 class ThreadSelectorScreen(ModalScreen[str | None]):
     """Folder-scoped thread picker with an explicit all-folders toggle."""
 
+    AUTO_FOCUS = "#threads"
     DEFAULT_CSS = """
     ThreadSelectorScreen { align: center middle; }
     ThreadSelectorScreen #thread-box {
@@ -1195,6 +1196,10 @@ class ThreadSelectorScreen(ModalScreen[str | None]):
 
     async def on_mount(self) -> None:
         await self._load()
+        threads = self.query_one("#threads", OptionList)
+        if threads.option_count:
+            threads.highlighted = 0
+        threads.focus()
 
     async def _load(self) -> None:
         all_folders = self.query_one("#all-folders", Checkbox).value
