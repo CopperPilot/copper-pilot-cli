@@ -223,3 +223,32 @@ def test_auto_rejects_sensitive_and_dependency_writes(tmp_path) -> None:
     assert not routine_action("write", {"file_path": ".env"}, tmp_path)
     assert not routine_action("write", {"file_path": "pyproject.toml"}, tmp_path)
     assert not routine_action("edit", {"file_path": ".github/workflows/ci.yml"}, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_user_has_no_client_timeout(tmp_path) -> None:
+    async def answer(arguments):
+        await asyncio.sleep(0.02)
+        return {"status": "answered", "answer": arguments["question"], "source": "custom"}
+
+    broker = LocalToolBroker(tmp_path, ask_user=answer)
+    result = await broker.execute(
+        ToolRequest(
+            tool_call_id="ask",
+            tool_name="ask_user_question",
+            arguments={"question": "Continue?"},
+            timeout_ms=1,
+        )
+    )
+    assert result == {
+        "status": "answered",
+        "answer": "Continue?",
+        "source": "custom",
+    }
+
+
+@pytest.mark.asyncio
+async def test_noninteractive_ask_rejects_immediately(tmp_path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    with pytest.raises(ToolRejected, match="headless and MCP"):
+        await broker.execute(tool("ask", "ask_user_question", question="Continue?"))

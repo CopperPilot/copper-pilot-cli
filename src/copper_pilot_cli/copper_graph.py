@@ -13,7 +13,13 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from copper_pilot_cli.copper_protocol import EventKind
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind, normalize_effort
+from copper_pilot_cli.copper_status_events import (
+    COPPER_CONTEXT_KEY,
+    SubagentStatus,
+    format_subagent_transcript,
+    normalize_subagent_status,
+)
 from copper_pilot_cli.langchain import CopperPilotAgent
 from copper_pilot_cli.sessions import get_checkpointer
 
@@ -21,6 +27,7 @@ from copper_pilot_cli.sessions import get_checkpointer
 class CopperState(TypedDict, total=False):
     messages: Annotated[list[Any], add_messages]
     copper_mode: str
+    copper_effort: str
     copper_events: Annotated[list[dict[str, Any]], operator.add]
 
 
@@ -82,10 +89,19 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
 
     async def hosted_node(state: CopperState) -> dict[str, Any]:
         writer = get_stream_writer()
+        try:
+            agent.mode = CopperMode(state.get("copper_mode", agent.mode.value))
+        except ValueError:
+            agent.mode = CopperMode.AGENT
+        agent.effort = normalize_effort(
+            state.get("copper_effort", getattr(agent, "effort", CopperEffort.BALANCED))
+        )
         additions: list[Any] = []
         recorded_events: list[dict[str, Any]] = []
         text: list[str] = []
         pending_tools: dict[str, str] = {}
+        subagents: dict[str, SubagentStatus] = {}
+        switched_to_plan = False
         async for event in agent.astream_events_raw({"messages": state["messages"]}):
             projected = {
                 "type": f"copper.{event.kind.value}",
@@ -101,6 +117,15 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
             recorded_events.append(projected)
             if event.kind is EventKind.TEXT:
                 text.append(str(event.data))
+            elif event.kind is EventKind.STATUS_EVENT and isinstance(event.data, dict):
+                if event.data.get("kind") == "plan_mode_switch":
+                    switched_to_plan = True
+                    agent.mode = CopperMode.PLAN
+                else:
+                    identifier = str(event.data.get("id") or "")
+                    status = normalize_subagent_status(event.data, subagents.get(identifier))
+                    if status is not None:
+                        subagents[status.id] = status
             elif event.kind is EventKind.TOOL_REQUEST:
                 tool = event.data
                 additions.append(
@@ -158,11 +183,25 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                     status="error",
                 )
             )
-        if text or not additions:
-            additions.append(AIMessage(content="".join(text)))
+        context_parts = [
+            block for worker in subagents.values() if (block := format_subagent_transcript(worker))
+        ]
+        if switched_to_plan:
+            context_parts.append("Switched to Plan mode")
+        hidden_context = "\n".join(context_parts)
+        if text or not additions or hidden_context:
+            additions.append(
+                AIMessage(
+                    content="".join(text),
+                    additional_kwargs=(
+                        {COPPER_CONTEXT_KEY: hidden_context} if hidden_context else {}
+                    ),
+                )
+            )
         return {
             "messages": additions,
-            "copper_mode": state.get("copper_mode", agent.mode.value),
+            "copper_mode": agent.mode.value,
+            "copper_effort": agent.effort.value,
             "copper_events": recorded_events,
         }
 

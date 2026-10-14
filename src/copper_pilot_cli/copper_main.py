@@ -25,7 +25,12 @@ from copper_pilot_cli.copper_auth import (
 )
 from copper_pilot_cli.copper_graph import create_copper_graph
 from copper_pilot_cli.copper_preferences import saved_approval_mode, shell_auto_allow_settings
-from copper_pilot_cli.copper_protocol import CopperMode, EventKind
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind
+from copper_pilot_cli.copper_status_events import (
+    SubagentStatus,
+    normalize_subagent_status,
+    subagent_progress_label,
+)
 from copper_pilot_cli.copper_tools import ApprovalMode, LocalToolBroker
 from copper_pilot_cli.copper_workspace import (
     canonical_workspace,
@@ -82,6 +87,12 @@ def parser() -> argparse.ArgumentParser:
         choices=[item.value for item in CopperMode],
         default="agent",
         help="Hosted chat mode (default: agent)",
+    )
+    result.add_argument(
+        "--effort",
+        choices=[item.value for item in CopperEffort],
+        default=None,
+        help="Hosted chat effort (default: balanced; intelligence requires a paid plan)",
     )
     result.add_argument(
         "-y",
@@ -231,11 +242,15 @@ async def _headless(
 ) -> int:
     config = runtime.config(thread_id, workspace)
     events: list[dict[str, Any]] = []
+    subagents: dict[str, SubagentStatus] = {}
     failed = False
-    async for item in runtime.astream(
-        {"messages": [HumanMessage(content=message)], "copper_mode": args.mode},
-        config,
-    ):
+    values = {
+        "messages": [HumanMessage(content=message)],
+        "copper_mode": args.mode,
+    }
+    if args.effort is not None:
+        values["copper_effort"] = args.effort
+    async for item in runtime.astream(values, config):
         _namespace, stream_mode, data = item
         if stream_mode != "custom" or not isinstance(data, dict):
             continue
@@ -257,6 +272,25 @@ async def _headless(
             EventKind.REASONING.value,
         }:
             console.print(f"\n{payload}", style="dim", markup=False, highlight=False)
+        elif not args.quiet and kind == EventKind.STATUS_EVENT.value and isinstance(payload, dict):
+            if payload.get("kind") == "subagent":
+                identifier = str(payload.get("id") or "")
+                status = normalize_subagent_status(payload, subagents.get(identifier))
+                if status is not None:
+                    subagents[status.id] = status
+                    console.print(
+                        f"\n{subagent_progress_label(status)}",
+                        style="dim",
+                        markup=False,
+                        highlight=False,
+                    )
+            elif payload.get("kind") == "plan_mode_switch":
+                console.print(
+                    "\nSwitched to Plan mode",
+                    style="dim",
+                    markup=False,
+                    highlight=False,
+                )
 
     state = await runtime.aget_state(config)
     messages = (getattr(state, "values", {}) or {}).get("messages", [])
@@ -303,11 +337,13 @@ async def async_main(args: argparse.Namespace) -> int:
         always_allow_dangerous_shell_commands=dangerous_shell,
     )
     thread_id = await _resolve_thread(args.resume, workspace)
+    effort = CopperEffort(args.effort or CopperEffort.BALANCED.value)
     agent = CopperPilotAgent(
         workspace,
         credential=credential,
         conversation_id=thread_id,
         mode=CopperMode(args.mode),
+        effort=effort,
         tool_broker=broker,
     )
     if args.non_interactive or (args.message and not sys.stdout.isatty()):
@@ -322,6 +358,7 @@ async def async_main(args: argparse.Namespace) -> int:
             workspace,
             thread_id,
             mode=CopperMode(args.mode),
+            effort=effort,
             initial_message=args.message,
         )
         await app.run_async()

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.runnables import Runnable
 
 from copper_pilot_cli.copper_auth import DeviceCredential
-from copper_pilot_cli.copper_protocol import CopperEvent, EventKind
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperEvent, EventKind
+from copper_pilot_cli.copper_status_events import COPPER_CONTEXT_KEY
 from copper_pilot_cli.langchain import CopperPilotAgent
 
 
@@ -12,6 +13,7 @@ class FakeClient:
     async def stream(self, request, tool_handler):
         assert request.query == "Review"
         assert request.workspace_path
+        assert request.effort is CopperEffort.BALANCED
         yield CopperEvent(EventKind.REASONING, "Inspecting")
         yield CopperEvent(EventKind.TEXT, "Looks ")
         yield CopperEvent(EventKind.TEXT, "good.")
@@ -53,3 +55,20 @@ def test_explicit_graph_and_compiled_subagent_adapters(tmp_path) -> None:
     assert subagent["name"] == "pcb-review"
     assert subagent["description"] == "Review a PCB"
     assert isinstance(subagent["runnable"], Runnable)
+
+
+def test_hidden_status_transcript_is_sent_without_changing_visible_content(tmp_path) -> None:
+    runnable = agent(tmp_path)
+    prior = AIMessage(
+        content="Parent synthesis",
+        additional_kwargs={
+            COPPER_CONTEXT_KEY: "[Subagent: Audit]\nEvidence\n\nSwitched to Plan mode"
+        },
+    )
+    request = runnable._request(
+        [HumanMessage(content="First"), prior, HumanMessage(content="Next")]
+    )
+    assert prior.content == "Parent synthesis"
+    assert request.context[-1].content == (
+        "Parent synthesis\n[Subagent: Audit]\nEvidence\n\nSwitched to Plan mode"
+    )

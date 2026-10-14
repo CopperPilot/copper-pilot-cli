@@ -32,7 +32,8 @@ copper-pilot -n -m "Review this board" --json --no-stream --mode ask
 next turn can pass `--resume THREAD_ID`.
 
 Use `--mode plan` for a plan, `--mode agent -y` for Auto local writes, and
-`--yolo` only when the user asked to skip local approval.
+`--yolo` only when the user asked to skip local approval. Add
+`--effort intelligence` for a paid Intelligence turn; Balanced is the default.
 
 ## Option 2: MCP conductor (`copper-pilot mcp`)
 
@@ -82,10 +83,10 @@ Point the host at `copper-pilot mcp` on stdio. Tools:
 | Tool | Role |
 |------|------|
 | `status` | Login state and discovered schematic/PCB paths |
-| `ask` | Read-oriented specialist (`--mode ask`) |
-| `plan` | Plan without applying (`--mode plan`) |
-| `run` | Mutating agent turn (`--mode agent`) |
-| `resume` | Continue `thread_id` (`mode` defaults to `agent`; pass `mode="ask"` to keep it read-only) |
+| `ask` | Read-oriented specialist (`--mode ask`); optional `effort` |
+| `plan` | Plan without applying (`--mode plan`); optional `effort` |
+| `run` | Mutating agent turn (`--mode agent`); optional `effort` |
+| `resume` | Continue `thread_id` (`mode` defaults to `agent`; optional `effort`) |
 | `threads_list` | List threads for this workspace |
 
 Workspace is the tool `workspace` argument, else `CLAUDE_PROJECT_DIR`, else the
@@ -101,6 +102,13 @@ process current directory.
 
 MCP cannot show the TUI, so Manual is not available there. `ask` and `plan`
 always use Auto. `run` and `resume` default to Auto.
+
+`effort` is `balanced` (default) or `intelligence`. Intelligence requires a
+paid plan. It may run server-owned survey subagents; Plan turns survey before
+the parent writes a plan. Progress reports compact worker transitions and the
+result digest omits full worker output. If the hosted agent asks a clarification,
+MCP returns a clear rejection because it cannot present the interactive options
+and Skip UI; continue the returned `thread_id` in the terminal TUI to answer.
 
 Missing credentials: MCP tools return `login_required` and tell the user to run
 `copper-pilot auth login`. The server does not open a browser.

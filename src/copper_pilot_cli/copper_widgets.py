@@ -449,6 +449,8 @@ def _tool_label(tool_name: str, args: dict[str, Any]) -> str:
         return f"Write binary {_tool_path(args)}"
     if name == "ask_user_question":
         return "Ask user"
+    if name == "task":
+        return str(args.get("description") or args.get("task") or "Survey")
     return tool_name
 
 
@@ -480,6 +482,7 @@ _TOOL_ACTIVITY = {
     "delete": ("Deleting", "Deleted", "file"),
     "glob": ("Searching", "Searched", "path"),
     "grep": ("Searching", "Searched", "file"),
+    "task": ("Running", "Ran", "agent"),
 }
 
 
@@ -704,6 +707,10 @@ class ToolCallMessage(Vertical):
         border-left: wide $warning;
         background: $warning 8%;
     }
+    ToolCallMessage.-status-cancelled {
+        border-left: wide $warning;
+        background: $warning 8%;
+    }
     """
 
     def __init__(
@@ -777,6 +784,10 @@ class ToolCallMessage(Vertical):
             return
         self.expanded = True
         self._finish("rejected", reason or "Rejected by user")
+
+    def set_cancelled(self, reason: str | None = None) -> None:
+        self.expanded = bool(reason)
+        self._finish("cancelled", reason or "Stopped")
 
     def _finish(self, status: str, output: str) -> None:
         self.status = status
@@ -853,7 +864,7 @@ class ToolCallMessage(Vertical):
     def _refresh_display(self) -> None:
         if not self.is_mounted:
             return
-        for name in ("success", "error", "rejected"):
+        for name in ("success", "error", "rejected", "cancelled"):
             self.set_class(self.status == name, f"-status-{name}")
         elapsed = monotonic() - self._started if self._started is not None else 0
         statuses = {
@@ -863,6 +874,7 @@ class ToolCallMessage(Vertical):
             "success": "Success",
             "error": "Error",
             "rejected": "Rejected",
+            "cancelled": "Stopped",
         }
         status = statuses.get(self.status, self.status)
         self.query_one(".tool-name", Static).update(literal_text(self._label()))

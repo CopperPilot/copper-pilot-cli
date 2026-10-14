@@ -17,7 +17,7 @@ from copper_pilot_cli.copper_presentation import (
     StatusBar,
     WelcomeBanner,
 )
-from copper_pilot_cli.copper_protocol import CopperMode
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, LocalToolBroker
 from copper_pilot_cli.copper_widgets import (
     MAX_WIDGET_TEXT,
@@ -295,6 +295,77 @@ async def test_mode_command_opens_and_resolves_modal_from_input_handler(tmp_path
         app.screen.dismiss("plan")
         await pilot.pause()
         assert app.copper_mode is CopperMode.PLAN
+
+
+@pytest.mark.asyncio
+async def test_effort_command_is_thread_state_and_updates_agent(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        area = app.query_one(TextArea)
+        area.text = "/effort"
+        area.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceScreen)
+        app.screen.dismiss("intelligence")
+        await pilot.pause()
+        assert app.copper_effort is CopperEffort.INTELLIGENCE
+        assert app.runtime.agent.effort is CopperEffort.INTELLIGENCE
+
+
+@pytest.mark.asyncio
+async def test_subagent_status_reuses_task_row_and_ignores_keepalive(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {
+                    "kind": "subagent",
+                    "id": "worker-1",
+                    "task": "Audit power",
+                    "status": "running",
+                },
+            }
+        )
+        row = app._subagent_tools["worker-1"]
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {"kind": "subagent", "id": "worker-1", "status": "keepalive"},
+            }
+        )
+        assert app._subagent_tools["worker-1"] is row
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {
+                    "kind": "subagent",
+                    "id": "worker-1",
+                    "status": "success",
+                    "output": "Evidence",
+                },
+            }
+        )
+        await pilot.pause()
+        assert row.canonical_name == "task"
+        assert row.status == "success"
+        assert row.output == "Evidence"
+        assert len(app._subagent_tools) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_switch_updates_mode_once(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    event = {"type": "copper.status_event", "data": {"kind": "plan_mode_switch"}}
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._custom_event(event)
+        await app._custom_event(event)
+        await pilot.pause()
+        assert app.copper_mode is CopperMode.PLAN
+        assert app.runtime.agent.mode is CopperMode.PLAN
+        assert app._plan_switch_tool is not None
+        assert len([row for row in app.query(ToolCallMessage) if row.tool_name == "task"]) == 1
 
 
 @pytest.mark.asyncio
@@ -622,7 +693,38 @@ async def test_hosted_ask_user_modal_round_trip(tmp_path) -> None:
         answer.value = "VCC_5V"
         answer.focus()
         await pilot.press("enter")
-        assert await answer_task == "VCC_5V"
+        assert await answer_task == {
+            "status": "answered",
+            "answer": "VCC_5V",
+            "source": "custom",
+        }
+
+
+@pytest.mark.asyncio
+async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        answer_task = asyncio.create_task(
+            app.request_question(
+                {"question": "Which connector?", "options": [" USB-C ", "", "Micro USB"]}
+            )
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceScreen)
+        app.screen.dismiss("option:0")
+        assert await answer_task == {
+            "status": "answered",
+            "answer": "USB-C",
+            "source": "option",
+        }
+
+        skip_task = asyncio.create_task(
+            app.request_question({"question": "Continue?", "options": ["Yes", "No"]})
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceScreen)
+        app.screen.dismiss("skip")
+        assert await skip_task == {"status": "skipped"}
 
 
 @pytest.mark.asyncio

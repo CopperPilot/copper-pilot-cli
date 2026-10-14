@@ -21,7 +21,7 @@ from copper_pilot_cli.copper_mcp import (
     registered_tool_names,
     resolve_workspace,
 )
-from copper_pilot_cli.copper_protocol import CopperMode
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode
 from copper_pilot_cli.copper_tools import ApprovalMode
 
 CREDENTIAL = DeviceCredential(
@@ -34,11 +34,21 @@ CREDENTIAL = DeviceCredential(
 class FakeAgent:
     last: FakeAgent | None = None
 
-    def __init__(self, workspace, *, credential, conversation_id, mode, tool_broker) -> None:
+    def __init__(
+        self,
+        workspace,
+        *,
+        credential,
+        conversation_id,
+        mode,
+        effort,
+        tool_broker,
+    ) -> None:
         self.workspace = workspace
         self.credential = credential
         self.conversation_id = conversation_id
         self.mode = mode
+        self.effort = effort
         self.tool_broker = tool_broker
         type(self).last = self
 
@@ -126,6 +136,7 @@ async def test_ask_uses_ask_mode_and_auto(tmp_path, monkeypatch) -> None:
     assert payload["ok"] is True
     assert payload["text"] == "Looks good."
     assert payload["mode"] == CopperMode.ASK.value
+    assert payload["effort"] == CopperEffort.BALANCED.value
     assert FakeAgent.last is not None
     assert FakeAgent.last.mode is CopperMode.ASK
     assert FakeAgent.last.tool_broker.mode is ApprovalMode.AUTO
@@ -139,6 +150,21 @@ async def test_plan_uses_plan_mode(tmp_path, monkeypatch) -> None:
     assert payload["mode"] == CopperMode.PLAN.value
     assert FakeAgent.last is not None
     assert FakeAgent.last.mode is CopperMode.PLAN
+
+
+@pytest.mark.asyncio
+async def test_plan_can_use_intelligence_effort(tmp_path, monkeypatch) -> None:
+    runtime = _patch_turn(monkeypatch, tmp_path)
+    payload = await handle_plan(
+        message="Propose a power tree",
+        workspace=str(tmp_path),
+        effort="intelligence",
+    )
+    assert payload["effort"] == CopperEffort.INTELLIGENCE.value
+    assert FakeAgent.last is not None
+    assert FakeAgent.last.effort is CopperEffort.INTELLIGENCE
+    assert runtime.values is not None
+    assert runtime.values["copper_effort"] == "intelligence"
 
 
 @pytest.mark.asyncio
@@ -256,6 +282,62 @@ async def test_collect_turn_reports_progress(tmp_path, monkeypatch) -> None:
     assert any("Starting" in note for note in notes)
     assert any("Inspecting" in note for note in notes)
     assert notes[-1] == "CopperPilot turn complete"
+
+
+@pytest.mark.asyncio
+async def test_collect_turn_reports_bounded_subagent_progress(tmp_path, monkeypatch) -> None:
+    class SubagentRuntime(FakeRuntime):
+        async def astream(self, values, _config):
+            self.values = values
+            yield (
+                (),
+                "custom",
+                {
+                    "type": "copper.status_event",
+                    "data": {
+                        "kind": "subagent",
+                        "id": "worker",
+                        "task": "Audit power",
+                        "status": "running",
+                    },
+                },
+            )
+            yield (
+                (),
+                "custom",
+                {
+                    "type": "copper.status_event",
+                    "data": {
+                        "kind": "subagent",
+                        "id": "worker",
+                        "status": "success",
+                        "output": "x" * 20_000,
+                    },
+                },
+            )
+            yield (
+                (),
+                "custom",
+                {"type": "copper.final", "data": {"success": True}},
+            )
+
+    _patch_turn(monkeypatch, tmp_path, SubagentRuntime())
+    notes: list[str] = []
+
+    async def progress(message: str) -> None:
+        notes.append(message)
+
+    payload = await handle_plan(
+        message="Plan",
+        workspace=str(tmp_path),
+        effort="intelligence",
+        progress=progress,
+    )
+    assert "Subagent: Audit power — Running" in notes
+    assert "Subagent: Audit power — Done" in notes
+    status_events = [event for event in payload["events"] if event["kind"] == "status_event"]
+    assert status_events[-1]["data"]["status"] == "success"
+    assert "output" not in status_events[-1]["data"]
 
 
 def test_server_registers_six_tools() -> None:

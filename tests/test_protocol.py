@@ -11,6 +11,7 @@ from copper_pilot_cli.copper_protocol import (
     MAX_CHAT_START_BYTES,
     ChatMessage,
     ChatRequest,
+    CopperEffort,
     CopperMode,
     EventKind,
     HostedChatClient,
@@ -39,6 +40,13 @@ def test_chat_start_is_protocol_v1_and_disables_computer_use() -> None:
     assert frame["protocol_version"] == 1
     assert frame["request"]["enable_computer_use"] is False
     assert frame["request"]["mode"] == "agent"
+    assert frame["request"]["effort"] == "balanced"
+
+
+def test_effort_normalizes_and_serializes() -> None:
+    assert request(effort="intelligence").effort is CopperEffort.INTELLIGENCE
+    assert request(effort="unknown").effort is CopperEffort.BALANCED
+    assert make_chat_start(request(effort="intelligence"))["request"]["effort"] == ("intelligence")
 
 
 def test_context_strips_inline_attachments_and_keeps_newest() -> None:
@@ -167,6 +175,60 @@ async def test_hosted_stream_enforces_aggregate_byte_budget(monkeypatch) -> None
     client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
     with pytest.raises(ProtocolError, match="stream byte budget"):
         _ = [event async for event in client.stream(request(), lambda _request: None)]
+
+
+@pytest.mark.asyncio
+async def test_hosted_stream_preserves_subagent_status_event(monkeypatch) -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.frames = [
+                json.dumps(
+                    {
+                        "type": "event",
+                        "chat_response": {
+                            "status_event": {
+                                "kind": "subagent",
+                                "id": "worker",
+                                "task": "Audit",
+                                "status": "running",
+                            }
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "final",
+                        "chat_response": {"is_final": True, "success": True},
+                    }
+                ),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, _value):
+            return None
+
+        async def recv(self):
+            return self.frames.pop(0)
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: Socket())
+    events = [
+        event
+        async for event in HostedChatClient(
+            "https://example.test", "cf_live_key", "fingerprint"
+        ).stream(request(), lambda _request: None)
+    ]
+    assert events[0].kind is EventKind.STATUS_EVENT
+    assert events[0].data == {
+        "kind": "subagent",
+        "id": "worker",
+        "task": "Audit",
+        "status": "running",
+    }
 
 
 @pytest.mark.asyncio

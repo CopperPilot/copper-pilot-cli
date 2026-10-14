@@ -16,7 +16,7 @@ from urllib.parse import urlparse, urlunparse
 
 import certifi
 from markdownify import markdownify
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -77,6 +77,21 @@ class CopperMode(StrEnum):
     ASK = "ask"
 
 
+class CopperEffort(StrEnum):
+    """CopperPilot conversational effort."""
+
+    BALANCED = "balanced"
+    INTELLIGENCE = "intelligence"
+
+
+def normalize_effort(value: Any) -> CopperEffort:
+    """Unknown or missing effort stays on the free default."""
+    try:
+        return CopperEffort(str(value or CopperEffort.BALANCED).strip().lower())
+    except ValueError:
+        return CopperEffort.BALANCED
+
+
 class ChatMessage(BaseModel):
     """Portable context message."""
 
@@ -112,6 +127,7 @@ class ChatRequest(BaseModel):
     conversation_id: str
     initial_file_tree: str | None = None
     mode: CopperMode = CopperMode.AGENT
+    effort: CopperEffort = CopperEffort.BALANCED
     agentic_mode: bool = False
     schematic_path: str | None = None
     pcb_path: str | None = None
@@ -122,6 +138,11 @@ class ChatRequest(BaseModel):
     skill_manifest_id: str | None = None
     runtime_context: dict[str, Any] | None = None
     enable_computer_use: Literal[False] = False
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def normalize_effort_field(cls, value: Any) -> CopperEffort:
+        return normalize_effort(value)
 
 
 class ToolRequest(BaseModel):

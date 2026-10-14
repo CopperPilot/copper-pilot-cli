@@ -319,7 +319,10 @@ class LocalToolBroker:
         return False
 
     async def _no_question_handler(self, _question: Any) -> Any:
-        raise ToolRejected("No interactive question handler is available.")
+        raise ToolRejected(
+            "Interactive clarification is unavailable in headless and MCP runs. "
+            "Continue this thread in the CopperPilot TUI to answer."
+        )
 
     def begin_turn(self) -> None:
         """Scope idempotent tool-call results to one hosted turn."""
@@ -474,11 +477,7 @@ class LocalToolBroker:
 
     async def _execute_once(self, request: ToolRequest) -> Any:
         if request.tool_name == "ask_user_question":
-            timeout = max((request.timeout_ms or 105_000) / 1000, 1)
-            try:
-                return await asyncio.wait_for(self.ask_user(request.arguments), timeout)
-            except TimeoutError:
-                return {"error": "Ask-user prompt timed out."}
+            return await self.ask_user(request.arguments)
 
         canonical_name = canonical_tool_name(request.tool_name)
         arguments, external = self._normalize_arguments(request, canonical_name)

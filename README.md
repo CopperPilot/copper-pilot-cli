@@ -56,11 +56,17 @@ copper-pilot ./my-board
 copper-pilot --resume
 copper-pilot threads list
 copper-pilot -n -m "Review this board" --json
+copper-pilot --mode plan --effort intelligence -m "Survey and plan this board"
 ```
 
 Both `copper-pilot` and `copper-pilot-cli` run the same program.
 `copper-pilot --help` lists flags; [docs/cli.md](docs/cli.md) is the full
 command reference.
+
+Balanced effort is the default. Paid-plan users can select Intelligence with
+`--effort intelligence` or interactive `/effort`. Intelligence uses
+server-owned survey subagents and shows their lifecycle through the existing
+Deep Agents task rows; Intelligence Plan turns survey before writing a plan.
 
 ## Use from Claude Code, Cursor, or Codex
 
@@ -96,13 +102,16 @@ the parent directory is mode `0700` and the file is mode `0600`.
 ## LangChain
 
 ```python
-from copper_pilot_cli.copper_protocol import CopperMode
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode
 from copper_pilot_cli.langchain import CopperPilotAgent
 from helper import drc_violations, erc_errors, render_pcb, run
 
 PLAN = CopperMode.PLAN
 
-copper_pilot = CopperPilotAgent(workspace="esp32")
+copper_pilot = CopperPilotAgent(
+    workspace="esp32",
+    effort=CopperEffort.INTELLIGENCE,
+)
 
 run(copper_pilot, "Build me an ESP32 dev board.", PLAN)
 run(copper_pilot, "Let us build this plan.")
