@@ -30,6 +30,7 @@ valid.
 | `--no-stream` | Print the final assistant message after the run instead of streaming. |
 | `--json` | Emit JSON events (or a final JSON document with `--no-stream`). |
 | `--mode {agent,plan,ask}` | Hosted chat mode. Default: `agent`. |
+| `--effort {balanced,intelligence}` | Hosted effort. Default: `balanced`; Intelligence requires a paid plan. |
 | `-y`, `--auto-approve` | Auto approval: routine writes and known-safe shell still run; unknown actions prompt. |
 | `--yolo` | Permit local side effects without prompting. Must be set explicitly. |
 | `--version` | Print the package version. |
@@ -41,6 +42,7 @@ copper-pilot ./my-board
 copper-pilot --resume
 copper-pilot -n -m "Review this board" --json
 copper-pilot ./my-board --mode plan -m "Propose a power tree"
+copper-pilot ./my-board --mode plan --effort intelligence -m "Survey and plan the power tree"
 ```
 
 Headless mode is also used when `--message` is set and stdout is not a TTY.
@@ -60,14 +62,32 @@ write to stdout; the protocol owns it.
 | Tool | Role |
 |------|------|
 | `status` | Login state and discovered schematic/PCB paths. No hosted call. |
-| `ask` | `--mode ask`. Auto approval. Optional `thread_id`. |
-| `plan` | `--mode plan`. Auto approval. |
-| `run` | `--mode agent`. `approval` is `auto` (default) or `yolo`. |
-| `resume` | Continue `thread_id`. Same approval as `run`. |
+| `ask` | `--mode ask`. Auto approval. Optional `thread_id` and `effort`. |
+| `plan` | `--mode plan`. Auto approval. Optional `effort`. |
+| `run` | `--mode agent`. Optional `effort`; `approval` is `auto` (default) or `yolo`. |
+| `resume` | Continue `thread_id`. Optional `mode`, `effort`, and the same approval as `run`. |
 | `threads_list` | List threads for this workspace (`limit`, `all_workspaces`). |
 
 Workspace is the tool argument, else `CLAUDE_PROJECT_DIR`, else the process
 current directory. Manual approval is TUI-only. See [harness.md](harness.md).
+
+## Effort and Intelligence
+
+Balanced is the default. Intelligence is available on paid plans and lets the
+hosted parent run one to four survey subagents. Intelligence Plan turns survey
+before creating or revising a plan. Workers are server-owned, survey-only, and
+appear in the TUI through the existing Deep Agents task rows; they do not open
+nested chats or execute through the local tool broker.
+
+The interactive `/effort` command changes effort for the current thread.
+Resuming that thread restores it; a new thread starts Balanced. In headless
+text mode, worker state changes print as compact lines. `--json` retains raw
+`status_event` objects.
+
+Interactive clarification can offer suggested answers, custom text, or Skip
+and waits without a client timeout. Headless and MCP calls cannot present that
+UI, so an `ask_user_question` tool request is rejected with a clear error
+instead of guessing or auto-skipping.
 
 ## Auth
 

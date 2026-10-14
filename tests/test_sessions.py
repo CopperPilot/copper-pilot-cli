@@ -6,13 +6,15 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from copper_pilot_cli.copper_graph import create_copper_graph
-from copper_pilot_cli.copper_protocol import CopperEvent, CopperMode, EventKind
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperEvent, CopperMode, EventKind
+from copper_pilot_cli.copper_status_events import COPPER_CONTEXT_KEY
 from copper_pilot_cli.sessions import list_threads
 
 
 @dataclass
 class FakeAgent:
     mode: CopperMode = CopperMode.AGENT
+    effort: CopperEffort = CopperEffort.BALANCED
 
     async def astream_events_raw(self, _input):
         yield CopperEvent(EventKind.REASONING, "Checking the rails")
@@ -36,7 +38,11 @@ async def test_graph_checkpoints_langchain_messages_and_copper_events(
         streamed = [
             item
             async for item in runtime.astream(
-                {"messages": [HumanMessage(content="Review it")], "copper_mode": "ask"},
+                {
+                    "messages": [HumanMessage(content="Review it")],
+                    "copper_mode": "ask",
+                    "copper_effort": "intelligence",
+                },
                 config,
             )
         ]
@@ -44,6 +50,7 @@ async def test_graph_checkpoints_langchain_messages_and_copper_events(
         assert isinstance(state.values["messages"][-1], AIMessage)
         assert state.values["messages"][-1].content == "Board looks good."
         assert state.values["copper_mode"] == "ask"
+        assert state.values["copper_effort"] == "intelligence"
         assert any(item[1] == "custom" for item in streamed)
 
     rows = await list_threads(cwd=str(workspace), include_message_count=True)
@@ -95,3 +102,65 @@ async def test_fresh_runtime_resumes_prior_messages_exactly_once(monkeypatch, tm
         "Board looks good.",
         "second turn",
     ]
+
+
+@pytest.mark.asyncio
+async def test_graph_persists_hidden_subagent_context_and_plan_handoff(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    @dataclass
+    class IntelligenceAgent(FakeAgent):
+        async def astream_events_raw(self, _input):
+            yield CopperEvent(
+                EventKind.STATUS_EVENT,
+                {
+                    "kind": "subagent",
+                    "id": "worker",
+                    "task": "Audit power",
+                    "status": "running",
+                },
+            )
+            yield CopperEvent(
+                EventKind.STATUS_EVENT,
+                {"kind": "subagent", "id": "worker", "status": "keepalive"},
+            )
+            yield CopperEvent(
+                EventKind.STATUS_EVENT,
+                {
+                    "kind": "subagent",
+                    "id": "worker",
+                    "status": "success",
+                    "output": "Evidence",
+                },
+            )
+            yield CopperEvent(EventKind.STATUS_EVENT, {"kind": "plan_mode_switch"})
+            yield CopperEvent(EventKind.TEXT, "Parent synthesis")
+            yield CopperEvent(EventKind.FINAL, {"success": True, "is_final": True})
+
+    async with create_copper_graph(IntelligenceAgent()) as runtime:
+        config = runtime.config("intelligence-thread", workspace)
+        _ = [
+            item
+            async for item in runtime.astream(
+                {
+                    "messages": [HumanMessage(content="Plan it")],
+                    "copper_mode": "agent",
+                    "copper_effort": "intelligence",
+                },
+                config,
+            )
+        ]
+        state = await runtime.aget_state(config)
+
+    response = state.values["messages"][-1]
+    assert response.content == "Parent synthesis"
+    assert response.additional_kwargs[COPPER_CONTEXT_KEY] == (
+        "\n[Subagent: Audit power]\nEvidence\n\nSwitched to Plan mode"
+    )
+    assert state.values["copper_mode"] == "plan"
+    assert state.values["copper_effort"] == "intelligence"

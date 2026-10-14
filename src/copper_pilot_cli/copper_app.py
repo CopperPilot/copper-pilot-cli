@@ -58,7 +58,17 @@ from copper_pilot_cli.copper_presentation import (
     TurnState,
     WelcomeBanner,
 )
-from copper_pilot_cli.copper_protocol import CopperMode, HostedChatClient, error_message
+from copper_pilot_cli.copper_protocol import (
+    CopperEffort,
+    CopperMode,
+    HostedChatClient,
+    error_message,
+    normalize_effort,
+)
+from copper_pilot_cli.copper_status_events import (
+    SubagentStatus,
+    normalize_subagent_status,
+)
 from copper_pilot_cli.copper_tools import (
     ApprovalMode,
     ApprovalRequest,
@@ -94,6 +104,7 @@ logger = logging.getLogger(__name__)
 class ChoiceScreen(ModalScreen[str | None]):
     """Small reusable command/approval picker."""
 
+    AUTO_FOCUS = "OptionList"
     DEFAULT_CSS = """
     ChoiceScreen {
         align: center middle;
@@ -131,6 +142,7 @@ class ChoiceScreen(ModalScreen[str | None]):
 class QuestionScreen(ModalScreen[str | None]):
     """Free-form hosted ask-user prompt."""
 
+    AUTO_FOCUS = "#answer"
     DEFAULT_CSS = """
     QuestionScreen { align: center middle; }
     QuestionScreen > #question-box {
@@ -193,6 +205,7 @@ class CopperPilotApp(App[None]):
         thread_id: str,
         *,
         mode: CopperMode = CopperMode.AGENT,
+        effort: CopperEffort = CopperEffort.BALANCED,
         initial_message: str | None = None,
     ) -> None:
         super().__init__()
@@ -201,12 +214,16 @@ class CopperPilotApp(App[None]):
         self.workspace = workspace
         self.thread_id = thread_id
         self.copper_mode = mode
+        self.copper_effort = effort
         self.initial_message = initial_message
         self._turn_task: asyncio.Task[None] | None = None
         self._assistant: AssistantMessage | None = None
         self._last_assistant_content = ""
         self._reasoning: ReasoningMessage | None = None
         self._tools: dict[str, ToolCallMessage] = {}
+        self._subagent_tools: dict[str, ToolCallMessage] = {}
+        self._subagent_statuses: dict[str, SubagentStatus] = {}
+        self._plan_switch_tool: ToolCallMessage | None = None
         self._tool_groups: dict[str, ToolGroupSummary] = {}
         self._tool_group: ToolGroupSummary | None = None
         self._work_run: WorkRunGroup | None = None
@@ -286,6 +303,9 @@ class CopperPilotApp(App[None]):
         state = await self.runtime.aget_state(self._config())
         values = getattr(state, "values", {}) or {}
         self._tools.clear()
+        self._subagent_tools.clear()
+        self._subagent_statuses.clear()
+        self._plan_switch_tool = None
         self._tool_groups.clear()
         self._tool_group = None
         self._work_run = None
@@ -336,7 +356,9 @@ class CopperPilotApp(App[None]):
             self.copper_mode = CopperMode(values.get("copper_mode", self.copper_mode.value))
         except ValueError:
             self.copper_mode = CopperMode.AGENT
+        self.copper_effort = normalize_effort(values.get("copper_effort", CopperEffort.BALANCED))
         self.runtime.agent.mode = self.copper_mode
+        self.runtime.agent.effort = self.copper_effort
         events = values.get("copper_events", [])
         for event in events if isinstance(events, list) else []:
             if not isinstance(event, dict):
@@ -359,6 +381,7 @@ class CopperPilotApp(App[None]):
             "feedback",
             "help",
             "hooks",
+            "effort",
             "mode",
             "resume",
             "threads",
@@ -441,6 +464,9 @@ class CopperPilotApp(App[None]):
         self._assistant = None
         self._reasoning = None
         self._tools.clear()
+        self._subagent_tools.clear()
+        self._subagent_statuses.clear()
+        self._plan_switch_tool = None
         self._tool_groups.clear()
         self._tool_group = None
         self._work_run = None
@@ -571,6 +597,7 @@ class CopperPilotApp(App[None]):
                 {
                     "messages": [HumanMessage(content=value)],
                     "copper_mode": self.copper_mode.value,
+                    "copper_effort": self.copper_effort.value,
                 },
                 self._config(),
             ):
@@ -691,9 +718,7 @@ class CopperPilotApp(App[None]):
         elif kind == "copper.status":
             self._update_status(str(data)[:120].replace("\n", " "))
         elif kind == "copper.status_event" and isinstance(data, dict):
-            label = data.get("message") or data.get("status") or data.get("type")
-            if label:
-                self._update_status(str(label)[:120].replace("\n", " "))
+            await self._handle_status_event(data)
         elif kind == "copper.final" and isinstance(data, dict):
             if (data.get("success") is False or data.get("error")) and self._work_run is not None:
                 self._work_run.mark_failed()
@@ -711,6 +736,58 @@ class CopperPilotApp(App[None]):
             self._finalize_work_run()
             await self._mount(ErrorMessage(message))
 
+    async def _handle_status_event(self, data: dict[str, Any]) -> None:
+        if data.get("kind") == "subagent":
+            identifier = str(data.get("id") or "")
+            status = normalize_subagent_status(
+                data,
+                self._subagent_statuses.get(identifier),
+            )
+            if status is None:
+                return
+            self._subagent_statuses[status.id] = status
+            tool = self._subagent_tools.get(status.id)
+            work_run = await self._ensure_work_run()
+            if tool is None:
+                tool = ToolCallMessage(
+                    "task",
+                    {"description": status.task or "Survey"},
+                    workspace=self.workspace,
+                )
+                self._subagent_tools[status.id] = tool
+                await work_run.add_unit(tool)
+            else:
+                tool.args["description"] = status.task or "Survey"
+                work_run.touch_unit(tool)
+            if status.status == "running":
+                if tool.status != "running":
+                    tool.set_running()
+            elif status.status == "success":
+                tool.set_success(status.output)
+            elif status.status == "cancelled":
+                tool.set_cancelled(status.error or None)
+                work_run.mark_failed()
+            else:
+                tool.set_error(status.error or "Subagent failed.")
+                work_run.mark_failed()
+            return
+        if data.get("kind") == "plan_mode_switch":
+            self.copper_mode = CopperMode.PLAN
+            self.runtime.agent.mode = CopperMode.PLAN
+            if self._plan_switch_tool is None:
+                work_run = await self._ensure_work_run()
+                self._plan_switch_tool = ToolCallMessage(
+                    "task",
+                    {"description": "Switched to Plan mode"},
+                    workspace=self.workspace,
+                )
+                await work_run.add_unit(self._plan_switch_tool)
+                self._plan_switch_tool.set_success()
+            return
+        label = data.get("message") or data.get("status") or data.get("type")
+        if label:
+            self._update_status(str(label)[:120].replace("\n", " "))
+
     async def _command(self, value: str) -> None:
         command, _, argument = value.partition(" ")
         if command in {"/quit", "/exit"}:
@@ -718,7 +795,7 @@ class CopperPilotApp(App[None]):
         elif command == "/help":
             await self._mount(
                 AssistantMessage(
-                    "Commands: `/mode`, `/resume`, `/approval`, `/context`, `/copy`, "
+                    "Commands: `/mode`, `/effort`, `/resume`, `/approval`, `/context`, `/copy`, "
                     "`/cwd`, `/build`, `/hooks`, `/auth`, `/tools`, `/tokens [json]`, "
                     "`/theme`, `/update`, `/version`, `/feedback`, `/clear`, `/quit`"
                 )
@@ -740,6 +817,7 @@ class CopperPilotApp(App[None]):
                             f"- Workspace: `{self.workspace}`",
                             f"- Thread: `{self.thread_id}`",
                             f"- CopperPilot mode: `{self.copper_mode.value}`",
+                            f"- Effort: `{self.copper_effort.value}`",
                             f"- Approval: `{self.broker.mode.value}`",
                             f"- Schematic: `{context.schematic_path or 'none'}`",
                             f"- PCB: `{context.pcb_path or 'none'}`",
@@ -762,11 +840,13 @@ class CopperPilotApp(App[None]):
                 workspace = Path(choice)
                 self.workspace = workspace
                 self.thread_id = generate_thread_id()
+                self.copper_effort = CopperEffort.BALANCED
                 self.broker.set_workspace(workspace)
                 self.hooks = HookRunner(workspace, self.broker)
                 self.runtime.agent.workspace = workspace
                 self.runtime.agent.context = discover_workspace(workspace)
                 self.runtime.agent.conversation_id = self.thread_id
+                self.runtime.agent.effort = self.copper_effort
                 self.query_one(ChatInput).set_cwd(workspace)
                 self.query_one(StatusBar).set_workspace(workspace)
                 remember_workspace(self.runtime.agent.context)
@@ -783,6 +863,17 @@ class CopperPilotApp(App[None]):
             if choice:
                 self.copper_mode = CopperMode(choice)
                 self.runtime.agent.mode = self.copper_mode
+                self._update_status()
+        elif command == "/effort":
+            choice = await self._wait_for_modal(
+                ChoiceScreen(
+                    "CopperPilot effort",
+                    [(item.value, item.value.title()) for item in CopperEffort],
+                )
+            )
+            if choice:
+                self.copper_effort = CopperEffort(choice)
+                self.runtime.agent.effort = self.copper_effort
                 self._update_status()
         elif command == "/build":
             if not argument:
@@ -1040,7 +1131,44 @@ class CopperPilotApp(App[None]):
             if isinstance(arguments, dict)
             else str(arguments)
         )
-        return await self._wait_for_modal(QuestionScreen(prompt)) or "No response"
+        options = (
+            [
+                str(option).strip()
+                for option in arguments.get("options", [])
+                if isinstance(option, str) and option.strip()
+            ]
+            if isinstance(arguments, dict) and isinstance(arguments.get("options"), list)
+            else []
+        )
+        if options:
+            choice = await self._wait_for_modal(
+                ChoiceScreen(
+                    prompt,
+                    [
+                        *((f"option:{index}", option) for index, option in enumerate(options)),
+                        ("custom", "Something else…"),
+                        ("skip", "Skip"),
+                    ],
+                )
+            )
+            if choice == "skip" or choice is None:
+                return {"status": "skipped"}
+            if choice == "custom":
+                answer = await self._wait_for_modal(QuestionScreen(prompt))
+                if not answer:
+                    return {"status": "skipped"}
+                return {"status": "answered", "answer": answer, "source": "custom"}
+            if isinstance(choice, str) and choice.startswith("option:"):
+                index = int(choice.partition(":")[2])
+                return {
+                    "status": "answered",
+                    "answer": options[index],
+                    "source": "option",
+                }
+        answer = await self._wait_for_modal(QuestionScreen(prompt))
+        if not answer:
+            return {"status": "skipped"}
+        return {"status": "answered", "answer": answer, "source": "custom"}
 
     async def action_cancel_or_quit(self) -> None:
         if self._turn_task and not self._turn_task.done():

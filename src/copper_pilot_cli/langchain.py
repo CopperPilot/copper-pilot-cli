@@ -16,12 +16,14 @@ from copper_pilot_cli.copper_auth import DeviceCredential, load_credential
 from copper_pilot_cli.copper_protocol import (
     ChatMessage,
     ChatRequest,
+    CopperEffort,
     CopperEvent,
     CopperMode,
     EventKind,
     HostedChatClient,
     PlanContext,
 )
+from copper_pilot_cli.copper_status_events import COPPER_CONTEXT_KEY
 from copper_pilot_cli.copper_tools import LocalToolBroker
 from copper_pilot_cli.copper_workspace import (
     build_initial_file_tree,
@@ -62,6 +64,10 @@ def _context(messages: Sequence[BaseMessage]) -> list[ChatMessage]:
         content = (
             message.content if isinstance(message.content, str) else json.dumps(message.content)
         )
+        if message.type == "ai":
+            hidden = message.additional_kwargs.get(COPPER_CONTEXT_KEY)
+            if isinstance(hidden, str) and hidden:
+                content = f"{content.rstrip()}\n{hidden}".strip()
         result.append(ChatMessage(role=role, content=content))
     return result
 
@@ -76,6 +82,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         credential: DeviceCredential | None = None,
         conversation_id: str | None = None,
         mode: CopperMode = CopperMode.AGENT,
+        effort: CopperEffort = CopperEffort.BALANCED,
         workflow: str | None = None,
         skill_manifest_id: str | None = None,
         plan_context: PlanContext | None = None,
@@ -89,6 +96,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             raise RuntimeError("CopperPilot login is required. Run `copper-pilot auth login`.")
         self.conversation_id = conversation_id or str(uuid.uuid4())
         self.mode = mode
+        self.effort = effort
         self.workflow = workflow
         self.skill_manifest_id = skill_manifest_id
         self.plan_context = plan_context
@@ -112,6 +120,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             workspace_path=str(self.workspace),
             conversation_id=self.conversation_id,
             mode=self.mode,
+            effort=self.effort,
             agentic_mode=self.mode is CopperMode.AGENT or self.plan_context is not None,
             workflow=self.workflow,
             skill_manifest_id=self.skill_manifest_id,

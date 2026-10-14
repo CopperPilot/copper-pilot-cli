@@ -11,7 +11,9 @@ Rules:
 
 - Call `status` first if login or workspace paths are unknown.
 - Prefer `ask` unless the user asked for a schematic or PCB change. Use `plan` for a plan, `run` to apply a change, `resume` with a prior `thread_id`. `resume` defaults to agent mode (mutating); pass `mode="ask"` to continue a read-only conversation without escalating write access.
+- Use `effort="intelligence"` only when the user requests a deep survey or Intelligence and has a paid plan. Balanced is the default. Intelligence workers survey only; the parent owns the final answer or plan.
 - Pass `approval=yolo` only when the user explicitly asked to skip local approval. Default is Auto.
 - Do not Edit or Write KiCad files. Leave schematic and PCB side effects to CopperPilot.
 - If a tool returns `login_required`, tell the user to run `copper-pilot auth login` in a terminal.
+- MCP cannot answer interactive clarification prompts. If one is rejected, return the `thread_id` and ask the user to continue it in the CopperPilot terminal TUI.
 - Return a short specialist memo plus `thread_id`. Firmware, git, and docs stay with the parent agent.

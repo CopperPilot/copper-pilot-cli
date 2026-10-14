@@ -14,7 +14,12 @@ from mcp.server.fastmcp import Context, FastMCP
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
 from copper_pilot_cli.copper_graph import create_copper_graph
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
-from copper_pilot_cli.copper_protocol import CopperMode, EventKind, error_message
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind, error_message
+from copper_pilot_cli.copper_status_events import (
+    SubagentStatus,
+    normalize_subagent_status,
+    subagent_progress_label,
+)
 from copper_pilot_cli.copper_tools import ApprovalMode, LocalToolBroker
 from copper_pilot_cli.copper_workspace import (
     canonical_workspace,
@@ -28,15 +33,23 @@ INSTRUCTIONS = (
     "Delegate electronics design tasks to CopperPilot. Prefer `ask` unless the "
     "user asked for a schematic or PCB change. Do not hand-edit KiCad files "
     "while a CopperPilot run is in flight. Run `copper-pilot auth login` in a "
-    "terminal if a tool reports that login is required."
+    "terminal if a tool reports that login is required. Effort defaults to "
+    "balanced; use intelligence only for paid-plan deep surveys. MCP cannot "
+    "answer interactive clarifications; continue the thread in the terminal TUI."
 )
 
 LOGIN_MESSAGE = "Login required; run `copper-pilot auth login` interactively."
 ProgressFn = Callable[[str], Awaitable[None]]
 ApprovalName = Literal["auto", "yolo"]
 ModeName = Literal["ask", "plan", "agent"]
+EffortName = Literal["balanced", "intelligence"]
 
-_DIGEST_KINDS = {EventKind.STATUS.value, EventKind.ERROR.value, EventKind.FINAL.value}
+_DIGEST_KINDS = {
+    EventKind.STATUS.value,
+    EventKind.STATUS_EVENT.value,
+    EventKind.ERROR.value,
+    EventKind.FINAL.value,
+}
 
 
 def resolve_workspace(workspace: str | None = None) -> Path:
@@ -76,6 +89,7 @@ def _progress(ctx: Context | None) -> ProgressFn | None:
 
 def _digest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     digest: list[dict[str, Any]] = []
+    subagents: dict[str, SubagentStatus] = {}
     for event in events:
         kind = str(event.get("type") or "").removeprefix("copper.")
         if kind not in _DIGEST_KINDS:
@@ -83,7 +97,34 @@ def _digest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         item: dict[str, Any] = {"kind": kind, "title": event.get("title")}
         if kind in {EventKind.ERROR.value, EventKind.FINAL.value}:
             item["data"] = event.get("data")
+        elif kind == EventKind.STATUS_EVENT.value:
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            if data.get("kind") == "subagent":
+                identifier = str(data.get("id") or "")
+                status = normalize_subagent_status(data, subagents.get(identifier))
+                if status is not None:
+                    subagents[status.id] = status
+                continue
+            item["data"] = {
+                key: data[key] for key in ("kind", "id", "task", "status", "error") if key in data
+            }
         digest.append(item)
+    digest.extend(
+        {
+            "kind": EventKind.STATUS_EVENT.value,
+            "title": None,
+            "data": {
+                "kind": "subagent",
+                "id": status.id,
+                "task": status.task,
+                "status": status.status,
+                **({"error": status.error} if status.error else {}),
+            },
+        }
+        for status in subagents.values()
+    )
     return digest[-8:]
 
 
@@ -110,6 +151,7 @@ async def collect_turn(
     workspace: Path,
     thread_id: str,
     approval: ApprovalMode,
+    effort: CopperEffort | None = CopperEffort.BALANCED,
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     """Run one hosted turn and return a compact conductor payload."""
@@ -125,22 +167,28 @@ async def collect_turn(
         always_allow_shell_commands=normal_shell,
         always_allow_dangerous_shell_commands=dangerous_shell,
     )
+    initial_effort = effort or CopperEffort.BALANCED
     agent = CopperPilotAgent(
         workspace,
         credential=credential,
         conversation_id=thread_id,
         mode=mode,
+        effort=initial_effort,
         tool_broker=broker,
     )
     events: list[dict[str, Any]] = []
+    subagents: dict[str, SubagentStatus] = {}
     if progress is not None:
         await progress(f"Starting CopperPilot {mode.value} turn")
     async with create_copper_graph(agent) as runtime:
         config = runtime.config(thread_id, workspace)
-        async for item in runtime.astream(
-            {"messages": [HumanMessage(content=message)], "copper_mode": mode.value},
-            config,
-        ):
+        values = {
+            "messages": [HumanMessage(content=message)],
+            "copper_mode": mode.value,
+        }
+        if effort is not None:
+            values["copper_effort"] = effort.value
+        async for item in runtime.astream(values, config):
             _namespace, stream_mode, data = item
             if stream_mode != "custom" or not isinstance(data, dict):
                 continue
@@ -151,6 +199,20 @@ async def collect_turn(
                 EventKind.REASONING.value,
             }:
                 await progress(str(data.get("data") or kind))
+            elif (
+                progress is not None
+                and kind == EventKind.STATUS_EVENT.value
+                and isinstance(data.get("data"), dict)
+            ):
+                payload = data["data"]
+                if payload.get("kind") == "subagent":
+                    identifier = str(payload.get("id") or "")
+                    status = normalize_subagent_status(payload, subagents.get(identifier))
+                    if status is not None:
+                        subagents[status.id] = status
+                        await progress(subagent_progress_label(status))
+                elif payload.get("kind") == "plan_mode_switch":
+                    await progress("Switched to Plan mode")
         state = await runtime.aget_state(config)
     messages = (getattr(state, "values", {}) or {}).get("messages", [])
     assistant = str(messages[-1].content) if messages else ""
@@ -162,6 +224,7 @@ async def collect_turn(
         "text": assistant,
         "thread_id": thread_id,
         "mode": mode.value,
+        "effort": agent.effort.value,
         "success": not failed,
         "error": error,
         "events": _digest(events),
@@ -192,11 +255,13 @@ async def handle_ask(
     message: str,
     workspace: str | None = None,
     thread_id: str | None = None,
+    effort: EffortName = "balanced",
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     return await _handle_named_turn(
         message=message,
         mode=CopperMode.ASK,
+        effort=CopperEffort(effort),
         workspace=workspace,
         thread_id=thread_id,
         approval=ApprovalMode.AUTO,
@@ -209,11 +274,13 @@ async def handle_plan(
     message: str,
     workspace: str | None = None,
     thread_id: str | None = None,
+    effort: EffortName = "balanced",
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     return await _handle_named_turn(
         message=message,
         mode=CopperMode.PLAN,
+        effort=CopperEffort(effort),
         workspace=workspace,
         thread_id=thread_id,
         approval=ApprovalMode.AUTO,
@@ -226,12 +293,14 @@ async def handle_run(
     message: str,
     workspace: str | None = None,
     thread_id: str | None = None,
+    effort: EffortName = "balanced",
     approval: ApprovalName = "auto",
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     return await _handle_named_turn(
         message=message,
         mode=CopperMode.AGENT,
+        effort=CopperEffort(effort),
         workspace=workspace,
         thread_id=thread_id,
         approval=_approval_mode(approval),
@@ -245,6 +314,7 @@ async def handle_resume(
     message: str,
     workspace: str | None = None,
     mode: ModeName = "agent",
+    effort: EffortName | None = None,
     approval: ApprovalName = "auto",
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
@@ -257,6 +327,7 @@ async def handle_resume(
     return await _handle_named_turn(
         message=message,
         mode=CopperMode(mode),
+        effort=CopperEffort(effort) if effort is not None else None,
         workspace=workspace,
         thread_id=thread_id,
         approval=_approval_mode(approval),
@@ -303,6 +374,7 @@ async def _handle_named_turn(
     *,
     message: str,
     mode: CopperMode,
+    effort: CopperEffort | None,
     workspace: str | None,
     thread_id: str | None,
     approval: ApprovalMode,
@@ -315,6 +387,7 @@ async def _handle_named_turn(
     return await collect_turn(
         message=message,
         mode=mode,
+        effort=effort,
         workspace=path,
         thread_id=thread_id or generate_thread_id(),
         approval=approval,
@@ -336,6 +409,7 @@ def create_server() -> FastMCP:
         message: str,
         workspace: str | None = None,
         thread_id: str | None = None,
+        effort: EffortName = "balanced",
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Ask CopperPilot a read-oriented electronics question. Does not YOLO."""
@@ -343,6 +417,7 @@ def create_server() -> FastMCP:
             message=message,
             workspace=workspace,
             thread_id=thread_id,
+            effort=effort,
             progress=_progress(ctx),
         )
 
@@ -351,6 +426,7 @@ def create_server() -> FastMCP:
         message: str,
         workspace: str | None = None,
         thread_id: str | None = None,
+        effort: EffortName = "balanced",
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Ask CopperPilot to propose a design plan without applying it."""
@@ -358,6 +434,7 @@ def create_server() -> FastMCP:
             message=message,
             workspace=workspace,
             thread_id=thread_id,
+            effort=effort,
             progress=_progress(ctx),
         )
 
@@ -367,6 +444,7 @@ def create_server() -> FastMCP:
         workspace: str | None = None,
         thread_id: str | None = None,
         approval: ApprovalName = "auto",
+        effort: EffortName = "balanced",
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Delegate a mutating electronics task. approval is auto or yolo."""
@@ -375,6 +453,7 @@ def create_server() -> FastMCP:
             workspace=workspace,
             thread_id=thread_id,
             approval=approval,
+            effort=effort,
             progress=_progress(ctx),
         )
 
@@ -385,6 +464,7 @@ def create_server() -> FastMCP:
         workspace: str | None = None,
         mode: ModeName = "agent",
         approval: ApprovalName = "auto",
+        effort: EffortName | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Continue an existing CopperPilot thread. thread_id is required.
@@ -398,6 +478,7 @@ def create_server() -> FastMCP:
             workspace=workspace,
             mode=mode,
             approval=approval,
+            effort=effort,
             progress=_progress(ctx),
         )
 

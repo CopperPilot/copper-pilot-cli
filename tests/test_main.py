@@ -13,17 +13,30 @@ def test_chat_cli_defaults_to_current_directory_and_fresh_thread() -> None:
     assert args.workspace == "."
     assert args.resume is None
     assert args.mode == "agent"
+    assert args.effort is None
     assert args.yolo is False
     assert args.auto_approve is False
 
 
 def test_headless_flags_are_retained() -> None:
-    args = parser().parse_args(["board", "-n", "-m", "Review", "--json", "--no-stream"])
+    args = parser().parse_args(
+        [
+            "board",
+            "-n",
+            "-m",
+            "Review",
+            "--json",
+            "--no-stream",
+            "--effort",
+            "intelligence",
+        ]
+    )
     assert args.workspace == "board"
     assert args.non_interactive
     assert args.message == "Review"
     assert args.json
     assert args.no_stream
+    assert args.effort == "intelligence"
 
 
 def test_auth_defaults_to_status() -> None:
@@ -52,6 +65,7 @@ def test_parser_help_describes_workspace_and_approval() -> None:
     assert "Workspace directory" in help_text
     assert "--yolo" in help_text
     assert "--auto-approve" in help_text
+    assert "--effort" in help_text
     assert "copper-pilot auth" in help_text
     assert "list|delete" in help_text
     assert "copper-pilot mcp" in help_text
