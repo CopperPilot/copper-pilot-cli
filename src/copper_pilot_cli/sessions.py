@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     import aiosqlite
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -180,7 +180,7 @@ def _new_connection(timeout: float = _DEFAULT_SQLITE_TIMEOUT) -> aiosqlite.Conne
 
 
 @asynccontextmanager
-async def _connect() -> AsyncIterator[aiosqlite.Connection]:
+async def _connect() -> AsyncGenerator[aiosqlite.Connection]:
     """Import aiosqlite, apply the compatibility patch, and connect.
 
     Centralizes the deferred import + patch + connect sequence used by every
@@ -1535,7 +1535,7 @@ async def delete_thread(thread_id: str) -> bool:
 
 
 @asynccontextmanager
-async def get_checkpointer() -> AsyncIterator[AsyncSqliteSaver]:
+async def get_checkpointer() -> AsyncGenerator[AsyncSqliteSaver]:
     """Get AsyncSqliteSaver for the global database.
 
     Yields:
