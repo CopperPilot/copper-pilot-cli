@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +44,29 @@ from copper_pilot_cli.sessions import delete_thread, generate_thread_id, list_th
 
 console = Console()
 
+ACP_INSTALL_HINT = (
+    "the ACP server needs the optional dependency; install it with "
+    'pip install "copper-pilot-cli[acp]"'
+)
+
+
+def load_acp_runner() -> Callable[[], None]:
+    """Import the ACP entrypoint lazily so the base install stays SDK-free."""
+    try:
+        from copper_pilot_cli.copper_acp import run_acp
+    except ModuleNotFoundError as exc:
+        if exc.name and exc.name.split(".")[0] == "acp":
+            raise ModuleNotFoundError(ACP_INSTALL_HINT, name=exc.name) from exc
+        raise
+    return run_acp
+
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="copper-pilot",
         description="CopperPilot hosted agent in the terminal.",
         epilog="Subcommands: copper-pilot auth [login|logout|status]; "
-        "copper-pilot threads list|delete; copper-pilot mcp.",
+        "copper-pilot threads list|delete; copper-pilot mcp; copper-pilot acp.",
     )
     result.add_argument(
         "workspace",
@@ -115,13 +132,14 @@ def command_parser(command: str) -> argparse.ArgumentParser:
         "auth": "Device login for the hosted CopperPilot agent.",
         "threads": "List or delete CopperPilot chat threads.",
         "mcp": "Run a stdio MCP server that delegates to the hosted agent.",
+        "acp": "Run a stdio ACP (Agent Client Protocol) server for editors such as Zed.",
     }
     result = argparse.ArgumentParser(
         prog=f"copper-pilot {command}",
         description=descriptions.get(command, ""),
     )
     result.set_defaults(workspace=".", message=None, command=command)
-    if command == "mcp":
+    if command in {"mcp", "acp"}:
         return result
     if command == "auth":
         result.add_argument(
@@ -371,9 +389,20 @@ def cli_main() -> None:
     argv = sys.argv[1:]
     args = (
         command_parser(argv[0]).parse_args(argv[1:])
-        if argv and argv[0] in {"auth", "threads", "mcp"}
+        if argv and argv[0] in {"auth", "threads", "mcp", "acp"}
         else parser().parse_args(argv)
     )
+    if args.command == "acp":
+        try:
+            run_acp = load_acp_runner()
+        except ModuleNotFoundError as exc:
+            print(f"copper-pilot: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        try:
+            run_acp()
+        except KeyboardInterrupt:
+            raise SystemExit(130) from None
+        return
     if args.command == "mcp":
         from copper_pilot_cli.copper_mcp import run_mcp
 

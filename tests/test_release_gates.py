@@ -105,6 +105,17 @@ def test_deepagents_runtime_is_pinned_as_a_required_dependency() -> None:
     assert "deepagents" not in project.get("optional-dependencies", {})
 
 
+def test_acp_sdk_is_an_optional_extra_mirrored_into_dev() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert not any(item.startswith("agent-client-protocol") for item in project["dependencies"])
+    extras = project["optional-dependencies"]
+    acp_pins = [item for item in extras["acp"] if item.startswith("agent-client-protocol")]
+    assert len(acp_pins) == 1
+    assert acp_pins[0] in extras["dev"]
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "--ignore-packages agent-client-protocol" in ci
+
+
 def test_diagnostics_redact_credentials_and_content() -> None:
     value = redact("Authorization: Bearer cf_live_secret\nprivate prompt")
     assert "cf_live_secret" not in value

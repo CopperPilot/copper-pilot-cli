@@ -92,16 +92,67 @@ Point the host at `copper-pilot mcp` on stdio. Tools:
 Workspace is the tool `workspace` argument, else `CLAUDE_PROJECT_DIR`, else the
 process current directory.
 
+## Option 3: ACP server (`copper-pilot acp`)
+
+The Agent Client Protocol (ACP) lets editors drive an agent over stdio
+JSON-RPC with streaming messages, tool calls, and permission prompts. The SDK
+is an optional extra:
+
+```console
+pip install "copper-pilot-cli[acp]"
+```
+
+### Zed
+
+Add an external agent to Zed `settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "CopperPilot": {
+      "command": "copper-pilot",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Open the agent panel, pick CopperPilot, and chat. The project root is the
+workspace. The mode picker switches `ask`, `plan`, and `agent`; the `effort`
+option selects Balanced or Intelligence. If no credential is stored the server
+answers `auth_required` and offers a terminal login method that runs
+`copper-pilot auth login`.
+
+### Other ACP clients
+
+Launch `copper-pilot acp` on stdio. The server implements `initialize`,
+`authenticate`, `session/new`, `session/load`, `session/set_mode`,
+`session/set_config_option`, `session/prompt`, and `session/cancel`.
+`session/load` takes an existing CopperPilot thread id (see
+`copper-pilot threads list`) and replays its messages and tool calls.
+
+Hosted text, reasoning, and status arrive as agent message and thought chunks;
+hosted tool requests and results arrive as `tool_call` and `tool_call_update`.
+A hosted error ends the prompt with a JSON-RPC error whose `details` carry the
+public message.
+
 ## Approval
 
 | Mode | Where | Behavior |
 |------|-------|----------|
 | Manual | Interactive CLI / TUI only | Prompt before gated writes and shell |
-| Auto | Harness default (`-y`, MCP `approval=auto`) | Routine writes and known-safe shell |
-| YOLO | Explicit `--yolo` or MCP `approval=yolo` | All local side effects. Never saved |
+| Auto | Harness default (`-y`, MCP `approval=auto`, ACP sessions) | Routine writes and known-safe shell |
+| YOLO | Explicit `--yolo`, MCP `approval=yolo`, or ACP "Allow all for this session" | All local side effects. Never saved |
 
 MCP cannot show the TUI, so Manual is not available there. `ask` and `plan`
 always use Auto. `run` and `resume` default to Auto.
+
+ACP sessions start in Auto. Anything Auto would have prompted for in the TUI
+is sent to the editor as `session/request_permission` with Allow, Allow all
+for this session, and Reject. Choosing "Allow all" puts that session in YOLO
+until the server exits. Hosted clarifying questions that offer options are
+presented the same way, with a Skip choice; free-text questions are declined
+with a pointer to the TUI.
 
 `effort` is `balanced` (default) or `intelligence`. Intelligence requires a
 paid plan. It may run server-owned survey subagents; Plan turns survey before
