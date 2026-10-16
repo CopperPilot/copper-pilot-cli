@@ -825,3 +825,82 @@ def test_acp_session_dataclass_defaults(tmp_path) -> None:
     )
     assert session.busy is False
     assert session.subagents == {}
+
+
+# ------------------------------------------------------------- durability
+
+
+async def test_prompt_surfaces_retry_status_as_thoughts(tmp_path, monkeypatch) -> None:
+    events = [
+        {"type": "copper.text", "data": "partial"},
+        {
+            "type": "copper.retry",
+            "data": {"stage": "scheduled", "attempt": 2, "will_retry": True},
+            "title": "Retrying (1/2) in 5s: close code 1011",
+        },
+        {"type": "copper.text", "data": " done"},
+        {"type": "copper.final", "data": {"success": True}},
+    ]
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(events)
+    )
+    response = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="Review")]
+    )
+    assert response.stop_reason == "end_turn"
+    assert kinds(conn) == ["agent_message_chunk", "agent_thought_chunk", "agent_message_chunk"]
+    assert conn.updates[1][1].content.text == "Retrying (1/2) in 5s: close code 1011\n"
+
+
+async def test_prompt_structured_error_event_keeps_auth_code(tmp_path, monkeypatch) -> None:
+    events = [
+        {
+            "type": "copper.error",
+            "data": {"message": "Session expired.", "status": 401, "code": "http_401"},
+        }
+    ]
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(events)
+    )
+    with pytest.raises(RequestError) as caught:
+        await agent.prompt(
+            session_id=session_id, prompt=[TextContentBlock(type="text", text="Review")]
+        )
+    assert caught.value.code == -32000
+    assert caught.value.data == {"details": "Session expired."}
+
+
+async def test_cancel_wins_when_the_socket_closes_first(tmp_path, monkeypatch) -> None:
+    class RaceRuntime(FakeRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+            self.turn: asyncio.Task[Any] | None = None
+
+        async def astream(self, values, _config):
+            self.values = values
+            self.started.set()
+            await self.release.wait()
+            raise ProtocolError("Chat socket closed (close code 1011)", code="STREAM_ENDED")
+            yield  # pragma: no cover - makes this an async generator
+
+        async def acancel(self):
+            self.cancelled = True
+            self.release.set()
+            assert self.turn is not None
+            for _ in range(20):
+                if self.turn.done():
+                    break
+                await asyncio.sleep(0)
+
+    runtime = RaceRuntime()
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    task = asyncio.create_task(
+        agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Go")])
+    )
+    await runtime.started.wait()
+    runtime.turn = agent.sessions[session_id].turn
+    await agent.cancel(session_id=session_id)
+    response = await task
+    assert response.stop_reason == "cancelled"
+    assert runtime.cancelled
