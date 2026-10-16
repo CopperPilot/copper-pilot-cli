@@ -86,8 +86,9 @@ Claude Code can also install the in-repo plugin:
 ```
 
 That plugin starts `copper-pilot mcp` and adds `@copper-pilot` plus
-`/copper-pilot-review`. Setup for Cursor, Codex, and approvals:
-[docs/harness.md](docs/harness.md).
+`/copper-pilot-review`. Editors that speak the Agent Client Protocol, such as
+Zed, can run `copper-pilot acp` after `pip install "copper-pilot-cli[acp]"`.
+Setup for Cursor, Codex, Zed, and approvals: [docs/harness.md](docs/harness.md).
 
 ## Configuration
 
@@ -146,7 +147,8 @@ normalizes hosted tool names, approval decisions, and result envelopes.
 Computer use, model/provider selection, local model execution, LangSmith
 tracing, content telemetry, MCP **host**/plugin-runtime controls, and server
 implementation code are not part of this package. A thin MCP **server**
-(`copper-pilot mcp`) that delegates to the hosted agent is.
+(`copper-pilot mcp`) and an ACP **server** (`copper-pilot acp`) that delegate
+to the hosted agent are.
 
 See [UPSTREAM.md](UPSTREAM.md) and [NOTICE](NOTICE) for the retained Textual
 client attribution.

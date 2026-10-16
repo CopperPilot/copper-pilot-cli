@@ -7,6 +7,7 @@ copper-pilot --help
 copper-pilot auth --help
 copper-pilot threads --help
 copper-pilot mcp --help
+copper-pilot acp --help
 ```
 
 Python 3.11 or newer is required. Install with `pip install copper-pilot-cli`.
@@ -70,6 +71,34 @@ write to stdout; the protocol owns it.
 
 Workspace is the tool argument, else `CLAUDE_PROJECT_DIR`, else the process
 current directory. Manual approval is TUI-only. See [harness.md](harness.md).
+
+## ACP
+
+```console
+pip install "copper-pilot-cli[acp]"
+copper-pilot acp
+```
+
+Serves the Agent Client Protocol over stdio for editors such as Zed. The
+`acp` extra is optional; without it the command prints an install hint and
+exits with status 2. `copper-pilot acp auth login` is accepted as an alias for
+`copper-pilot auth login`, because some ACP clients (T3 Code) run the
+advertised login method by appending its arguments to the agent command. One ACP session is one CopperPilot thread, and the
+session `cwd` is the workspace. Uses the stored device-login credential and
+advertises a terminal auth method that runs `copper-pilot auth login`.
+
+| ACP feature | CopperPilot behavior |
+|-------------|----------------------|
+| Session modes | `ask`, `plan`, `agent` (default `agent`) |
+| Config options | `mode` and `effort` (`balanced` default, `intelligence` paid) |
+| `session/load` | Resumes an existing thread id and replays its history |
+| `session/request_permission` | Auto approval; non-routine writes and shell prompt the editor |
+| `session/cancel` | Cancels the hosted turn and local tools |
+
+"Allow all for this session" switches that session to YOLO until the server
+exits; it is never saved. Clarifying questions with options are shown as
+permission choices plus Skip; free-text questions are declined with a message
+to continue in the TUI. See [harness.md](harness.md).
 
 ## Effort and Intelligence
 
