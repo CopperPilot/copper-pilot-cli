@@ -51,7 +51,7 @@ class OutputBuffer:
         return True
 
     def text(self) -> str:
-        return "".join(self._parts).strip()
+        return "".join(self._parts).replace("\r\n", "\n").strip()
 
 
 async def drain(stream: asyncio.StreamReader | None, buffer: OutputBuffer) -> None:
