@@ -47,6 +47,7 @@ from acp.schema import (
     ToolCallUpdate,
 )
 from langchain_core.messages import HumanMessage
+from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
@@ -485,11 +486,20 @@ class CopperAcpAgent:
             if not session.cancelled:
                 raise
         except ProtocolError as exc:
-            if exc.status in {401, 403}:
-                raise RequestError.auth_required({"details": str(exc)}) from exc
-            raise RequestError.internal_error({"details": str(exc)}) from exc
+            logger.warning("Hosted turn failed: %s", exc)
+            raise _turn_error(str(exc), auth=exc.status in {401, 403}) from exc
+        except InvalidStatus as exc:
+            # The websocket handshake itself was refused (for example a revoked key).
+            status = exc.response.status_code
+            logger.warning("Hosted transport refused the connection (HTTP %s)", status)
+            message = f"The hosted service refused the connection (HTTP {status})."
+            raise _turn_error(message, auth=status in {401, 403}) from exc
         except (RuntimeError, OSError, httpx.HTTPError) as exc:
-            raise RequestError.internal_error({"details": str(exc)}) from exc
+            logger.warning("Hosted turn failed: %s", exc)
+            raise _turn_error(str(exc) or type(exc).__name__) from exc
+        except Exception as exc:  # noqa: BLE001 - surface any failure to the client
+            logger.exception("Hosted turn failed with %s", type(exc).__name__)
+            raise _turn_error(f"{type(exc).__name__}: {exc}".strip(": ")) from exc
         finally:
             session.turn = None
             session.runtime = None
@@ -686,6 +696,16 @@ def _coerce_mode(value: Any, fallback: CopperMode) -> CopperMode:
         return CopperMode(str(value)) if value else fallback
     except ValueError:
         return fallback
+
+
+def _turn_error(message: str, *, auth: bool = False) -> RequestError:
+    """Build the JSON-RPC error for a failed turn.
+
+    Clients such as T3 Code display only the error ``message``, so carry the
+    hosted explanation there instead of the generic SDK wording.
+    """
+    code = -32000 if auth else -32603
+    return RequestError(code, message, {"details": message})
 
 
 def replay_updates(messages: list[Any]) -> list[Any]:

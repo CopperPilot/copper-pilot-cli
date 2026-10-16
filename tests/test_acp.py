@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -19,6 +20,9 @@ from acp.schema import (
     TextResourceContents,
 )
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from copper_pilot_cli import copper_acp
 from copper_pilot_cli.copper_acp import (
@@ -187,6 +191,10 @@ def _patch(
     monkeypatch.setattr(copper_acp, "CopperPilotAgent", FakeAgent)
     monkeypatch.setattr(copper_acp, "create_copper_graph", fake_graph)
     return fake_runtime
+
+
+def _invalid_status(status: int) -> InvalidStatus:
+    return InvalidStatus(Response(status, "nope", Headers()))
 
 
 async def _connected_agent(tmp_path, monkeypatch, runtime=None, responses=None, **kwargs):
@@ -535,7 +543,7 @@ async def test_prompt_reports_hosted_error_events(tmp_path, monkeypatch) -> None
 async def test_prompt_reports_failed_final_event(tmp_path, monkeypatch) -> None:
     runtime = FakeRuntime([{"type": "copper.final", "data": {"success": False, "error": "nope"}}])
     agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
-    with pytest.raises(RequestError, match="Internal error"):
+    with pytest.raises(RequestError, match="nope"):
         await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
 
 
@@ -547,6 +555,10 @@ async def test_prompt_reports_failed_final_event(tmp_path, monkeypatch) -> None:
         (ProtocolError("malformed"), -32603),
         (OSError("socket"), -32603),
         (RuntimeError("busy"), -32603),
+        (_invalid_status(401), -32000),
+        (_invalid_status(403), -32000),
+        (_invalid_status(503), -32603),
+        (KeyError("surprise"), -32603),
     ],
 )
 async def test_prompt_maps_transport_failures(tmp_path, monkeypatch, error, code) -> None:
@@ -555,6 +567,51 @@ async def test_prompt_maps_transport_failures(tmp_path, monkeypatch, error, code
     with pytest.raises(RequestError) as exc:
         await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
     assert exc.value.code == code
+
+
+async def test_prompt_failure_details_name_the_exception(tmp_path, monkeypatch, caplog) -> None:
+    runtime = FakeRuntime(raise_exc=KeyError("surprise"))
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    with caplog.at_level(logging.ERROR, logger="copper_pilot_cli.copper_acp"):
+        with pytest.raises(RequestError) as exc:
+            await agent.prompt(
+                session_id=session_id, prompt=[TextContentBlock(type="text", text="x")]
+            )
+    assert str(exc.value) == "KeyError: 'surprise'"
+    assert exc.value.data == {"details": "KeyError: 'surprise'"}
+    assert "Hosted turn failed with KeyError" in caplog.text
+
+
+async def test_prompt_refused_handshake_names_the_status(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime(raise_exc=_invalid_status(503))
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert str(exc.value) == "The hosted service refused the connection (HTTP 503)."
+    assert exc.value.data == {"details": "The hosted service refused the connection (HTTP 503)."}
+
+
+async def test_prompt_error_message_carries_the_hosted_explanation(tmp_path, monkeypatch) -> None:
+    # Reproduces the T3 Code "Internal error" report: T3 shows only the error
+    # message, so the hosted plan-gate text must live there, not in `data`.
+    hosted = "Upgrade to a paid plan to use Intelligence."
+    runtime = FakeRuntime(raise_exc=ProtocolError(hosted, status=402))
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert exc.value.code == -32603
+    assert str(exc.value) == hosted
+    assert exc.value.data == {"details": hosted}
+
+
+async def test_prompt_auth_error_message_carries_the_hosted_explanation(
+    tmp_path, monkeypatch
+) -> None:
+    runtime = FakeRuntime(raise_exc=ProtocolError("Your login expired.", status=401))
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert (exc.value.code, str(exc.value)) == (-32000, "Your login expired.")
 
 
 async def test_prompt_switches_to_plan_mode_when_hosted_agent_does(tmp_path, monkeypatch) -> None:
