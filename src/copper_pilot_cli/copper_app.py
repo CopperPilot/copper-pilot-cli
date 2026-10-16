@@ -38,7 +38,7 @@ from copper_pilot_cli.copper_features import (
     resolve_skill_manifest,
     scan_local_skills,
 )
-from copper_pilot_cli.copper_graph import CopperGraphRuntime
+from copper_pilot_cli.copper_graph import RETRY_EVENT, CopperGraphRuntime
 from copper_pilot_cli.copper_hooks import HookRunner
 from copper_pilot_cli.copper_preferences import (
     acknowledge_auto_notice,
@@ -217,6 +217,7 @@ class CopperPilotApp(App[None]):
         self.copper_effort = effort
         self.initial_message = initial_message
         self._turn_task: asyncio.Task[None] | None = None
+        self._cancel_requested = False
         self._assistant: AssistantMessage | None = None
         self._last_assistant_content = ""
         self._reasoning: ReasoningMessage | None = None
@@ -587,6 +588,7 @@ class CopperPilotApp(App[None]):
         self._turn_task = asyncio.create_task(self._run_turn(value))
 
     async def _run_turn(self, value: str) -> None:
+        self._cancel_requested = False
         self._turn_state = TurnState()
         self._turn_state.apply(TurnEvent("turn_started"))
         await self._start_loading()
@@ -606,7 +608,13 @@ class CopperPilotApp(App[None]):
                 if mode == "custom" and isinstance(data, dict):
                     await self._custom_event(data)
             await self.hooks.run("after_turn")
-            await self._finalize_turn(TurnPhase.COMPLETED)
+            if self._cancel_requested:
+                self.notify("Turn cancelled.", severity="warning", markup=False)
+                await self._finalize_turn(TurnPhase.CANCELLED)
+            elif self._turn_error_rendered:
+                await self._finalize_turn(TurnPhase.FAILED)
+            else:
+                await self._finalize_turn(TurnPhase.COMPLETED)
         except asyncio.CancelledError:
             self.notify("Turn cancelled.", severity="warning", markup=False)
             await self._finalize_turn(TurnPhase.CANCELLED)
@@ -717,6 +725,11 @@ class CopperPilotApp(App[None]):
             self._reasoning = None
         elif kind == "copper.status":
             self._update_status(str(data)[:120].replace("\n", " "))
+        elif kind == RETRY_EVENT:
+            label = str(event.get("title") or "Retrying the hosted turn")
+            self._update_status(label[:120].replace("\n", " "))
+            if isinstance(data, dict) and data.get("stage") == "scheduled":
+                self.notify(label, severity="warning", markup=False)
         elif kind == "copper.status_event" and isinstance(data, dict):
             await self._handle_status_event(data)
         elif kind == "copper.final" and isinstance(data, dict):
@@ -1172,6 +1185,7 @@ class CopperPilotApp(App[None]):
 
     async def action_cancel_or_quit(self) -> None:
         if self._turn_task and not self._turn_task.done():
+            self._cancel_requested = True
             try:
                 await self.runtime.acancel()
             except Exception as exc:

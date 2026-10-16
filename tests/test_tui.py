@@ -16,6 +16,7 @@ from copper_pilot_cli.copper_presentation import (
     ChatScroll,
     LoadingWidget,
     StatusBar,
+    TurnPhase,
     WelcomeBanner,
 )
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode
@@ -1205,3 +1206,28 @@ async def test_cancelling_modal_wait_dismisses_prompt(tmp_path) -> None:
             await answer_task
         await pilot.pause()
         assert not isinstance(app.screen, QuestionScreen)
+
+
+@pytest.mark.asyncio
+async def test_retry_event_updates_status_and_error_event_fails_the_turn(tmp_path) -> None:
+    runtime = FakeRuntime()
+
+    async def retrying_stream(_values, _config):
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.retry",
+                "data": {"stage": "scheduled", "attempt": 2, "will_retry": True},
+                "title": "Retrying (1/2) in 5s: close code 1011",
+            },
+        )
+        yield (), "custom", {"type": "copper.error", "data": "gave up"}
+
+    runtime.astream = retrying_stream
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("fail")
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        assert app._turn_state.phase is TurnPhase.FAILED
+        assert len(list(app.query(ErrorMessage))) == 1

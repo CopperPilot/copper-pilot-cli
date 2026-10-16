@@ -24,7 +24,7 @@ from copper_pilot_cli.copper_auth import (
     load_credential,
     validate_credential,
 )
-from copper_pilot_cli.copper_graph import create_copper_graph
+from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
 from copper_pilot_cli.copper_preferences import saved_approval_mode, shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind
 from copper_pilot_cli.copper_status_events import (
@@ -297,6 +297,8 @@ async def _headless(
             EventKind.REASONING.value,
         }:
             console.print(f"\n{payload}", style="dim", markup=False, highlight=False)
+        elif not args.quiet and data.get("type") == RETRY_EVENT:
+            console.print(f"\n{data.get('title')}", style="yellow", markup=False, highlight=False)
         elif not args.quiet and kind == EventKind.STATUS_EVENT.value and isinstance(payload, dict):
             if payload.get("kind") == "subagent":
                 identifier = str(payload.get("id") or "")

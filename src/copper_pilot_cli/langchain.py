@@ -68,6 +68,9 @@ def _context(messages: Sequence[BaseMessage]) -> list[ChatMessage]:
             hidden = message.additional_kwargs.get(COPPER_CONTEXT_KEY)
             if isinstance(hidden, str) and hidden:
                 content = f"{content.rstrip()}\n{hidden}".strip()
+            if not content.strip():
+                # Tool-call-only assistant turns carry no text worth sending.
+                continue
         result.append(ChatMessage(role=role, content=content))
     return result
 
@@ -102,6 +105,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         self.plan_context = plan_context
         self.runtime_context = runtime_context
         self.tool_broker = tool_broker or LocalToolBroker(self.workspace)
+        self.cancel_requested = False
         self._client = HostedChatClient(
             self.credential.base_url,
             self.credential.api_key,
@@ -191,6 +195,8 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         yield from asyncio.run(collect())
 
     async def acancel(self) -> None:
+        """Ask the hosted turn to stop; the graph will not retry after this."""
+        self.cancel_requested = True
         await self._client.cancel()
 
     def as_langgraph(self) -> Any:

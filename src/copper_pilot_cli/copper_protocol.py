@@ -69,6 +69,83 @@ class ProtocolError(RuntimeError):
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class ErrorInfo:
+    """Desktop-harness style failure classification for one hosted turn attempt."""
+
+    type: str
+    message: str
+    retryable: bool
+
+
+_TIMEOUT_CODES = frozenset(
+    {"CHAT_CONNECT_TIMEOUT", "CHAT_FIRST_FRAME_TIMEOUT", "CHAT_IDLE_TIMEOUT"}
+)
+_CONNECTION_CODES = frozenset({"STREAM_ENDED_WITHOUT_FINAL", "CHAT_CONNECTION_ERROR"})
+_DETERMINISTIC_CODES = frozenset(
+    {"chat_request_invalid", "chat_request_too_large", "PAYLOAD_TOO_LARGE"}
+)
+
+
+def classify_error(exc: BaseException) -> ErrorInfo:
+    """Port of the desktop client's ``_categorizeError``.
+
+    Connection drops, timeouts, and transient server failures are retryable;
+    deterministic client failures (4xx other than 429, invalid or oversized
+    requests) are not. Cancellation is never retryable.
+    """
+    message = str(exc) or type(exc).__name__
+    if isinstance(exc, asyncio.CancelledError):
+        return ErrorInfo("aborted", "Analysis interrupted by user.", False)
+    if isinstance(exc, ProtocolError):
+        return _classify_protocol_error(exc, message)
+    if isinstance(exc, TimeoutError):
+        return ErrorInfo("timeout", message, True)
+    if isinstance(exc, ConnectionClosed):
+        return ErrorInfo("connection", f"Connection closed ({_close_detail(exc)})", True)
+    if isinstance(exc, OSError):
+        return ErrorInfo("network", message, True)
+    return ErrorInfo("unknown", message, False)
+
+
+def _classify_protocol_error(exc: ProtocolError, message: str) -> ErrorInfo:
+    code = exc.code or ""
+    status = exc.status
+    if code in _TIMEOUT_CODES:
+        return ErrorInfo("timeout", message, True)
+    if code in _CONNECTION_CODES:
+        return ErrorInfo("connection", message, True)
+    if code == "chat_request_invalid":
+        return ErrorInfo("invalid_request", message, False)
+    if code in _DETERMINISTIC_CODES or status == 413:
+        return ErrorInfo("payload_too_large", message, False)
+    if status is None and not code:
+        # Local protocol violations (malformed frames, budgets) are not worth retrying.
+        return ErrorInfo("protocol", message, False)
+    client_failure = isinstance(status, int) and 400 <= status < 500 and status != 429
+    kind = "server"
+    if status in {401, 403}:
+        kind = "authentication"
+    elif status == 402:
+        kind = "usage_limit"
+    elif status == 429:
+        kind = "rate_limit"
+    elif client_failure:
+        kind = "invalid_request"
+    retryable = exc.retryable if exc.retryable is not None else not client_failure
+    return ErrorInfo(kind, message, retryable)
+
+
+def _close_detail(exc: ConnectionClosed) -> str:
+    """Describe the websocket close code and reason the way the desktop client logs them."""
+    frame = exc.rcvd or exc.sent
+    if frame is None:
+        return "no close frame received or sent"
+    reason = f": {frame.reason}" if frame.reason else ""
+    origin = "received" if exc.rcvd is not None else "sent"
+    return f"close code {frame.code} {origin}{reason}"
+
+
 class CopperMode(StrEnum):
     """CopperPilot chat modes."""
 
@@ -319,7 +396,10 @@ class HostedChatClient:
         self._socket: Any = None
         self._owner: str | None = None
         self.first_frame_timeout = 60.0
-        self.idle_frame_timeout = 300.0
+        # The desktop client never times out between frames once a turn is
+        # streaming: long hosted reasoning or subagent runs can stay silent for
+        # many minutes while websocket keepalive still detects dead peers.
+        self.idle_frame_timeout: float | None = None
         self.frame_budget = 10_000
 
     async def cancel(self) -> None:
@@ -339,14 +419,19 @@ class HostedChatClient:
                     observed = True
                     yield event
                 return
-            except (OSError, TimeoutError, ConnectionClosed) as exc:
+            except (OSError, TimeoutError, ConnectionClosed, ProtocolError) as exc:
+                info = classify_error(exc)
                 logger.warning(
-                    "Hosted chat transport failed before completion (%s, observed=%s, attempt=%s)",
+                    "Hosted chat transport failed before completion "
+                    "(%s, type=%s, retryable=%s, observed=%s, attempt=%s): %s",
                     type(exc).__name__,
+                    info.type,
+                    info.retryable,
                     observed,
                     attempt + 1,
+                    info.message,
                 )
-                if observed or attempt == 1:
+                if observed or attempt == 1 or not info.retryable:
                     raise
                 await asyncio.sleep(0.25)
 
@@ -364,6 +449,7 @@ class HostedChatClient:
             "X-CopperPilot-Fingerprint": self.fingerprint,
         }
         saw_final = False
+        closed: ConnectionClosed | None = None
         url = websocket_url(self.base_url, agentic=request.agentic_mode)
         ssl_context = (
             ssl.create_default_context(cafile=certifi.where()) if url.startswith("wss://") else None
@@ -395,8 +481,15 @@ class HostedChatClient:
                     except TimeoutError as exc:
                         phase = "first frame" if frame_count == 0 else "next frame"
                         message = f"Timed out waiting for the hosted chat {phase}."
-                        raise ProtocolError(message) from exc
-                    except ConnectionClosed:
+                        raise ProtocolError(
+                            message,
+                            code="CHAT_FIRST_FRAME_TIMEOUT"
+                            if frame_count == 0
+                            else "CHAT_IDLE_TIMEOUT",
+                            retryable=True,
+                        ) from exc
+                    except ConnectionClosed as exc:
+                        closed = exc
                         break
                     frame_count += 1
                     stream_bytes += len(raw.encode() if isinstance(raw, str) else raw)
@@ -496,7 +589,13 @@ class HostedChatClient:
                             }
                         if self._owner != request.conversation_id:
                             raise ProtocolError("Chat socket owner changed during tool execution.")
-                        await socket.send(json.dumps(result_frame, separators=(",", ":")))
+                        try:
+                            await socket.send(json.dumps(result_frame, separators=(",", ":")))
+                        except ConnectionClosed as exc:
+                            # The server went away while the tool ran; report it the
+                            # same way as a drop between frames so the caller can resume.
+                            closed = exc
+                            break
                         yield CopperEvent(
                             EventKind.TOOL_RESULT,
                             {
@@ -527,4 +626,10 @@ class HostedChatClient:
                 self._socket = None
                 self._owner = None
         if not saw_final:
-            raise ProtocolError("Chat socket closed before a final response.")
+            detail = _close_detail(closed) if closed is not None else "closed cleanly"
+            logger.warning("Hosted chat socket closed before a final response (%s)", detail)
+            raise ProtocolError(
+                f"Chat socket closed before a final response ({detail}).",
+                code="STREAM_ENDED_WITHOUT_FINAL",
+                retryable=True,
+            ) from closed
