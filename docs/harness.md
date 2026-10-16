@@ -131,6 +131,11 @@ Launch `copper-pilot acp` on stdio. The server implements `initialize`,
 `session/load` takes an existing CopperPilot thread id (see
 `copper-pilot threads list`) and replays its messages and tool calls.
 
+`initialize` advertises one terminal auth method whose arguments are
+`auth login`. Clients that run it as a standalone command get
+`copper-pilot auth login`; clients that append it to the agent command, such as
+T3 Code, get `copper-pilot acp auth login`, which the CLI treats the same way.
+
 Hosted text, reasoning, and status arrive as agent message and thought chunks;
 hosted tool requests and results arrive as `tool_call` and `tool_call_update`.
 A hosted error ends the prompt with a JSON-RPC error whose `details` carry the

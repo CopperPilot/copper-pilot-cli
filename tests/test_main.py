@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage
 
+from copper_pilot_cli.copper_auth import AuthenticationError
 from copper_pilot_cli.copper_main import (
     ACP_INSTALL_HINT,
     _headless,
     cli_main,
     command_parser,
     load_acp_runner,
+    normalize_argv,
     parser,
 )
 
@@ -219,3 +221,44 @@ async def test_no_stream_headless_uses_checkpointed_runtime_state(tmp_path, caps
     assert "checkpointed response" in output
     assert "[/ETH_TRD2_N]" in output
     assert '"thread_id": "thread"' in output
+
+
+def test_normalize_argv_maps_acp_auth_onto_auth() -> None:
+    # T3 Code appends the login method's args to the agent command.
+    assert normalize_argv(["acp", "auth", "login"]) == ["auth", "login"]
+    assert normalize_argv(["acp", "auth"]) == ["auth"]
+
+
+def test_normalize_argv_leaves_other_commands_alone() -> None:
+    for argv in (["acp"], ["auth", "login"], [], ["mcp"], ["acp", "--help"], ["."]):
+        assert normalize_argv(argv) == argv
+
+
+def test_acp_help_mentions_the_auth_passthrough() -> None:
+    assert "copper-pilot acp auth login" in command_parser("acp").format_help()
+
+
+def test_cli_main_acp_auth_login_runs_the_device_login(monkeypatch) -> None:
+    seen: list[str] = []
+
+    async def fake_async_main(args) -> int:
+        seen.append(f"{args.command}:{args.action}")
+        return 0
+
+    monkeypatch.setattr(sys, "argv", ["copper-pilot", "acp", "auth", "login"])
+    monkeypatch.setattr("copper_pilot_cli.copper_main.async_main", fake_async_main)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main()
+    assert excinfo.value.code == 0
+    assert seen == ["auth:login"]
+
+
+def test_cli_main_acp_auth_login_failure_exits_nonzero(monkeypatch) -> None:
+    async def failing(args) -> int:
+        raise AuthenticationError("Device login expired or was rejected.")
+
+    monkeypatch.setattr(sys, "argv", ["copper-pilot", "acp", "auth", "login"])
+    monkeypatch.setattr("copper_pilot_cli.copper_main.async_main", failing)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main()
+    assert excinfo.value.code == 2

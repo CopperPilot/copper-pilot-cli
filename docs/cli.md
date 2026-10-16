@@ -81,7 +81,9 @@ copper-pilot acp
 
 Serves the Agent Client Protocol over stdio for editors such as Zed. The
 `acp` extra is optional; without it the command prints an install hint and
-exits with status 2. One ACP session is one CopperPilot thread, and the
+exits with status 2. `copper-pilot acp auth login` is accepted as an alias for
+`copper-pilot auth login`, because some ACP clients (T3 Code) run the
+advertised login method by appending its arguments to the agent command. One ACP session is one CopperPilot thread, and the
 session `cwd` is the workspace. Uses the stored device-login credential and
 advertises a terminal auth method that runs `copper-pilot auth login`.
 

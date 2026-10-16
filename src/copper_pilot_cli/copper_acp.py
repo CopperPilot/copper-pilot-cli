@@ -364,7 +364,9 @@ class CopperAcpAgent:
                     type="terminal",
                     id=LOGIN_METHOD_ID,
                     name="Log in to CopperPilot",
-                    description="Runs `copper-pilot auth login`, which opens a browser.",
+                    description=(
+                        "Runs the device login (`copper-pilot auth login`), which opens a browser."
+                    ),
                     args=["auth", "login"],
                 )
             ],

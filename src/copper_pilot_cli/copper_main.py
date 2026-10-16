@@ -134,9 +134,16 @@ def command_parser(command: str) -> argparse.ArgumentParser:
         "mcp": "Run a stdio MCP server that delegates to the hosted agent.",
         "acp": "Run a stdio ACP (Agent Client Protocol) server for editors such as Zed.",
     }
+    epilogs = {
+        "acp": (
+            "ACP clients that append a login method's arguments to the agent command "
+            "may run `copper-pilot acp auth login`; it behaves like `copper-pilot auth login`."
+        ),
+    }
     result = argparse.ArgumentParser(
         prog=f"copper-pilot {command}",
         description=descriptions.get(command, ""),
+        epilog=epilogs.get(command),
     )
     result.set_defaults(workspace=".", message=None, command=command)
     if command in {"mcp", "acp"}:
@@ -383,10 +390,22 @@ async def async_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def normalize_argv(argv: list[str]) -> list[str]:
+    """Map ``acp auth ...`` onto ``auth ...``.
+
+    ACP clients such as T3 Code run a terminal login method by appending its
+    arguments to the agent command, so the advertised ``auth login`` arrives as
+    ``copper-pilot acp auth login``. Treat that spelling as the auth command.
+    """
+    if argv[:2] == ["acp", "auth"]:
+        return argv[1:]
+    return argv
+
+
 def cli_main() -> None:
     """Run the CopperPilot command."""
     configure_diagnostics()
-    argv = sys.argv[1:]
+    argv = normalize_argv(sys.argv[1:])
     args = (
         command_parser(argv[0]).parse_args(argv[1:])
         if argv and argv[0] in {"auth", "threads", "mcp", "acp"}
