@@ -4,6 +4,49 @@ Changelog
 
 (unreleased)
 ------------
+- Merge pull request #18 from CopperPilot/feat/acp-server. [Aditya]
+
+  feat: add `copper-pilot acp` Agent Client Protocol server
+- Fix(acp): surface hosted turn failures in the JSON-RPC error message.
+  [AdityaNG, Claude Fable 5.1]
+
+  T3 Code showed a bare "Internal error" for a prompt the hosted service
+  had refused with "Upgrade to a paid plan to use Intelligence." because the
+  explanation only lived in the error's `data`, which T3 does not display.
+  Carry the hosted message in the error `message` (keeping the code), map a
+  refused websocket handshake to auth_required when it is 401/403, log every
+  failed turn to the diagnostics log, and never let an unexpected exception
+  escape to the SDK's generic handler.
+- Fix(acp): accept `copper-pilot acp auth login` for clients that append
+  login args. [AdityaNG, Claude Fable 5.1]
+
+  T3 Code runs an ACP terminal auth method by appending the method's args to
+  the configured agent command, so the advertised `auth login` was spawned as
+  `copper-pilot acp auth login`. The acp parser rejected the extra arguments
+  with exit code 2 and T3 reported "The provider login command did not finish
+  successfully." Normalize `acp auth ...` onto `auth ...` before parsing and
+  document the alias.
+- Feat: add `copper-pilot acp` Agent Client Protocol server. [AdityaNG,
+  Claude Fable 5.1]
+
+  Serve the hosted CopperPilot agent over ACP stdio so editors such as Zed
+  can drive it with streaming messages, tool calls, permission prompts,
+  session modes (ask/plan/agent), an effort config option, session/load
+  resume of existing threads, and session/cancel.
+
+  - New copper_acp.py built directly on the agent-client-protocol SDK;
+    approvals and clarifying questions map onto session/request_permission.
+  - `acp` optional extra; the command prints an install hint without it.
+  - CI license gate ignores agent-client-protocol (Apache-2.0 LICENSE file,
+    no license metadata in the wheel).
+  - Tests: tests/test_acp.py (100% coverage of copper_acp.py, including a
+    real stdio JSON-RPC round trip), parser and entrypoint tests, and a
+    release-gate check for the extra.
+  - Docs: cli.md, harness.md (Zed setup), README.
+
+
+0.1.8 (2026-10-14)
+------------------
 
 Fix
 ~~~
@@ -19,6 +62,7 @@ Fix
 
 Other
 ~~~~~
+- Release: version 0.1.8 🚀 [AdityaNG]
 - Merge pull request #16 from CopperPilot/update/14_oct_2026. [Aditya]
 
   Add Intelligence effort, hosted survey workers, and modal keyboard focus
