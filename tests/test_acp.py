@@ -12,7 +12,10 @@ from typing import Any
 import pytest
 from acp import RequestError
 from acp.schema import (
+    AcceptElicitationResponse,
     AllowedOutcome,
+    CancelElicitationResponse,
+    DeclineElicitationResponse,
     DeniedOutcome,
     EmbeddedResourceContentBlock,
     RequestPermissionResponse,
@@ -26,6 +29,7 @@ from websockets.http11 import Response
 
 from copper_pilot_cli import copper_acp
 from copper_pilot_cli.copper_acp import (
+    EFFORT_COMMAND,
     EFFORT_CONFIG_ID,
     LOGIN_METHOD_ID,
     MODE_CONFIG_ID,
@@ -34,20 +38,32 @@ from copper_pilot_cli.copper_acp import (
     OPTION_REJECT,
     OPTION_SKIP,
     QUESTION_MESSAGE,
+    QUESTION_TIMEOUT_MESSAGE,
     AcpSession,
     CopperAcpAgent,
+    available_commands,
     config_options,
+    effort_command,
+    elicitation_questions,
+    elicitation_schema,
+    first_text_block,
+    is_plan_artifact,
     mode_state,
+    plan_entries_from_todo_list,
     prompt_text,
     question_options,
     replay_updates,
     run_acp,
+    subagent_tool_update,
     tool_kind,
     tool_locations,
     tool_title,
+    usage_update,
+    user_request_text,
 )
 from copper_pilot_cli.copper_auth import DeviceCredential, save_credential
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ProtocolError
+from copper_pilot_cli.copper_status_events import SubagentStatus
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, ToolRejected
 
 CREDENTIAL = DeviceCredential(
@@ -156,6 +172,7 @@ class FakeConn:
     def __init__(self, responses: list[Any] | None = None) -> None:
         self.updates: list[tuple[str, Any]] = []
         self.permissions: list[dict[str, Any]] = []
+        self.elicitations: list[dict[str, Any]] = []
         self.responses = list(responses or [])
 
     async def session_update(self, session_id, update):
@@ -165,6 +182,10 @@ class FakeConn:
         self.permissions.append(
             {"session_id": session_id, "tool_call": tool_call, "options": options}
         )
+        return self.responses.pop(0)
+
+    async def create_elicitation(self, message, mode):
+        self.elicitations.append({"message": message, "mode": mode})
         return self.responses.pop(0)
 
 
@@ -206,8 +227,13 @@ async def _connected_agent(tmp_path, monkeypatch, runtime=None, responses=None, 
     return agent, conn, fake_runtime, created.session_id
 
 
-def kinds(conn: FakeConn) -> list[str]:
-    return [update.session_update for _sid, update in conn.updates]
+def kinds(conn: FakeConn, *, commands: bool = False) -> list[str]:
+    """Update kinds, hiding the one-time commands announcement unless asked."""
+    return [
+        update.session_update
+        for _sid, update in conn.updates
+        if commands or update.session_update != "available_commands_update"
+    ]
 
 
 # ----------------------------------------------------------------- helpers
@@ -458,7 +484,11 @@ async def test_load_session_replays_history_and_restores_options(tmp_path, monke
     response = await agent.load_session(cwd=str(tmp_path), session_id="thread-1")
     assert response.modes.current_mode_id == "plan"
     assert response.config_options[1].current_value == "intelligence"
-    assert kinds(conn) == ["user_message_chunk", "agent_message_chunk"]
+    assert kinds(conn, commands=True) == [
+        "user_message_chunk",
+        "agent_message_chunk",
+        "available_commands_update",
+    ]
     assert agent.sessions["thread-1"].mode is CopperMode.PLAN
     assert FakeAgent.last.conversation_id == "thread-1"
 
@@ -495,14 +525,18 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
         "tool_call_update",
         "tool_call",
         "tool_call_update",
-        "agent_thought_chunk",
+        "tool_call",
     ]
     updates = [update for _sid, update in conn.updates]
+    assert updates[0].session_update == "available_commands_update"
+    assert [command.name for command in updates[0].available_commands] == [EFFORT_COMMAND]
+    updates = updates[1:]
     assert updates[4].kind == "read" and updates[4].locations[0].path == "board.kicad_sch"
     assert updates[5].status == "completed"
     assert updates[6].title == "$ ls" and updates[6].kind == "execute"
     assert updates[7].status == "failed" and updates[7].content[0].content.text == "boom"
-    assert "Audit" in updates[8].content.text
+    assert updates[8].title == "Survey: Audit" and updates[8].kind == "think"
+    assert updates[8].status == "failed" and updates[8].tool_call_id == "subagent:w1"
     assert FakeAgent.last.tool_broker is agent.sessions[session_id].broker
 
 
@@ -825,6 +859,469 @@ def test_acp_session_dataclass_defaults(tmp_path) -> None:
     )
     assert session.busy is False
     assert session.subagents == {}
+    assert session.tool_paths == {}
+    assert session.last_usage is None
+    assert session.commands_sent is False
+
+
+# ---------------------------------------------------------- usage and plans
+
+
+def test_effort_command_parsing() -> None:
+    assert effort_command("/effort") == (True, None)
+    assert effort_command("  /effort intelligence ") == (True, "intelligence")
+    assert effort_command("/Effort balanced") == (True, "balanced")
+    assert effort_command("/effort a b") == (False, None)
+    assert effort_command("/efforts") == (False, None)
+    assert effort_command("Set /effort") == (False, None)
+    wrapped = (
+        "<t3_code_instructions>\nUse tools.\n</t3_code_instructions>\n\n"
+        "<user_request>\n/effort intelligence\n</user_request>"
+    )
+    assert effort_command(wrapped) == (True, "intelligence")
+    assert user_request_text(wrapped) == "/effort intelligence"
+    assert user_request_text("plain") == "plain"
+    blocks = [
+        TextContentBlock(type="text", text="  "),
+        TextContentBlock(type="text", text="/effort"),
+        TextContentBlock(type="text", text="<runtime_info>T3 Code</runtime_info>"),
+    ]
+    assert first_text_block(blocks) == "/effort"
+    assert first_text_block([]) == ""
+
+
+def test_available_commands_advertise_effort() -> None:
+    (command,) = available_commands()
+    assert command.name == EFFORT_COMMAND
+    assert command.input.root.hint == "balanced | intelligence"
+
+
+def test_usage_update_maps_prompt_tokens() -> None:
+    update = usage_update({"tokens_input": 120, "tokens_output": 24, "cache_tokens": 8})
+    assert update is not None
+    assert (update.used, update.size) == (120, 0)
+    assert update.field_meta == {"tokens_input": 120, "tokens_output": 24, "cache_tokens": 8}
+    assert usage_update({"input_tokens": 7}).used == 7
+    assert usage_update({"tokens": 1}) is None
+    assert usage_update({"tokens_input": -1}) is None
+    assert usage_update({"tokens_input": True}) is None
+    assert usage_update({"tokens_input": "12"}) is None
+    assert usage_update("usage") is None
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (".copperpilot/plans/board.plan.md", True),
+        ("/abs/ws/.copperpilot/plans/nested-name.plan.md", True),
+        (".copperpilot\\plans\\win.plan.md", True),
+        (".copperpilot/plans/notes.md", False),
+        ("docs/.copperpilot/plans/x.plan.md", True),
+        ("plans/x.plan.md", False),
+        ("", False),
+    ],
+)
+def test_is_plan_artifact(path: str, expected: bool) -> None:
+    assert is_plan_artifact(path) is expected
+
+
+def test_plan_entries_from_todo_list_skips_junk() -> None:
+    entries = plan_entries_from_todo_list(
+        {
+            "kind": "todo_list",
+            "items": [
+                {"index": 0, "content": "Check BOM", "status": "pending"},
+                {"index": 1, "content": "Route power", "status": "done"},
+                {"index": 2, "content": "  ", "status": "done"},
+                "junk",
+            ],
+        }
+    )
+    assert [(entry.content, entry.status) for entry in entries] == [
+        ("Check BOM", "pending"),
+        ("Route power", "completed"),
+    ]
+    assert plan_entries_from_todo_list({"kind": "todo_list"}) == []
+
+
+def test_subagent_tool_update_variants() -> None:
+    running = SubagentStatus(id="w1", task="Audit power", goal="Find rail issues", status="running")
+    start = subagent_tool_update(running, started=False)
+    assert start.session_update == "tool_call"
+    assert (start.tool_call_id, start.title, start.kind) == (
+        "subagent:w1",
+        "Survey: Audit power",
+        "think",
+    )
+    assert start.status == "in_progress" and start.content is None
+    assert start.raw_input == {"task": "Audit power", "goal": "Find rail issues"}
+    done = subagent_tool_update(
+        SubagentStatus(id="w1", task="Audit power", status="success", output="x" * 5000),
+        started=True,
+    )
+    assert done.session_update == "tool_call_update" and done.status == "completed"
+    assert len(done.content[0].content.text) == 4000
+    failed = subagent_tool_update(
+        SubagentStatus(id="w2", task="", status="cancelled", error="stopped"), started=False
+    )
+    assert failed.title == "Survey: Survey" and failed.status == "failed"
+    assert failed.content[0].content.text == "stopped"
+
+
+async def test_prompt_emits_usage_updates_once_per_distinct_payload(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime(
+        [
+            {"type": "copper.usage", "data": {"tokens_input": 10, "tokens_output": 2}},
+            {"type": "copper.usage", "data": {"tokens_input": 10, "tokens_output": 2}},
+            {"type": "copper.usage", "data": {"tokens_input": 30, "tokens_output": 9}},
+            {"type": "copper.usage", "data": {"tokens": 1}},
+            {"type": "copper.usage", "data": "nope"},
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert kinds(conn) == ["usage_update", "usage_update"]
+    assert [update.used for _sid, update in conn.updates[1:]] == [10, 30]
+    assert agent.sessions[session_id].last_usage == {"tokens_input": 30, "tokens_output": 9}
+
+
+async def test_prompt_turns_todo_list_events_into_plans(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime(
+        [
+            {
+                "type": "copper.status_event",
+                "data": {
+                    "kind": "todo_list",
+                    "items": [
+                        {"index": 0, "content": "Check BOM", "status": "pending"},
+                        {"index": 1, "content": "Route power", "status": "done"},
+                    ],
+                },
+            },
+            {"type": "copper.status_event", "data": {"kind": "todo_list", "items": []}},
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert kinds(conn) == ["plan"]
+    plan = conn.updates[-1][1]
+    assert [(entry.content, entry.status, entry.priority) for entry in plan.entries] == [
+        ("Check BOM", "pending", "medium"),
+        ("Route power", "completed", "medium"),
+    ]
+
+
+PLAN_FILE = """---
+name: CM5 camera
+overview: Carrier board for the CM5 camera module.
+overall_status: running
+todos:
+  - id: t1
+    content: Pick the MIPI connector
+    status: done
+  - id: t2
+    content: Route the CSI lanes
+    status: running
+  - id: t3
+    content: Add decoupling
+    status: open
+---
+# Plan body
+"""
+
+
+async def test_prompt_publishes_plan_files_written_by_the_agent(tmp_path, monkeypatch) -> None:
+    plan_path = tmp_path / ".copperpilot" / "plans" / "cm5.plan.md"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(PLAN_FILE, encoding="utf-8")
+    relative = ".copperpilot/plans/cm5.plan.md"
+    runtime = FakeRuntime(
+        [
+            {
+                "type": "copper.tool_request",
+                "data": {
+                    "tool_call_id": "w1",
+                    "tool_name": "write_file",
+                    "arguments": {"file_path": relative, "content": PLAN_FILE},
+                },
+            },
+            {
+                "type": "copper.tool_result",
+                "data": {"tool_call_id": "w1", "tool_name": "write_file", "result": "ok"},
+            },
+            {
+                "type": "copper.tool_request",
+                "data": {
+                    "tool_call_id": "w2",
+                    "tool_name": "edit",
+                    "arguments": {"file_path": relative, "old_string": "a", "new_string": "b"},
+                },
+            },
+            {
+                "type": "copper.tool_result",
+                "data": {"tool_call_id": "w2", "tool_name": "edit", "result": {"error": "no"}},
+            },
+            {
+                "type": "copper.tool_request",
+                "data": {
+                    "tool_call_id": "w3",
+                    "tool_name": "write_file",
+                    "arguments": {"file_path": "notes/todo.md", "content": "x"},
+                },
+            },
+            {
+                "type": "copper.tool_result",
+                "data": {"tool_call_id": "w3", "tool_name": "write_file", "result": "ok"},
+            },
+            {
+                "type": "copper.tool_request",
+                "data": {
+                    "tool_call_id": "w4",
+                    "tool_name": "write_file",
+                    "arguments": {"file_path": ".copperpilot/plans/missing.plan.md"},
+                },
+            },
+            {
+                "type": "copper.tool_result",
+                "data": {"tool_call_id": "w4", "tool_name": "write_file", "result": "ok"},
+            },
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert kinds(conn) == [
+        "tool_call",
+        "tool_call_update",
+        "plan",
+        "tool_call",
+        "tool_call_update",
+        "tool_call",
+        "tool_call_update",
+        "tool_call",
+        "tool_call_update",
+    ]
+    plan = conn.updates[3][1]
+    assert [(entry.content, entry.status) for entry in plan.entries] == [
+        ("Pick the MIPI connector", "completed"),
+        ("Route the CSI lanes", "in_progress"),
+        ("Add decoupling", "pending"),
+    ]
+    assert agent.sessions[session_id].tool_paths == {}
+
+
+async def test_prompt_renders_subagents_as_tool_calls(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime(
+        [
+            {
+                "type": "copper.status_event",
+                "data": {"kind": "subagent", "id": "w1", "task": "Audit", "status": "running"},
+            },
+            {"type": "copper.status_event", "data": {"kind": "subagent", "status": "keepalive"}},
+            {
+                "type": "copper.status_event",
+                "data": {"kind": "subagent", "id": "w1", "status": "success", "output": "Fine."},
+            },
+            {
+                "type": "copper.status_event",
+                "data": {"kind": "subagent", "id": "w2", "status": "failed", "error": "boom"},
+            },
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert kinds(conn) == ["tool_call", "tool_call_update", "tool_call"]
+    updates = [update for _sid, update in conn.updates[1:]]
+    assert updates[0].tool_call_id == "subagent:w1" and updates[0].status == "in_progress"
+    assert updates[1].tool_call_id == "subagent:w1" and updates[1].status == "completed"
+    assert updates[1].content[0].content.text == "Fine."
+    assert updates[2].tool_call_id == "subagent:w2" and updates[2].status == "failed"
+    assert updates[2].content[0].content.text == "boom"
+
+
+# ------------------------------------------------------------ slash commands
+
+
+async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
+    agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    text = TextContentBlock(type="text", text="/effort intelligence")
+    response = await agent.prompt(session_id=session_id, prompt=[text])
+    assert response.stop_reason == "end_turn"
+    assert runtime.values is None
+    assert agent.sessions[session_id].effort is CopperEffort.INTELLIGENCE
+    assert kinds(conn, commands=True) == [
+        "available_commands_update",
+        "config_option_update",
+        "agent_message_chunk",
+    ]
+    options = {option.id: option for option in conn.updates[1][1].config_options}
+    assert options[EFFORT_CONFIG_ID].current_value == "intelligence"
+    assert conn.updates[2][1].content.text == "Effort set to Intelligence."
+
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/effort")]
+    )
+    assert kinds(conn, commands=True) == ["agent_message_chunk"]
+    assert conn.updates[0][1].content.text.startswith("Effort is Intelligence.")
+
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/effort turbo")]
+    )
+    assert kinds(conn) == ["agent_message_chunk"]
+    assert "Unknown effort 'turbo'" in conn.updates[0][1].content.text
+    assert agent.sessions[session_id].effort is CopperEffort.INTELLIGENCE
+
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Go")])
+    assert runtime.values["copper_effort"] == "intelligence"
+
+    # T3 Code appends runtime context as a second text block; the command still wins.
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id,
+        prompt=[
+            TextContentBlock(type="text", text="/effort balanced"),
+            TextContentBlock(type="text", text="<runtime_info>T3 Code</runtime_info>"),
+        ],
+    )
+    assert agent.sessions[session_id].effort is CopperEffort.BALANCED
+    assert kinds(conn) == ["config_option_update", "agent_message_chunk"]
+    assert runtime.values["copper_effort"] == "intelligence"
+
+
+# ---------------------------------------------------------------- elicitation
+
+
+async def test_initialize_records_form_elicitation_support() -> None:
+    agent = CopperAcpAgent()
+    assert agent.elicitation_form is False
+    await agent.initialize(protocol_version=1, client_capabilities={"elicitation": {"form": {}}})
+    assert agent.elicitation_form is True
+    await agent.initialize(protocol_version=1, client_capabilities={"elicitation": {"url": {}}})
+    assert agent.elicitation_form is False
+    await agent.initialize(
+        protocol_version=1,
+        client_capabilities=SimpleNamespace(elicitation=SimpleNamespace(form=SimpleNamespace())),
+    )
+    assert agent.elicitation_form is True
+    await agent.initialize(
+        protocol_version=1, client_capabilities=SimpleNamespace(elicitation=None)
+    )
+    assert agent.elicitation_form is False
+
+
+def test_elicitation_questions_and_schema() -> None:
+    assert elicitation_questions({"question": " Which MCU? "}) == [("answer", "Which MCU?")]
+    assert elicitation_questions({"prompt": ""}) == [("answer", "Clarification")]
+    assert elicitation_questions("raw text") == [("answer", "raw text")]
+    assert elicitation_questions({"questions": ["junk"]}) is None
+    rows = elicitation_questions(
+        {"questions": [{"question": "Supply voltage?"}, {"prompt": ""}, "junk"]}
+    )
+    assert rows == [("q0", "Supply voltage?"), ("q1", "Question 2")]
+    single = elicitation_schema([("answer", "Which MCU?")])
+    assert single.properties["answer"].title == "Answer"
+    assert single.properties["answer"].description == "Which MCU?"
+    multi = elicitation_schema(rows)
+    assert [prop.title for prop in multi.properties.values()] == ["Question 1", "Question 2"]
+    assert all(prop.enum is None for prop in multi.properties.values())
+    choice = elicitation_schema([("answer", "MCU?")], options=["ESP32", "STM32"])
+    assert choice.properties["answer"].enum == ["ESP32", "STM32"]
+    assert elicitation_schema(rows, options=["x"]).properties["q0"].enum is None
+
+
+async def test_question_handler_uses_elicitation_for_free_text(tmp_path, monkeypatch) -> None:
+    responses = [
+        AcceptElicitationResponse(action="accept", content={"answer": " 3V3 rail "}),
+        DeclineElicitationResponse(action="decline"),
+        AcceptElicitationResponse(action="accept", content={"answer": "   "}),
+        AcceptElicitationResponse(action="accept", content={"q0": "5V", "q1": 12}),
+        CancelElicitationResponse(action="cancel"),
+    ]
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, responses=responses
+    )
+    agent.elicitation_form = True
+    broker = agent.sessions[session_id].broker
+    assert await broker.ask_user({"question": "Which rail?"}) == {
+        "status": "answered",
+        "answer": "3V3 rail",
+        "source": "custom",
+    }
+    assert await broker.ask_user({"question": "Which rail?"}) == {"status": "skipped"}
+    assert await broker.ask_user({"question": "Which rail?"}) == {"status": "skipped"}
+    questions = {"questions": [{"question": "Input voltage?"}, {"question": "Current?"}]}
+    assert await broker.ask_user(questions) == {
+        "answers": [
+            {"question": "Input voltage?", "answer": "5V"},
+            {"question": "Current?", "answer": "12"},
+        ]
+    }
+    assert await broker.ask_user(questions) == {
+        "answers": [
+            {"question": "Input voltage?", "answer": ""},
+            {"question": "Current?", "answer": ""},
+        ]
+    }
+    first = conn.elicitations[0]
+    assert first["message"] == "Which rail?"
+    assert first["mode"].session_id == session_id
+    assert list(first["mode"].requested_schema.properties) == ["answer"]
+    assert conn.elicitations[3]["message"] == "CopperPilot needs a few answers to continue."
+    assert list(conn.elicitations[3]["mode"].requested_schema.properties) == ["q0", "q1"]
+    assert conn.permissions == []
+    # Option questions become enum forms too: permission prompts are auto-answered
+    # by hands-off clients, a form is not.
+    conn.responses.extend(
+        [
+            AcceptElicitationResponse(action="accept", content={"answer": "STM32"}),
+            AcceptElicitationResponse(action="accept", content={"answer": "RP2040"}),
+            DeclineElicitationResponse(action="decline"),
+        ]
+    )
+    arguments = {"question": "MCU?", "options": ["ESP32", "STM32"]}
+    assert await broker.ask_user(arguments) == {
+        "status": "answered",
+        "answer": "STM32",
+        "source": "option",
+    }
+    assert await broker.ask_user(arguments) == {
+        "status": "answered",
+        "answer": "RP2040",
+        "source": "custom",
+    }
+    assert await broker.ask_user(arguments) == {"status": "skipped"}
+    assert conn.elicitations[-1]["mode"].requested_schema.properties["answer"].enum == [
+        "ESP32",
+        "STM32",
+    ]
+    assert conn.permissions == []
+
+
+async def test_question_handler_without_forms_still_declines_free_text(
+    tmp_path, monkeypatch
+) -> None:
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    agent.elicitation_form = True
+    with pytest.raises(ToolRejected, match=QUESTION_MESSAGE[:20]):
+        await agent.sessions[session_id].broker.ask_user({"questions": ["junk"]})
+
+
+async def test_questions_skip_when_no_answer_arrives_in_time(tmp_path, monkeypatch) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(copper_acp, "QUESTION_TIMEOUT_SECONDS", 0.01)
+
+    async def never(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    conn.request_permission = never  # type: ignore[method-assign]
+    conn.create_elicitation = never  # type: ignore[method-assign]
+    broker = agent.sessions[session_id].broker
+    expected = {"status": "skipped", "reason": QUESTION_TIMEOUT_MESSAGE}
+    assert await broker.ask_user({"question": "MCU?", "options": ["ESP32"]}) == expected
+    agent.elicitation_form = True
+    assert await broker.ask_user({"question": "Voltage?"}) == expected
+    assert await broker.ask_user({"question": "MCU?", "options": ["ESP32"]}) == expected
 
 
 # ------------------------------------------------------------- durability
@@ -849,7 +1346,8 @@ async def test_prompt_surfaces_retry_status_as_thoughts(tmp_path, monkeypatch) -
     )
     assert response.stop_reason == "end_turn"
     assert kinds(conn) == ["agent_message_chunk", "agent_thought_chunk", "agent_message_chunk"]
-    assert conn.updates[1][1].content.text == "Retrying (1/2) in 5s: close code 1011\n"
+    # updates[0] is the one-time available_commands_update.
+    assert conn.updates[2][1].content.text == "Retrying (1/2) in 5s: close code 1011\n"
 
 
 async def test_prompt_structured_error_event_keeps_auth_code(tmp_path, monkeypatch) -> None:

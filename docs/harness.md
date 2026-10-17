@@ -141,6 +141,24 @@ hosted tool requests and results arrive as `tool_call` and `tool_call_update`.
 A hosted error ends the prompt with a JSON-RPC error whose `details` carry the
 public message.
 
+Further session updates:
+
+- `usage_update` after each hosted usage report. `used` is the prompt tokens
+  of the latest turn and `size` is `0`, because the hosted service does not
+  report the model's context window; the raw hosted counts are in `_meta`.
+  T3 Code shows the count alone when the size is unknown.
+- `plan` whenever the hosted agent updates its todo list (`todo_list` status
+  events) or writes a `.copperpilot/plans/<name>.plan.md` artifact. Plan todos
+  map `open`, `running`, and `done` onto `pending`, `in_progress`, and
+  `completed`, the same statuses the Electron client's plan card uses.
+- Intelligence survey workers are `think` tool calls titled `Survey: <task>`
+  with `in_progress`, `completed`, or `failed` status and the worker's output
+  or error as content, mirroring the Electron client's subagent card.
+- `available_commands_update` once per session advertising `/effort`. A prompt
+  of `/effort balanced` or `/effort intelligence` is answered locally with a
+  `config_option_update` and a confirmation; `/effort` alone reports the
+  current value.
+
 ## Approval
 
 | Mode | Where | Behavior |
@@ -155,9 +173,17 @@ always use Auto. `run` and `resume` default to Auto.
 ACP sessions start in Auto. Anything Auto would have prompted for in the TUI
 is sent to the editor as `session/request_permission` with Allow, Allow all
 for this session, and Reject. Choosing "Allow all" puts that session in YOLO
-until the server exits. Hosted clarifying questions that offer options are
-presented the same way, with a Skip choice; free-text questions are declined
-with a pointer to the TUI.
+until the server exits. Hosted clarifying questions use ACP form elicitation
+(`elicitation/create`) when the client advertised
+`clientCapabilities.elicitation.form`: options become an enum field and free
+text a string field, and a declined or cancelled form counts as Skip. This
+matters for hands-off clients: T3 Code in Full access auto-selects the first
+option of a permission prompt, but always shows a form to the user. Clients
+without form elicitation get option questions as permission choices plus Skip
+and a rejection pointing to the TUI for free text. Either way, a question that
+is still unanswered after 100 seconds is skipped with a note telling the model
+to ask again in its reply, because the hosted service closes a turn whose tool
+result takes longer than two minutes.
 
 `effort` is `balanced` (default) or `intelligence`. Intelligence requires a
 paid plan. It may run server-owned survey subagents; Plan turns survey before
