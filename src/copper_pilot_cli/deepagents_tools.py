@@ -19,6 +19,11 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 
+from copper_pilot_cli.copper_background import (
+    DEFAULT_FOREGROUND_SECONDS,
+    BackgroundProcessManager,
+    run_shell,
+)
 from copper_pilot_cli.copper_protocol import ToolRequest
 
 
@@ -284,6 +289,8 @@ class LocalToolBroker:
         self.always_allow_dangerous_shell_commands = always_allow_dangerous_shell_commands
         self._results: dict[str, Any] = {}
         self._inflight: dict[str, asyncio.Task[Any]] = {}
+        self.background = BackgroundProcessManager()
+        self.foreground_seconds = DEFAULT_FOREGROUND_SECONDS
         self._middleware: FilesystemMiddleware[Any, Any] | None = None
         self._backend: LocalShellBackend | None = None
         self._tools: dict[str, BaseTool] = {}
@@ -342,6 +349,7 @@ class LocalToolBroker:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.background.kill_all()
 
     async def execute(self, request: ToolRequest) -> Any:
         if request.tool_call_id in self._results:
@@ -424,8 +432,6 @@ class LocalToolBroker:
             timeout_ms = request.timeout_ms or arguments.pop("timeout_ms", None)
             if timeout_ms is not None and "timeout" not in arguments:
                 arguments["timeout"] = max(1, (int(timeout_ms) + 999) // 1000)
-            arguments.pop("kill_on_timeout", None)
-            arguments.pop("background", None)
         elif canonical_name == "read_file" and arguments.get("offset") is not None:
             # CopperPilot's desktop harness uses 1-indexed offsets; Deep Agents uses
             # zero-indexed offsets.
@@ -487,7 +493,35 @@ class LocalToolBroker:
             return await self._read_binary(arguments["file_path"])
         if canonical_name == "write_binary_file":
             return await self._write_binary(arguments)
+        if canonical_name == "execute":
+            return await self._execute_shell(arguments)
         return await self._execute_native(request, canonical_name, arguments)
+
+    async def _execute_shell(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run a shell command with the desktop foreground-to-background contract.
+
+        The hosted agent's ``timeout`` is the foreground window: a command that
+        outlives it keeps running in the background unless the request asked
+        for ``kill_on_timeout`` or ``background: false``.
+        """
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return {"error": "execute: command is required"}
+        timeout = arguments.get("timeout")
+        foreground = self.foreground_seconds
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            foreground = float(timeout)
+        kill_on_timeout = (
+            arguments.get("kill_on_timeout") is True or arguments.get("background") is False
+        )
+        return await run_shell(
+            command,
+            self.workspace,
+            manager=self.background,
+            foreground_seconds=foreground,
+            kill_on_timeout=kill_on_timeout,
+            description=str(arguments.get("description") or ""),
+        )
 
     async def _read_binary(self, file_path: str) -> dict[str, Any]:
         assert self._backend is not None

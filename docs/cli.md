@@ -178,6 +178,36 @@ searches run freely. Writes, edits, deletes, and shell commands are gated:
 
 `--yolo` wins over `--auto-approve`. Saved preferences never enable YOLO.
 
+## Turn durability
+
+Every front-end (TUI, headless, MCP, ACP) runs a hosted turn through the same
+checkpointed graph node, which mirrors the desktop client's chat manager:
+
+- A stream that drops before the final frame (socket close, timeout, 5xx, 429)
+  is retried up to three times with 5 s, 10 s, and 20 s backoff. The retry
+  re-prompts the hosted agent with the partial transcript and
+  `Resume where we left off: <original message>` so it continues rather than
+  restarting. Deterministic failures (4xx other than 429, invalid or oversized
+  requests, plan refusals, auth) fail immediately.
+- Retry progress is visible: the TUI status bar and a notification, a yellow
+  line in headless text mode, MCP progress, and ACP agent thoughts
+  (`Retrying (1/2) in 5s: …`). `--json` emits `copper.retry` events.
+- The websocket close code and reason are carried into the error message
+  (`close code 1011 received: …`) and the log file.
+- Whatever a failed turn produced before the error (assistant text, tool calls
+  and results) is still checkpointed with a hidden
+  `[Turn interrupted before completion: …]` note, so a later "continue" has the
+  prior work in context.
+- There is no idle timeout between frames once a turn is streaming; websocket
+  keepalive still detects dead peers, and long hosted reasoning or subagent
+  runs no longer trip a client-side limit. The first frame must still arrive
+  within 60 s.
+- Shell commands run in the foreground for the requested timeout (default
+  25 s) and then move to the background unless the request sets
+  `kill_on_timeout` or `background: false`. After the final frame the client
+  waits for them and sends their output back in a continuation turn. Output is
+  capped at 5 MB and the whole process tree is killed on cancel.
+
 ## Usage limits
 
 The hosted service owns weekly and window usage. The CLI does not show raw

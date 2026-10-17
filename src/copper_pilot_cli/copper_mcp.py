@@ -12,7 +12,7 @@ from langchain_core.messages import HumanMessage
 from mcp.server.fastmcp import Context, FastMCP
 
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
-from copper_pilot_cli.copper_graph import create_copper_graph
+from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind, error_message
 from copper_pilot_cli.copper_status_events import (
@@ -199,6 +199,8 @@ async def collect_turn(
                 EventKind.REASONING.value,
             }:
                 await progress(str(data.get("data") or kind))
+            elif progress is not None and data.get("type") == RETRY_EVENT:
+                await progress(str(data.get("title") or "Retrying the hosted turn"))
             elif (
                 progress is not None
                 and kind == EventKind.STATUS_EVENT.value

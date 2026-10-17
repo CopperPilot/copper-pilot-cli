@@ -66,7 +66,7 @@ from websockets.exceptions import InvalidStatus
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
 from copper_pilot_cli.copper_features import parse_plan
-from copper_pilot_cli.copper_graph import create_copper_graph
+from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import (
     CopperEffort,
@@ -178,6 +178,7 @@ class AcpSession:
     tool_paths: dict[str, str] = field(default_factory=dict)
     last_usage: dict[str, Any] | None = None
     commands_sent: bool = False
+    failure: Any = None
 
     @property
     def busy(self) -> bool:
@@ -693,31 +694,41 @@ class CopperAcpAgent:
         session.cancelled = False
         session.subagents = {}
         session.tool_paths = {}
+        session.failure = None
         session.turn = asyncio.create_task(self._run_turn(session, credential, message))
         try:
             await session.turn
         except asyncio.CancelledError:
             if not session.cancelled:
                 raise
-        except ProtocolError as exc:
-            logger.warning("Hosted turn failed: %s", exc)
-            raise _turn_error(str(exc), auth=exc.status in {401, 403}) from exc
-        except InvalidStatus as exc:
-            # The websocket handshake itself was refused (for example a revoked key).
-            status = exc.response.status_code
-            logger.warning("Hosted transport refused the connection (HTTP %s)", status)
-            message = f"The hosted service refused the connection (HTTP {status})."
-            raise _turn_error(message, auth=status in {401, 403}) from exc
-        except (RuntimeError, OSError, httpx.HTTPError) as exc:
-            logger.warning("Hosted turn failed: %s", exc)
-            raise _turn_error(str(exc) or type(exc).__name__) from exc
-        except Exception as exc:  # noqa: BLE001 - surface any failure to the client
-            logger.exception("Hosted turn failed with %s", type(exc).__name__)
-            raise _turn_error(f"{type(exc).__name__}: {exc}".strip(": ")) from exc
+        except Exception as exc:
+            if session.cancelled:
+                # The hosted side may close the socket before our own task
+                # cancellation lands; a cancelled turn is not an error.
+                logger.info("Hosted turn ended after cancellation (%s)", type(exc).__name__)
+            else:
+                raise self._map_turn_failure(exc) from exc
         finally:
             session.turn = None
             session.runtime = None
         return PromptResponse(stop_reason="cancelled" if session.cancelled else "end_turn")
+
+    @staticmethod
+    def _map_turn_failure(exc: Exception) -> RequestError:
+        if isinstance(exc, ProtocolError):
+            logger.warning("Hosted turn failed: %s", exc)
+            return _turn_error(str(exc), auth=exc.status in {401, 403})
+        if isinstance(exc, InvalidStatus):
+            # The websocket handshake itself was refused (for example a revoked key).
+            status = exc.response.status_code
+            logger.warning("Hosted transport refused the connection (HTTP %s)", status)
+            message = f"The hosted service refused the connection (HTTP {status})."
+            return _turn_error(message, auth=status in {401, 403})
+        if isinstance(exc, (RuntimeError, OSError, httpx.HTTPError)):
+            logger.warning("Hosted turn failed: %s", exc)
+            return _turn_error(str(exc) or type(exc).__name__)
+        logger.exception("Hosted turn failed with %s", type(exc).__name__)
+        return _turn_error(f"{type(exc).__name__}: {exc}".strip(": "))
 
     async def _run_turn(
         self, session: AcpSession, credential: DeviceCredential, message: str
@@ -753,6 +764,18 @@ class CopperAcpAgent:
                 session_id=session.session_id, update=update_current_mode(new_mode.value)
             )
         if failure and not session.cancelled:
+            payload = session.failure
+            if isinstance(payload, dict):
+                raise ProtocolError(
+                    failure,
+                    code=str(payload["code"]) if payload.get("code") is not None else None,
+                    status=payload.get("status")
+                    if isinstance(payload.get("status"), int)
+                    else None,
+                    block_reason=payload.get("block_reason"),
+                    can_purchase_overage=payload.get("can_purchase_overage"),
+                    retryable=payload.get("retryable"),
+                )
             raise RuntimeError(failure)
 
     async def _announce_commands(self, session: AcpSession) -> None:
@@ -871,7 +894,12 @@ class CopperAcpAgent:
             if path and not is_error and is_plan_artifact(path):
                 await self._emit_plan_artifact(session, path)
         elif kind == EventKind.ERROR.value:
+            session.failure = payload
             return error_message(payload)
+        elif event.get("type") == RETRY_EVENT:
+            label = str(event.get("title") or "Retrying the hosted turn")
+            # Thought chunks are concatenated by clients; keep each retry line separate.
+            await send(session_id=session_id, update=update_agent_thought_text(f"{label}\n"))
         elif kind == EventKind.FINAL.value and isinstance(payload, dict):
             if payload.get("success") is False or payload.get("error"):
                 return str(payload.get("error") or "hosted failure")

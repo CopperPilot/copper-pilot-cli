@@ -72,3 +72,22 @@ def test_hidden_status_transcript_is_sent_without_changing_visible_content(tmp_p
     assert request.context[-1].content == (
         "Parent synthesis\n[Subagent: Audit]\nEvidence\n\nSwitched to Plan mode"
     )
+
+
+def test_empty_tool_call_assistant_messages_are_dropped_from_context(tmp_path) -> None:
+    from langchain_core.messages import ToolMessage
+
+    from copper_pilot_cli.langchain import _context
+
+    messages = [
+        HumanMessage(content="first"),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "read_file", "args": {}}]),
+        ToolMessage(content="(sch)", tool_call_id="c1", name="read_file"),
+        AIMessage(content="partial"),
+        HumanMessage(content="Resume where we left off: first"),
+    ]
+    context = _context(messages)
+    assert [(item.role, item.content) for item in context] == [
+        ("user", "first"),
+        ("assistant", "partial"),
+    ]
