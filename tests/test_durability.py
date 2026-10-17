@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import sys
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -470,6 +472,121 @@ async def test_background_processes_feed_a_continuation_turn(monkeypatch, tmp_pa
     assert messages[-1].content == "Started it.Process finished."
     assert "bg done" in messages[-1].additional_kwargs[COPPER_CONTEXT_KEY]
     assert not manager.has_running()
+    assert manager.processes() == []
+
+
+@pytest.mark.asyncio
+async def test_background_process_that_finishes_before_the_final_frame_still_resumes(
+    monkeypatch, tmp_path
+) -> None:
+    """A shell that exits while the model is still working must resume the agent.
+
+    Waiting only for processes that are still running drops the output. The
+    tool result already told the model the client would deliver it.
+    """
+    manager = BackgroundProcessManager()
+    started = await run_shell(
+        py("import time; time.sleep(0.15); print('early done')"),
+        tmp_path,
+        manager=manager,
+        foreground_seconds=0.05,
+    )
+    assert started["background"] is True
+    await manager.wait_all()
+    assert not manager.has_running()
+    assert manager.processes()[0]["status"] == "completed"
+
+    agent = ScriptedAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Started it."), CopperEvent(EventKind.FINAL, {})],
+            [CopperEvent(EventKind.TEXT, "Saw the output."), CopperEvent(EventKind.FINAL, {})],
+        ],
+        tool_broker=SimpleNamespace(background=manager),
+    )
+    events, messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert [e for e in events if e.get("title") == "background_processes_waiting"] == []
+    assert len(agent.inputs) == 2
+    continuation = agent.inputs[1][-1]
+    assert isinstance(continuation, HumanMessage)
+    assert continuation.content.startswith(BACKGROUND_CONTINUATION_PREAMBLE)
+    assert "early done" in continuation.content
+    assert '"status": "completed"' in continuation.content
+    assert messages[-1].content == "Started it.Saw the output."
+    assert "early done" in messages[-1].additional_kwargs[COPPER_CONTEXT_KEY]
+    assert manager.processes() == []
+
+
+@pytest.mark.asyncio
+async def test_finished_and_running_background_processes_resume_together(
+    monkeypatch, tmp_path
+) -> None:
+    manager = BackgroundProcessManager()
+    early = await run_shell(
+        py("import time; time.sleep(0.1); print('early')"),
+        tmp_path,
+        manager=manager,
+        foreground_seconds=0.02,
+    )
+    assert early["background"] is True
+    await manager.wait_all()
+    assert not manager.has_running()
+    late = await run_shell(
+        py("import time; time.sleep(0.4); print('late')"),
+        tmp_path,
+        manager=manager,
+        foreground_seconds=0.05,
+    )
+    assert late["background"] is True
+    assert manager.has_running()
+
+    agent = ScriptedAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Started both."), CopperEvent(EventKind.FINAL, {})],
+            [CopperEvent(EventKind.TEXT, "Both done."), CopperEvent(EventKind.FINAL, {})],
+        ],
+        tool_broker=SimpleNamespace(background=manager),
+    )
+    events, messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    waiting = [e for e in events if e.get("title") == "background_processes_waiting"]
+    assert waiting and "1 background process" in waiting[0]["data"]
+    continuation = agent.inputs[1][-1].content
+    assert "early" in continuation and "late" in continuation
+    assert messages[-1].content == "Started both.Both done."
+    assert manager.processes() == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process-group signals are POSIX-only")
+@pytest.mark.asyncio
+async def test_background_process_killed_before_the_final_frame_does_not_resume(
+    monkeypatch, tmp_path
+) -> None:
+    manager = BackgroundProcessManager()
+    started = await run_shell(
+        py("import time; time.sleep(30)"),
+        tmp_path,
+        manager=manager,
+        foreground_seconds=0.05,
+    )
+    assert started["background"] is True
+    os.killpg(os.getpgid(started["pid"]), signal.SIGKILL)
+    await manager.wait_all()
+    assert manager.processes()[0]["status"] == "killed"
+
+    agent = ScriptedAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Started it."), CopperEvent(EventKind.FINAL, {})],
+            [CopperEvent(EventKind.TEXT, "should not run"), CopperEvent(EventKind.FINAL, {})],
+        ],
+        tool_broker=SimpleNamespace(background=manager),
+    )
+    _events, messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert len(agent.inputs) == 1
+    assert messages[-1].content == "Started it."
+    assert messages[-1].additional_kwargs[COPPER_CONTEXT_KEY] == CANCELLED_CONTEXT
+    assert manager.processes() == []
 
 
 # -------------------------------------------------------------- background

@@ -240,7 +240,9 @@ checkpointed graph node, which mirrors the desktop client's chat manager:
 - Shell commands run in the foreground for the requested timeout (default
   25 s) and then move to the background unless the request sets
   `kill_on_timeout` or `background: false`. After the final frame the client
-  waits for them and sends their output back in a continuation turn. Output is
+  resumes the agent with their output. Commands still running are awaited
+  first. Commands that already exited while the model was still working are
+  delivered too, so a search that finishes mid-turn is not dropped. Output is
   capped at 5 MB and the whole process tree is killed on cancel.
 
 ## Usage limits
