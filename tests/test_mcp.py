@@ -357,8 +357,8 @@ def test_validate_tool_is_registered() -> None:
 @pytest.mark.asyncio
 async def test_validate_tool_returns_verdict_and_next_actions(tmp_path, monkeypatch) -> None:
     from copper_pilot_cli.copper_mcp import handle_validate
+    from copper_pilot_cli.validate import ValidationReport
     from copper_pilot_cli.validate.config import CheckResult, Status
-    from copper_pilot_cli.validate.runner import RunOutcome
 
     seen: dict[str, object] = {}
 
@@ -366,7 +366,7 @@ async def test_validate_tool_returns_verdict_and_next_actions(tmp_path, monkeypa
         seen["workspace"] = workspace
         seen.update(kwargs)
         kwargs["on_progress"]("running  sch.erc")
-        return RunOutcome(
+        return ValidationReport(
             verdict="FAIL",
             exit_code=1,
             run_dir=tmp_path,

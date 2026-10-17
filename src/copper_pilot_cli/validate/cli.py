@@ -9,9 +9,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from copper_pilot_cli.copper_protocol import CopperEffort
 from copper_pilot_cli.copper_workspace import canonical_workspace
-from copper_pilot_cli.validate.config import ConfigError, GateMode, ValidateConfig, load_config
+from copper_pilot_cli.validate.config import (
+    CheckSpec,
+    ConfigError,
+    GateMode,
+    ValidateConfig,
+    load_config,
+)
+from copper_pilot_cli.validate.design import input_hashes
 from copper_pilot_cli.validate.runner import (
     EXIT_ENVIRONMENT,
     EXIT_INTERRUPTED,
@@ -22,7 +31,7 @@ from copper_pilot_cli.validate.runner import (
     RunOutcome,
 )
 
-SUBCOMMANDS = ("list", "graph")
+SUBCOMMANDS = ("list", "graph", "explain")
 DESCRIPTION = (
     "Run a stage-gated graph of read-only reviewers over a KiCad workspace. "
     "Exit codes: 0 pass, 1 fail, 2 usage/config error, 3 incomplete, 4 environment."
@@ -38,11 +47,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="copper-pilot validate",
         description=DESCRIPTION,
-        epilog="Subcommands: copper-pilot validate list|graph [workspace].",
+        epilog="Subcommands: copper-pilot validate list|graph [workspace]; "
+        "copper-pilot validate explain CHECK_ID [workspace].",
     )
     parser.set_defaults(command="validate", action="run", message=None)
     parser.add_argument("workspace", nargs="?", default=".", help="Workspace directory")
     parser.add_argument("--config", type=Path, help="Graph file layered on the default graph")
+    parser.add_argument(
+        "--context",
+        type=Path,
+        nargs="+",
+        action="extend",
+        default=[],
+        help="Extra reviewer context files (requirements, fab checklist, review prompt)",
+    )
     parser.add_argument("--profile", help="Severity policy profile (default: dev)")
     parser.add_argument(
         "--gate",
@@ -91,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
 def build_subcommand_parser(action: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"copper-pilot validate {action}")
     parser.set_defaults(command="validate", action=action, message=None)
+    if action == "explain":
+        parser.add_argument("check_id", help="Check id, e.g. sch.erc")
     parser.add_argument("workspace", nargs="?", default=".", help="Workspace directory")
     parser.add_argument("--config", type=Path, help="Graph file layered on the default graph")
     return parser
@@ -161,6 +181,63 @@ def render_graph(config: ValidateConfig) -> str:
     return "\n".join(lines)
 
 
+def render_explain(workspace: Path, config: ValidateConfig, check: CheckSpec) -> str:
+    from copper_pilot_cli.validate.reviewer import OUTPUT_CONTRACT
+
+    sections = [
+        f"# {check.id}: {check.title}",
+        "",
+        "## Config",
+        yaml.safe_dump(check.model_dump(mode="json", exclude_none=True), sort_keys=False).rstrip(),
+    ]
+    if check.kind == "agent":
+        sections.extend(
+            [
+                "",
+                "## Prompt (preamble + reference material + design paths + body + contract)",
+                config.reviewer.preamble.strip(),
+                "",
+                f"Your single responsibility: {check.title or check.id}",
+                "",
+                (check.prompt or "").strip(),
+                "",
+                OUTPUT_CONTRACT,
+            ]
+        )
+    else:
+        from copper_pilot_cli.validate.builtins import BUILTINS
+
+        sections.extend(
+            ["", f"## Builtin: {check.builtin}", BUILTINS[check.builtin or ""].description]
+        )
+    hashes = input_hashes(workspace, list(check.inputs))
+    sections.extend(["", f"## Inputs ({', '.join(check.inputs)}): {len(hashes)} files"])
+    sections.extend(f"- {name}  {digest[:12]}" for name, digest in sorted(hashes.items())[:40])
+    latest = workspace / ".copperpilot" / "validate" / "latest" / "report.json"
+    if not latest.is_file():
+        pointer = workspace / ".copperpilot" / "validate" / "latest"
+        if pointer.is_file():
+            latest = Path(pointer.read_text(encoding="utf-8").strip()) / "report.json"
+    sections.append("")
+    sections.append("## Last result")
+    if latest.is_file():
+        try:
+            report = json.loads(latest.read_text(encoding="utf-8"))
+            match = next(
+                (row for row in report.get("results", []) if row.get("check_id") == check.id),
+                None,
+            )
+        except (OSError, json.JSONDecodeError):
+            match = None
+        if match is None:
+            sections.append("not in the latest run")
+        else:
+            sections.append(json.dumps(match, indent=2))
+    else:
+        sections.append("no run yet")
+    return "\n".join(sections)
+
+
 def options_from_args(args: argparse.Namespace) -> RunOptions:
     return RunOptions(
         profile=args.profile,
@@ -172,6 +249,7 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
         concurrency=args.concurrency,
         no_cache=args.no_cache,
         repeat=args.repeat,
+        context_files=[Path(item) for item in args.context],
         out_dir=args.out,
         junit_path=args.junit,
         emit_fix_prompt=args.emit_fix_prompt,
@@ -208,6 +286,13 @@ def run_command(args: argparse.Namespace, **runner_kwargs: Any) -> int:
             return 0
         if args.action == "graph":
             print(render_graph(config))
+            return 0
+        if args.action == "explain":
+            try:
+                check = config.check(args.check_id)
+            except KeyError:
+                raise ConfigError(f"unknown check {args.check_id!r}") from None
+            print(render_explain(workspace, config, check))
             return 0
         options = options_from_args(args)
         if args.json:

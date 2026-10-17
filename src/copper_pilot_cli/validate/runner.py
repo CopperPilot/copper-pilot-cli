@@ -36,6 +36,7 @@ from copper_pilot_cli.validate.design import (
     DesignContext,
     create_snapshot,
     design_hash,
+    file_sha256,
     input_hashes,
     remove_snapshot,
     snapshot_changes,
@@ -90,6 +91,7 @@ class RunOptions:
     concurrency: int = 3
     no_cache: bool = False
     repeat: int | None = None
+    context_files: list[Path] = field(default_factory=list)
     out_dir: Path | None = None
     junit_path: Path | None = None
     emit_fix_prompt: bool = False
@@ -192,6 +194,8 @@ class Runner:
         self.usage_limit: dict[str, Any] | None = None
         self.halt: str | None = None
         self.interrupted = False
+        self.context_material: list[tuple[str, str]] = []
+        self.context_hashes: dict[str, str] = {}
         self.design: DesignContext | None = None
         self.started = _now()
         self.last_outcome: RunOutcome | None = None
@@ -258,6 +262,7 @@ class Runner:
             if check.id in skipped:
                 self._record_skip(check, [skipped[check.id]])
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self._load_context_files()
         workspace_context = discover_workspace(self.workspace)
         self.design = DesignContext(
             workspace=self.workspace,
@@ -306,6 +311,13 @@ class Runner:
         if self._snapshot_tmp is not None:
             self._snapshot_tmp.cleanup()
             self._snapshot_tmp = None
+
+    def _load_context_files(self) -> None:
+        for path in self.options.context_files:
+            if not path.is_file():
+                raise ConfigError(f"context file not found: {path}")
+            self.context_material.append((path.name, path.read_text(encoding="utf-8")))
+            self.context_hashes[path.name] = file_sha256(path)
 
     async def _run_stages(self, selected: list[CheckSpec]) -> None:
         by_stage: dict[str, list[CheckSpec]] = {}
@@ -408,6 +420,7 @@ class Runner:
             "preamble": self.config.reviewer.preamble,
             "limits": self.config.limits,
             "profile": {self.profile_name: self.profile.model_dump(mode="json")},
+            "context": self.context_hashes,
             "inputs": input_hashes(self.workspace, list(check.inputs)),
             "repeat": self.options.repeat,
             "effort": self.options.effort,
@@ -528,6 +541,7 @@ class Runner:
                 design,
                 self.snapshot,
                 items=slice_items,
+                reference_material=self.context_material,
             )
             for run_index in range(repeat):
                 thread_id = f"validate-{self.run_id}-{check.id}-{slice_index}-{run_index}"

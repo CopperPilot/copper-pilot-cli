@@ -11,6 +11,7 @@ any change to the snapshot turns that check into an ERROR.
 copper-pilot validate [workspace] [flags]
 copper-pilot validate list    [workspace] [--config PATH]
 copper-pilot validate graph   [workspace] [--config PATH]
+copper-pilot validate explain CHECK_ID [workspace] [--config PATH]
 ```
 
 Validate is non-interactive. It uses the stored device-login credential and
@@ -22,6 +23,7 @@ login.
 | Flag | Meaning |
 |------|---------|
 | `--config PATH` | Graph file layered on the packaged default and `.copperpilot/validate.yaml`. |
+| `--context FILE ...` | Extra reviewer context (requirements, fab checklist, review prompt). Appended to every agent prompt under "Reference material". |
 | `--profile dev\|release` | Severity policy. `dev` fails on P0/P1 at medium confidence; `release` fails on P0–P2 at any confidence. |
 | `--gate stage\|full\|strict` | `stage` (default) finishes the current stage then stops on a blocking failure; `full` runs everything not blocked by a failed prerequisite; `strict` stops after the first failing wave. |
 | `--until STAGE` | Last stage to run, e.g. `S3`. Later checks are SKIPPED. |
@@ -169,7 +171,8 @@ for that stage.
   the rest SKIPPED (`blocked_by: ["usage limit: weekly"]`), writes the
   reports, and exits 4. Builtin checks still run.
 - **Cache.** `.copperpilot/validate/cache/<key>.json`, where the key hashes the
-  check spec, preamble, limits, profile, the `--repeat`/`--effort` overrides, and the check's `inputs` (`sch` = all
+  check spec, preamble, limits, profile, `--context` file hashes, the
+  `--repeat`/`--effort` overrides, and the check's `inputs` (`sch` = all
   sheets, `pcb`, `pro`, `libs` = `.kicad_sym` + `.kicad_mod` + lib tables,
   `intent` = `.copperpilot/README.md`, `PLANS.md`, `plans/*.md`, `all` = the
   whole tree). A PCB-only change re-runs only PCB-dependent checks. `intake.*`
@@ -264,9 +267,20 @@ rule or net class below the fab limit → P1; a board rule left at 0 → P2.
 ERC/DRC violations are grouped by type: one finding per type with a count and
 up to 50 refs.
 
-## MCP
+## MCP and Python
 
 The MCP server exposes `validate(workspace?, profile?, gate?, until?, only?,
 effort?, no_cache?)`, which returns `{ok, verdict, exit_code, report_path,
 report_markdown, next_actions}` and sends per-check progress notifications.
 The reviewer approval policy is fixed regardless of the host's mode.
+
+```python
+from copper_pilot_cli.validate import validate
+
+report = validate("esp32", profile="release")
+assert report.verdict == "PASS", report.next_actions
+```
+
+`validate()` returns a `ValidationReport` with `verdict`, `exit_code`,
+`run_dir`, `report`, `next_actions`, `results`, `paths` and `findings`.
+`avalidate()` is the async form.

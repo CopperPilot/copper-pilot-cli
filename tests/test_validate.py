@@ -15,6 +15,7 @@ import yaml
 from copper_pilot_cli.copper_auth import DeviceCredential
 from copper_pilot_cli.copper_protocol import CopperEvent, CopperMode, EventKind, ToolRequest
 from copper_pilot_cli.copper_tools import ApprovalRequest, ToolRejected
+from copper_pilot_cli.validate import avalidate
 from copper_pilot_cli.validate.cli import parse_args, render_graph, render_list, run_command
 from copper_pilot_cli.validate.config import (
     CheckResult,
@@ -1044,6 +1045,24 @@ async def test_until_and_only_exit_3_when_clean(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_files_reach_every_reviewer(tmp_path) -> None:
+    make_project(tmp_path)
+    checklist = tmp_path / "fab.md"
+    checklist.write_text("Fab checklist: 4 layers max", encoding="utf-8")
+    turn = FakeTurn()
+    outcome = await runner_for(
+        tmp_path, options=RunOptions(only=["sch.ratings"], context_files=[checklist]), turn=turn
+    ).run()
+    assert "## Reference material" in turn.turns[0].prompt
+    assert "Fab checklist: 4 layers max" in turn.turns[0].prompt
+    assert outcome.exit_code == EXIT_INCOMPLETE
+    with pytest.raises(ConfigError, match="context file not found"):
+        await runner_for(
+            tmp_path, options=RunOptions(context_files=[tmp_path / "missing.md"])
+        ).run()
+
+
+@pytest.mark.asyncio
 async def test_json_events_and_junit(tmp_path) -> None:
     make_project(tmp_path)
     events: list[dict[str, Any]] = []
@@ -1372,6 +1391,24 @@ def test_cli_exit_codes(tmp_path, capsys) -> None:
     assert "auth login" in capsys.readouterr().err
 
 
+def test_cli_explain_shows_prompt_and_last_result(tmp_path, capsys) -> None:
+    make_project(tmp_path)
+    run_command(
+        parse_args([str(tmp_path), "--until", "S0"]),
+        turn=FakeTurn(),
+        kicad_finder=lambda: FakeKicad(),
+        credential_loader=lambda: CREDENTIAL,
+    )
+    capsys.readouterr()
+    assert run_command(parse_args(["explain", "sch.ratings", str(tmp_path)])) == 0
+    out = capsys.readouterr().out
+    assert "# sch.ratings" in out and "## Output contract" in out and "derating" in out
+    assert "## Last result" in out and '"status": "SKIPPED"' in out
+    assert run_command(parse_args(["explain", "intake.tools", str(tmp_path)])) == 0
+    assert "## Builtin: tools" in capsys.readouterr().out
+    assert run_command(parse_args(["explain", "nope", str(tmp_path)])) == EXIT_USAGE
+
+
 def test_parse_args_flags() -> None:
     args = parse_args(
         [
@@ -1382,6 +1419,9 @@ def test_parse_args_flags() -> None:
             "c",
             "--skip",
             "d",
+            "--context",
+            "x.md",
+            "y.md",
             "--profile",
             "release",
             "--gate",
@@ -1401,13 +1441,34 @@ def test_parse_args_flags() -> None:
     )
     assert args.action == "run" and args.workspace == "board"
     assert args.only == ["a", "b", "c"] and args.skip == ["d"]
+    assert [str(path) for path in args.context] == ["x.md", "y.md"]
     assert args.profile == "release" and args.gate == "strict" and args.until == "S3"
     assert args.repeat == 3 and args.concurrency == 2 and args.no_cache
     assert str(args.junit) == "j.xml" and args.effort == "intelligence"
     assert parse_args(["list"]).action == "list"
+    assert parse_args(["explain", "sch.erc"]).check_id == "sch.erc"
 
 
 # ---------------------------------------------------------- Python API
+
+
+def test_python_api_returns_validation_report(tmp_path) -> None:
+    make_project(tmp_path)
+    import asyncio
+
+    report = asyncio.run(
+        avalidate(
+            tmp_path,
+            gate="full",
+            turn=FakeTurn(),
+            kicad_finder=lambda: FakeKicad(),
+            credential_loader=lambda: CREDENTIAL,
+        )
+    )
+    assert report.verdict == "PASS" and report.passed and report.exit_code == 0
+    assert report.report["schema"] == "copper-pilot.validate/v1"
+    assert any(item.severity is Severity.P2 for item in report.findings)
+    assert report.paths["report"].is_file()
 
 
 @pytest.mark.asyncio
