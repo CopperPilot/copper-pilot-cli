@@ -173,11 +173,17 @@ always use Auto. `run` and `resume` default to Auto.
 ACP sessions start in Auto. Anything Auto would have prompted for in the TUI
 is sent to the editor as `session/request_permission` with Allow, Allow all
 for this session, and Reject. Choosing "Allow all" puts that session in YOLO
-until the server exits. Hosted clarifying questions that offer options are
-presented the same way, with a Skip choice. Free-text questions use ACP form
-elicitation (`elicitation/create`) when the client advertised
-`clientCapabilities.elicitation.form`; a declined or cancelled form counts as
-Skip. Clients without form elicitation get a rejection pointing to the TUI.
+until the server exits. Hosted clarifying questions use ACP form elicitation
+(`elicitation/create`) when the client advertised
+`clientCapabilities.elicitation.form`: options become an enum field and free
+text a string field, and a declined or cancelled form counts as Skip. This
+matters for hands-off clients: T3 Code in Full access auto-selects the first
+option of a permission prompt, but always shows a form to the user. Clients
+without form elicitation get option questions as permission choices plus Skip
+and a rejection pointing to the TUI for free text. Either way, a question that
+is still unanswered after 100 seconds is skipped with a note telling the model
+to ask again in its reply, because the hosted service closes a turn whose tool
+result takes longer than two minutes.
 
 `effort` is `balanced` (default) or `intelligence`. Intelligence requires a
 paid plan. It may run server-owned survey subagents; Plan turns survey before

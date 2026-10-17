@@ -38,6 +38,7 @@ from copper_pilot_cli.copper_acp import (
     OPTION_REJECT,
     OPTION_SKIP,
     QUESTION_MESSAGE,
+    QUESTION_TIMEOUT_MESSAGE,
     AcpSession,
     CopperAcpAgent,
     available_commands,
@@ -57,6 +58,7 @@ from copper_pilot_cli.copper_acp import (
     tool_locations,
     tool_title,
     usage_update,
+    user_request_text,
 )
 from copper_pilot_cli.copper_auth import DeviceCredential, save_credential
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ProtocolError
@@ -871,6 +873,13 @@ def test_effort_command_parsing() -> None:
     assert effort_command("/effort a b") == (False, None)
     assert effort_command("/efforts") == (False, None)
     assert effort_command("Set /effort") == (False, None)
+    wrapped = (
+        "<t3_code_instructions>\nUse tools.\n</t3_code_instructions>\n\n"
+        "<user_request>\n/effort intelligence\n</user_request>"
+    )
+    assert effort_command(wrapped) == (True, "intelligence")
+    assert user_request_text(wrapped) == "/effort intelligence"
+    assert user_request_text("plain") == "plain"
 
 
 def test_available_commands_advertise_effort() -> None:
@@ -1194,6 +1203,10 @@ def test_elicitation_questions_and_schema() -> None:
     assert single.properties["answer"].description == "Which MCU?"
     multi = elicitation_schema(rows)
     assert [prop.title for prop in multi.properties.values()] == ["Question 1", "Question 2"]
+    assert all(prop.enum is None for prop in multi.properties.values())
+    choice = elicitation_schema([("answer", "MCU?")], options=["ESP32", "STM32"])
+    assert choice.properties["answer"].enum == ["ESP32", "STM32"]
+    assert elicitation_schema(rows, options=["x"]).properties["q0"].enum is None
 
 
 async def test_question_handler_uses_elicitation_for_free_text(tmp_path, monkeypatch) -> None:
@@ -1236,14 +1249,32 @@ async def test_question_handler_uses_elicitation_for_free_text(tmp_path, monkeyp
     assert conn.elicitations[3]["message"] == "CopperPilot needs a few answers to continue."
     assert list(conn.elicitations[3]["mode"].requested_schema.properties) == ["q0", "q1"]
     assert conn.permissions == []
-    # Option questions keep the permission prompt even when forms are supported.
-    conn.responses.append(selected("option:0"))
-    assert await broker.ask_user({"question": "MCU?", "options": ["ESP32"]}) == {
+    # Option questions become enum forms too: permission prompts are auto-answered
+    # by hands-off clients, a form is not.
+    conn.responses.extend(
+        [
+            AcceptElicitationResponse(action="accept", content={"answer": "STM32"}),
+            AcceptElicitationResponse(action="accept", content={"answer": "RP2040"}),
+            DeclineElicitationResponse(action="decline"),
+        ]
+    )
+    arguments = {"question": "MCU?", "options": ["ESP32", "STM32"]}
+    assert await broker.ask_user(arguments) == {
         "status": "answered",
-        "answer": "ESP32",
+        "answer": "STM32",
         "source": "option",
     }
-    assert len(conn.permissions) == 1
+    assert await broker.ask_user(arguments) == {
+        "status": "answered",
+        "answer": "RP2040",
+        "source": "custom",
+    }
+    assert await broker.ask_user(arguments) == {"status": "skipped"}
+    assert conn.elicitations[-1]["mode"].requested_schema.properties["answer"].enum == [
+        "ESP32",
+        "STM32",
+    ]
+    assert conn.permissions == []
 
 
 async def test_question_handler_without_forms_still_declines_free_text(
@@ -1253,3 +1284,20 @@ async def test_question_handler_without_forms_still_declines_free_text(
     agent.elicitation_form = True
     with pytest.raises(ToolRejected, match=QUESTION_MESSAGE[:20]):
         await agent.sessions[session_id].broker.ask_user({"questions": ["junk"]})
+
+
+async def test_questions_skip_when_no_answer_arrives_in_time(tmp_path, monkeypatch) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(copper_acp, "QUESTION_TIMEOUT_SECONDS", 0.01)
+
+    async def never(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    conn.request_permission = never  # type: ignore[method-assign]
+    conn.create_elicitation = never  # type: ignore[method-assign]
+    broker = agent.sessions[session_id].broker
+    expected = {"status": "skipped", "reason": QUESTION_TIMEOUT_MESSAGE}
+    assert await broker.ask_user({"question": "MCU?", "options": ["ESP32"]}) == expected
+    agent.elicitation_form = True
+    assert await broker.ask_user({"question": "Voltage?"}) == expected
+    assert await broker.ask_user({"question": "MCU?", "options": ["ESP32"]}) == expected

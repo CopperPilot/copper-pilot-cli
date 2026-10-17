@@ -11,7 +11,7 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -104,6 +104,11 @@ QUESTION_MESSAGE = (
     "This clarification needs a free-text answer, which this ACP client cannot "
     "collect. Continue this thread in the CopperPilot TUI with `copper-pilot --resume`."
 )
+QUESTION_TIMEOUT_SECONDS = 100.0
+QUESTION_TIMEOUT_MESSAGE = (
+    "No answer arrived before the hosted two-minute tool limit. End this turn by asking "
+    "the question in your reply so the user can answer in their next message."
+)
 MODE_CONFIG_ID = "mode"
 EFFORT_CONFIG_ID = "effort"
 EFFORT_COMMAND = "effort"
@@ -113,6 +118,7 @@ OPTION_REJECT = "reject"
 OPTION_SKIP = "skip"
 _MAX_TOOL_OUTPUT_CHARS = 4_000
 _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_USER_REQUEST = re.compile(r"<user_request>\s*(.*?)\s*</user_request>", re.DOTALL)
 _PLAN_ARTIFACT = re.compile(
     r"(?:^|[\\/])\.copperpilot[\\/]plans[\\/][^\\/]+\.plan\.md$", re.IGNORECASE
 )
@@ -313,9 +319,19 @@ def available_commands() -> list[AvailableCommand]:
     ]
 
 
+def user_request_text(message: str) -> str:
+    """Unwrap the user's own text from a client instruction envelope.
+
+    T3 Code may wrap a prompt as ``<t3_code_instructions>…</t3_code_instructions>``
+    followed by ``<user_request>…</user_request>``.
+    """
+    match = _USER_REQUEST.search(message)
+    return match.group(1) if match else message
+
+
 def effort_command(message: str) -> tuple[bool, str | None]:
     """Return ``(is_effort_command, argument)`` for a prompt."""
-    match = _EFFORT_COMMAND.match(message.strip())
+    match = _EFFORT_COMMAND.match(user_request_text(message).strip())
     if match is None:
         return False, None
     return True, match.group(1)
@@ -411,8 +427,13 @@ def elicitation_questions(arguments: Any) -> list[tuple[str, str]] | None:
     return [("answer", prompt or "Clarification")]
 
 
-def elicitation_schema(questions: list[tuple[str, str]]) -> ElicitationSchema:
-    """Build the ACP form schema for free-text questions."""
+def elicitation_schema(
+    questions: list[tuple[str, str]], *, options: list[str] | None = None
+) -> ElicitationSchema:
+    """Build the ACP form schema for clarifying questions.
+
+    ``options`` turns a single question into an enum so clients render choices.
+    """
     single = len(questions) == 1
     return ElicitationSchema(
         properties={
@@ -420,6 +441,7 @@ def elicitation_schema(questions: list[tuple[str, str]]) -> ElicitationSchema:
                 type="string",
                 title="Answer" if single else f"Question {index + 1}",
                 description=prompt,
+                enum=list(options) if single and options else None,
             )
             for index, (key, prompt) in enumerate(questions)
         }
@@ -876,19 +898,51 @@ class CopperAcpAgent:
 
         return approve
 
-    async def _ask_free_text(self, session: AcpSession, arguments: Any) -> Any:
-        """Collect free-text answers through ACP form elicitation."""
-        questions = elicitation_questions(arguments)
-        if not self.elicitation_form or questions is None:
+    async def _await_answer(self, request: Coroutine[Any, Any, Any]) -> Any | None:
+        """Bound a question to the hosted tool-result window (two minutes).
+
+        The hosted service drops the turn when a tool result takes longer, so an
+        unanswered question is skipped first and the model is told to ask again
+        in its reply.
+        """
+        try:
+            return await asyncio.wait_for(request, QUESTION_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "No answer within %.0fs; skipping the question", QUESTION_TIMEOUT_SECONDS
+            )
+            return None
+
+    async def _ask_elicitation(self, session: AcpSession, arguments: Any) -> Any:
+        """Collect an answer through ACP form elicitation, with or without options.
+
+        Permission prompts are auto-answered by clients running in a hands-off
+        mode (T3 Code full access picks the first option), so a form is the only
+        way to make sure a human sees the question.
+        """
+        parsed = question_options(arguments)
+        options: list[str] = []
+        multi = False
+        if parsed is not None:
+            prompt, options = parsed
+            questions: list[tuple[str, str]] | None = [("answer", prompt)]
+        else:
+            questions = elicitation_questions(arguments)
+            multi = isinstance(arguments, dict) and isinstance(arguments.get("questions"), list)
+        if questions is None:
             raise ToolRejected(QUESTION_MESSAGE)
-        multi = isinstance(arguments, dict) and isinstance(arguments.get("questions"), list)
         message = "CopperPilot needs a few answers to continue." if multi else questions[0][1]
-        response = await self.conn.create_elicitation(
-            message,
-            ElicitationFormSessionMode(
-                session_id=session.session_id, requested_schema=elicitation_schema(questions)
-            ),
+        response = await self._await_answer(
+            self.conn.create_elicitation(
+                message,
+                ElicitationFormSessionMode(
+                    session_id=session.session_id,
+                    requested_schema=elicitation_schema(questions, options=options),
+                ),
+            )
         )
+        if response is None:
+            return {"status": "skipped", "reason": QUESTION_TIMEOUT_MESSAGE}
         content = (
             getattr(response, "content", None)
             if getattr(response, "action", None) == "accept"
@@ -905,33 +959,40 @@ class CopperAcpAgent:
         answer = str(answers.get("answer") or "").strip()
         if not answer:
             return {"status": "skipped"}
-        return {"status": "answered", "answer": answer, "source": "custom"}
+        source = "option" if answer in options else "custom"
+        return {"status": "answered", "answer": answer, "source": source}
 
     def _question_handler(self, session: AcpSession) -> Callable[[Any], Awaitable[Any]]:
         async def ask(arguments: Any) -> Any:
+            if self.elicitation_form:
+                return await self._ask_elicitation(session, arguments)
             parsed = question_options(arguments)
             if parsed is None:
-                return await self._ask_free_text(session, arguments)
+                raise ToolRejected(QUESTION_MESSAGE)
             prompt, options = parsed
-            response = await self.conn.request_permission(
-                session_id=session.session_id,
-                tool_call=ToolCallUpdate(
-                    tool_call_id=f"question-{uuid.uuid4().hex}",
-                    title=prompt,
-                    kind="other",
-                    status="pending",
-                    raw_input=arguments,
-                ),
-                options=[
-                    *(
-                        PermissionOption(
-                            option_id=f"option:{index}", name=option, kind="allow_once"
-                        )
-                        for index, option in enumerate(options)
+            response = await self._await_answer(
+                self.conn.request_permission(
+                    session_id=session.session_id,
+                    tool_call=ToolCallUpdate(
+                        tool_call_id=f"question-{uuid.uuid4().hex}",
+                        title=prompt,
+                        kind="other",
+                        status="pending",
+                        raw_input=arguments,
                     ),
-                    PermissionOption(option_id=OPTION_SKIP, name="Skip", kind="reject_once"),
-                ],
+                    options=[
+                        *(
+                            PermissionOption(
+                                option_id=f"option:{index}", name=option, kind="allow_once"
+                            )
+                            for index, option in enumerate(options)
+                        ),
+                        PermissionOption(option_id=OPTION_SKIP, name="Skip", kind="reject_once"),
+                    ],
+                )
             )
+            if response is None:
+                return {"status": "skipped", "reason": QUESTION_TIMEOUT_MESSAGE}
             choice = _selected_option(response)
             if choice is None or not choice.startswith("option:"):
                 return {"status": "skipped"}
