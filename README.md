@@ -68,6 +68,22 @@ Balanced effort is the default. Paid-plan users can select Intelligence with
 server-owned survey subagents and shows their lifecycle through the existing
 Deep Agents task rows; Intelligence Plan turns survey before writing a plan.
 
+## Validate
+
+```console
+copper-pilot validate ./my-board
+```
+
+Runs a stage-gated graph of read-only reviewers over the KiCad workspace:
+`kicad-cli` checks (ERC, DRC, schematic parity, board rules, Gerbers) plus
+hosted Agent-mode reviewers, each scoped to one concern, in the order a hardware
+engineer reviews a board. It never edits design files. The verdict, a
+`REPORT.md`, and `next_actions.json` (only the earliest failing stage, worst
+first) land in `.copperpilot/validate/latest/`; `--emit-fix-prompt` prints a
+ready message for `copper-pilot --mode agent`. Exit codes: 0 pass, 1 fail,
+2 config error, 3 incomplete, 4 not logged in or usage limit. See
+[docs/validate.md](docs/validate.md).
+
 ## Use from Claude Code, Cursor, or Codex
 
 CopperPilot stays the electronics agent. Copy
@@ -85,7 +101,8 @@ Claude Code can also install the in-repo plugin:
 /plugin install copper-pilot
 ```
 
-That plugin starts `copper-pilot mcp` and adds `@copper-pilot` plus
+That plugin starts `copper-pilot mcp` (tools `status`, `ask`, `plan`, `run`,
+`resume`, `threads_list`, `validate`) and adds `@copper-pilot` plus
 `/copper-pilot-review`. Editors that speak the Agent Client Protocol, such as
 Zed, can run `copper-pilot acp` after `pip install "copper-pilot-cli[acp]"`.
 Setup for Cursor, Codex, Zed, and approvals: [docs/harness.md](docs/harness.md).

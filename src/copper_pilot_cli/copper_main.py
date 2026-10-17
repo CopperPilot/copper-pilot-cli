@@ -66,7 +66,8 @@ def parser() -> argparse.ArgumentParser:
         prog="copper-pilot",
         description="CopperPilot hosted agent in the terminal.",
         epilog="Subcommands: copper-pilot auth [login|logout|status]; "
-        "copper-pilot threads list|delete; copper-pilot mcp; copper-pilot acp.",
+        "copper-pilot threads list|delete; copper-pilot mcp; copper-pilot acp; "
+        "copper-pilot validate [workspace] (read-only stage-gated review).",
     )
     result.add_argument(
         "workspace",
@@ -134,6 +135,10 @@ def command_parser(command: str) -> argparse.ArgumentParser:
         "mcp": "Run a stdio MCP server that delegates to the hosted agent.",
         "acp": "Run a stdio ACP (Agent Client Protocol) server for editors such as Zed.",
     }
+    if command == "validate":
+        from copper_pilot_cli.validate.cli import build_parser
+
+        return build_parser()
     epilogs = {
         "acp": (
             "ACP clients that append a login method's arguments to the agent command "
@@ -408,6 +413,13 @@ def cli_main() -> None:
     """Run the CopperPilot command."""
     configure_diagnostics()
     argv = normalize_argv(sys.argv[1:])
+    if argv and argv[0] == "validate":
+        from copper_pilot_cli.validate.cli import parse_args, run_command
+
+        try:
+            raise SystemExit(run_command(parse_args(argv[1:])))
+        except KeyboardInterrupt:
+            raise SystemExit(130) from None
     args = (
         command_parser(argv[0]).parse_args(argv[1:])
         if argv and argv[0] in {"auth", "threads", "mcp", "acp"}

@@ -42,6 +42,29 @@ The JSON document includes `thread_id`. To continue the same chat:
 copper-pilot -n -m "$ARGUMENTS" --json --no-stream --resume THREAD_ID
 ```
 
+## Validate
+
+Before sign-off, or when the user asks whether the board is ready, run the
+read-only stage-gated review graph instead of a free-form review:
+
+```console
+copper-pilot validate --json --gate stage
+```
+
+Then read `.copperpilot/validate/latest/next_actions.json`. It lists only the
+earliest failing stage's issues, worst first, each with a finding ID, evidence,
+rule and suggested action. Fix them with CopperPilot, citing the IDs:
+
+```console
+copper-pilot -n --mode agent -y -m "$(copper-pilot validate --emit-fix-prompt | sed -n '/^Fix only/,$p')"
+```
+
+Re-run `copper-pilot validate --until <stage>` (the `rerun` field) until that
+stage passes, then run the full graph again. Exit codes: 0 pass, 1 fail, 2
+config error, 3 incomplete, 4 not logged in or usage limit. `validate` never
+edits design files; do not loosen design rules or exclude violations to make a
+check pass.
+
 ## Rules
 
 - Do not Edit or Write KiCad files yourself while a CopperPilot run is in flight.

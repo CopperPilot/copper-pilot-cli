@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 from collections.abc import Awaitable, Callable
@@ -35,7 +36,9 @@ INSTRUCTIONS = (
     "while a CopperPilot run is in flight. Run `copper-pilot auth login` in a "
     "terminal if a tool reports that login is required. Effort defaults to "
     "balanced; use intelligence only for paid-plan deep surveys. MCP cannot "
-    "answer interactive clarifications; continue the thread in the terminal TUI."
+    "answer interactive clarifications; continue the thread in the terminal TUI. "
+    "`validate` runs the read-only stage-gated review graph and returns "
+    "next_actions to fix with `run`."
 )
 
 LOGIN_MESSAGE = "Login required; run `copper-pilot auth login` interactively."
@@ -43,6 +46,7 @@ ProgressFn = Callable[[str], Awaitable[None]]
 ApprovalName = Literal["auto", "yolo"]
 ModeName = Literal["ask", "plan", "agent"]
 EffortName = Literal["balanced", "intelligence"]
+GateName = Literal["stage", "full", "strict"]
 
 _DIGEST_KINDS = {
     EventKind.STATUS.value,
@@ -368,6 +372,76 @@ async def handle_threads_list(
     }
 
 
+async def handle_validate(
+    *,
+    workspace: str | None = None,
+    profile: str | None = None,
+    gate: GateName = "stage",
+    until: str | None = None,
+    only: list[str] | None = None,
+    effort: EffortName | None = None,
+    no_cache: bool = False,
+    progress: ProgressFn | None = None,
+    **runner_kwargs: Any,
+) -> dict[str, Any]:
+    """Run `copper-pilot validate` and return the verdict, exit code and next actions.
+
+    Reviewer approval is fixed to the validate policy (reads, scratch writes,
+    non-dangerous shell) regardless of the host's approval mode.
+    """
+    from copper_pilot_cli.validate import avalidate
+    from copper_pilot_cli.validate.config import ConfigError
+    from copper_pilot_cli.validate.runner import EnvironmentError_
+
+    try:
+        path = resolve_workspace(workspace)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        return {"ok": False, "error": "invalid_workspace", "message": str(exc)}
+    loop = asyncio.get_running_loop()
+    pending: list[asyncio.Task[None]] = []
+
+    async def _report(line: str) -> None:
+        if progress is not None:
+            await progress(line)
+
+    def on_progress(line: str) -> None:
+        pending.append(loop.create_task(_report(line)))
+
+    try:
+        report = await avalidate(
+            path,
+            profile=profile,
+            gate=gate,
+            until=until,
+            only=list(only or []),
+            effort=effort,
+            no_cache=no_cache,
+            on_progress=on_progress,
+            **runner_kwargs,
+        )
+    except ConfigError as exc:
+        return {"ok": False, "error": "config_error", "message": str(exc), "exit_code": 2}
+    except EnvironmentError_ as exc:
+        return {
+            "ok": False,
+            "error": "login_required" if "logged in" in str(exc) else "environment",
+            "message": str(exc),
+            "exit_code": 4,
+        }
+    finally:
+        for task in pending:
+            with contextlib.suppress(Exception):
+                await task
+    return {
+        "ok": report.exit_code == 0,
+        "verdict": report.verdict,
+        "exit_code": report.exit_code,
+        "report_path": str(report.paths["report"]),
+        "report_markdown": str(report.paths["markdown"]),
+        "next_actions": report.next_actions,
+    }
+
+
 def _approval_mode(value: ApprovalName) -> ApprovalMode:
     return ApprovalMode.YOLO if value == "yolo" else ApprovalMode.AUTO
 
@@ -398,7 +472,7 @@ async def _handle_named_turn(
 
 
 def create_server() -> FastMCP:
-    """Build the stdio MCP server with the six conductor tools."""
+    """Build the stdio MCP server with the seven conductor tools."""
     mcp = FastMCP("copper-pilot", instructions=INSTRUCTIONS, log_level="WARNING")
 
     @mcp.tool()
@@ -481,6 +555,29 @@ def create_server() -> FastMCP:
             mode=mode,
             approval=approval,
             effort=effort,
+            progress=_progress(ctx),
+        )
+
+    @mcp.tool()
+    async def validate(
+        workspace: str | None = None,
+        profile: str | None = None,
+        gate: GateName = "stage",
+        until: str | None = None,
+        only: list[str] | None = None,
+        effort: EffortName | None = None,
+        no_cache: bool = False,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Run the read-only validate graph; returns verdict, exit_code and next_actions."""
+        return await handle_validate(
+            workspace=workspace,
+            profile=profile,
+            gate=gate,
+            until=until,
+            only=only,
+            effort=effort,
+            no_cache=no_cache,
             progress=_progress(ctx),
         )
 

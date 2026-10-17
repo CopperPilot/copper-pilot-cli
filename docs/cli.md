@@ -8,6 +8,7 @@ copper-pilot auth --help
 copper-pilot threads --help
 copper-pilot mcp --help
 copper-pilot acp --help
+copper-pilot validate --help
 ```
 
 Python 3.11 or newer is required. Install with `pip install copper-pilot-cli`.
@@ -50,6 +51,39 @@ Headless mode is also used when `--message` is set and stdout is not a TTY.
 With `--json --no-stream`, the document includes `thread_id` so a later run can
 pass `--resume`.
 
+## Validate
+
+```console
+copper-pilot validate [workspace] [--profile dev|release] [--gate stage|full|strict]
+                      [--until STAGE] [--only ID,...] [--skip ID,...] [--json] [--junit PATH]
+copper-pilot validate list|graph [workspace]
+copper-pilot validate explain CHECK_ID [workspace]
+```
+
+Runs a stage-gated graph of read-only reviewers: `kicad-cli` checks (ERC,
+DRC, parity, rules, Gerbers) and hosted Agent-mode reviewers scoped to one
+concern each, in the order a hardware engineer reviews (intake, architecture,
+parts, schematic, netlist-to-layout, placement, routing, DFM/DFA, release).
+It never modifies design files. Outputs land in `.copperpilot/validate/latest/`:
+`report.json`, `REPORT.md`, and `next_actions.json` (only the earliest failing
+stage, worst first). Uses the stored credential; never opens a browser.
+
+| Code | Meaning |
+|------|---------|
+| 0 | PASS: every selected check is PASS or WARN |
+| 1 | FAIL: at least one blocking FAIL or ERROR |
+| 2 | Usage or config error: bad flags, invalid YAML, a dependency cycle |
+| 3 | INCOMPLETE: no failures, but checks were SKIPPED because of `--gate`, `--until` or `--only` |
+| 4 | Environment: not logged in, or a usage-limit block |
+
+```console
+copper-pilot validate ./my-board --json --gate stage
+copper-pilot validate ./my-board --until S3 --emit-fix-prompt
+copper-pilot validate ./my-board --profile release --gate full --junit validate.xml
+```
+
+Flags, config, the default graph and the fix loop: [validate.md](validate.md).
+
 ## MCP
 
 ```console
@@ -68,6 +102,7 @@ write to stdout; the protocol owns it.
 | `run` | `--mode agent`. Optional `effort`; `approval` is `auto` (default) or `yolo`. |
 | `resume` | Continue `thread_id`. Optional `mode`, `effort`, and the same approval as `run`. |
 | `threads_list` | List threads for this workspace (`limit`, `all_workspaces`). |
+| `validate` | Read-only stage-gated review; returns `verdict`, `exit_code`, `report_path`, `next_actions`. |
 
 Workspace is the tool argument, else `CLAUDE_PROJECT_DIR`, else the process
 current directory. Manual approval is TUI-only. See [harness.md](harness.md).
