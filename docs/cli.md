@@ -93,12 +93,19 @@ advertises a terminal auth method that runs `copper-pilot auth login`.
 | Config options | `mode` and `effort` (`balanced` default, `intelligence` paid) |
 | `session/load` | Resumes an existing thread id and replays its history |
 | `session/request_permission` | Auto approval; non-routine writes and shell prompt the editor |
+| `elicitation/create` | Free-text clarifications, when the client advertises form elicitation |
 | `session/cancel` | Cancels the hosted turn and local tools |
+| `usage_update` | Prompt tokens of the latest hosted turn; window size is unknown (0) |
+| `plan` | Hosted todo list events and `.copperpilot/plans/*.plan.md` todos |
+| `available_commands_update` | `/effort balanced\|intelligence`, answered locally |
 
 "Allow all for this session" switches that session to YOLO until the server
 exits; it is never saved. Clarifying questions with options are shown as
-permission choices plus Skip; free-text questions are declined with a message
-to continue in the TUI. See [harness.md](harness.md).
+permission choices plus Skip. Free-text questions use ACP form elicitation when
+the client supports it (T3 Code does); otherwise they are declined with a
+message to continue in the TUI. Intelligence survey workers appear as `think`
+tool calls named `Survey: <task>` whose status and output track the worker.
+See [harness.md](harness.md).
 
 ## Effort and Intelligence
 

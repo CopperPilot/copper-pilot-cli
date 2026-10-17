@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -18,23 +19,33 @@ from typing import Any, cast
 import httpx
 from acp import PROTOCOL_VERSION, Agent, Client, RequestError, run_agent
 from acp.helpers import (
+    plan_entry,
     start_tool_call,
     text_block,
     tool_content,
     update_agent_message_text,
     update_agent_thought_text,
+    update_available_commands,
     update_current_mode,
+    update_plan,
     update_tool_call,
     update_user_message_text,
 )
 from acp.schema import (
     AgentCapabilities,
     AuthenticateResponse,
+    AvailableCommand,
+    ConfigOptionUpdate,
+    ElicitationFormSessionMode,
+    ElicitationSchema,
+    ElicitationStringPropertySchema,
     Implementation,
     InitializeResponse,
     LoadSessionResponse,
     NewSessionResponse,
     PermissionOption,
+    PlanEntry,
+    PlanEntryStatus,
     PromptResponse,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
@@ -44,19 +55,24 @@ from acp.schema import (
     SetSessionModeResponse,
     TerminalAuthMethod,
     ToolCallLocation,
+    ToolCallStatus,
     ToolCallUpdate,
+    UnstructuredCommandInput,
+    UsageUpdate,
 )
 from langchain_core.messages import HumanMessage
 from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
+from copper_pilot_cli.copper_features import parse_plan
 from copper_pilot_cli.copper_graph import create_copper_graph
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import (
     CopperEffort,
     CopperMode,
     EventKind,
+    PlanContext,
     ProtocolError,
     error_message,
     normalize_effort,
@@ -64,7 +80,6 @@ from copper_pilot_cli.copper_protocol import (
 from copper_pilot_cli.copper_status_events import (
     SubagentStatus,
     normalize_subagent_status,
-    subagent_progress_label,
 )
 from copper_pilot_cli.copper_tools import (
     ApprovalMode,
@@ -86,16 +101,33 @@ logger = logging.getLogger(__name__)
 LOGIN_METHOD_ID = "copper-pilot-login"
 LOGIN_MESSAGE = "Login required; run `copper-pilot auth login` in a terminal."
 QUESTION_MESSAGE = (
-    "This clarification needs a free-text answer, which ACP cannot collect. "
-    "Continue this thread in the CopperPilot TUI with `copper-pilot --resume`."
+    "This clarification needs a free-text answer, which this ACP client cannot "
+    "collect. Continue this thread in the CopperPilot TUI with `copper-pilot --resume`."
 )
 MODE_CONFIG_ID = "mode"
 EFFORT_CONFIG_ID = "effort"
+EFFORT_COMMAND = "effort"
 OPTION_ALLOW = "allow"
 OPTION_ALLOW_SESSION = "allow_session"
 OPTION_REJECT = "reject"
 OPTION_SKIP = "skip"
 _MAX_TOOL_OUTPUT_CHARS = 4_000
+_EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_PLAN_ARTIFACT = re.compile(
+    r"(?:^|[\\/])\.copperpilot[\\/]plans[\\/][^\\/]+\.plan\.md$", re.IGNORECASE
+)
+_PLAN_WRITERS = {"write_file", "edit_file"}
+_PLAN_TODO_STATUSES: dict[str, PlanEntryStatus] = {
+    "open": "pending",
+    "running": "in_progress",
+    "done": "completed",
+}
+_SUBAGENT_TOOL_STATUSES: dict[str, ToolCallStatus] = {
+    "running": "in_progress",
+    "success": "completed",
+    "failed": "failed",
+    "cancelled": "failed",
+}
 
 _MODE_LABELS: dict[CopperMode, tuple[str, str]] = {
     CopperMode.ASK: ("Ask", "Read-oriented electronics questions; no design changes."),
@@ -137,6 +169,9 @@ class AcpSession:
     runtime: Any = None
     cancelled: bool = False
     subagents: dict[str, SubagentStatus] = field(default_factory=dict)
+    tool_paths: dict[str, str] = field(default_factory=dict)
+    last_usage: dict[str, Any] | None = None
+    commands_sent: bool = False
 
     @property
     def busy(self) -> bool:
@@ -267,6 +302,141 @@ def _tool_result_payload(result: Any) -> tuple[str, bool, Any]:
     return text, is_error, result
 
 
+def available_commands() -> list[AvailableCommand]:
+    """Slash commands the server answers locally, without a hosted turn."""
+    return [
+        AvailableCommand(
+            name=EFFORT_COMMAND,
+            description="Set hosted effort: balanced (default) or intelligence (paid plan).",
+            input=UnstructuredCommandInput(hint="balanced | intelligence"),
+        )
+    ]
+
+
+def effort_command(message: str) -> tuple[bool, str | None]:
+    """Return ``(is_effort_command, argument)`` for a prompt."""
+    match = _EFFORT_COMMAND.match(message.strip())
+    if match is None:
+        return False, None
+    return True, match.group(1)
+
+
+def usage_update(payload: Any) -> UsageUpdate | None:
+    """Map hosted per-turn token counts onto an ACP usage update.
+
+    The hosted service reports the prompt tokens a turn consumed but not the
+    model's context window, so ``size`` is 0 (unknown); clients such as T3 Code
+    then show the count alone. The raw counts ride along in ``_meta``.
+    """
+    if not isinstance(payload, dict):
+        return None
+    used = next(
+        (payload[key] for key in ("tokens_input", "input_tokens") if key in payload),
+        None,
+    )
+    if not isinstance(used, int) or isinstance(used, bool) or used < 0:
+        return None
+    return UsageUpdate(session_update="usage_update", used=used, size=0, field_meta=dict(payload))
+
+
+def is_plan_artifact(path: str) -> bool:
+    """True for `.copperpilot/plans/<name>.plan.md` paths, relative or absolute."""
+    return bool(_PLAN_ARTIFACT.search(path))
+
+
+def plan_entries_from_todo_list(payload: dict[str, Any]) -> list[PlanEntry]:
+    """Project a hosted ``todo_list`` status event onto ACP plan entries."""
+    entries: list[PlanEntry] = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        status: PlanEntryStatus = "completed" if item.get("status") == "done" else "pending"
+        entries.append(plan_entry(content, status=status))
+    return entries
+
+
+def plan_entries_from_plan(plan: PlanContext) -> list[PlanEntry]:
+    """Project the todos of a plan artifact onto ACP plan entries."""
+    return [
+        plan_entry(todo.content, status=_PLAN_TODO_STATUSES.get(todo.status, "pending"))
+        for todo in plan.todos
+        if todo.content.strip()
+    ]
+
+
+def subagent_tool_update(status: SubagentStatus, *, started: bool) -> Any:
+    """Render a hosted survey worker as an ACP tool call card.
+
+    T3 Code and Zed render tool calls with a status and collapsible output,
+    which matches the Electron client's subagent card better than thought text.
+    """
+    tool_status = _SUBAGENT_TOOL_STATUSES.get(status.status, "failed")
+    body = status.error if status.status in {"failed", "cancelled"} else status.output
+    content = [tool_content(text_block(body[:_MAX_TOOL_OUTPUT_CHARS]))] if body.strip() else None
+    title = f"Survey: {status.task or 'Survey'}"
+    tool_call_id = f"subagent:{status.id}"
+    if not started:
+        return start_tool_call(
+            tool_call_id,
+            title,
+            kind="think",
+            status=tool_status,
+            content=content,
+            raw_input={"task": status.task, "goal": status.goal},
+        )
+    return update_tool_call(tool_call_id, title=title, status=tool_status, content=content)
+
+
+def elicitation_questions(arguments: Any) -> list[tuple[str, str]] | None:
+    """Return ``(property id, prompt)`` rows for a free-text clarification."""
+    if isinstance(arguments, dict):
+        rows = arguments.get("questions")
+        if isinstance(rows, list) and rows:
+            questions = [
+                (
+                    f"q{index}",
+                    str(row.get("question") or row.get("prompt") or "").strip()
+                    or f"Question {index + 1}",
+                )
+                for index, row in enumerate(rows)
+                if isinstance(row, dict)
+            ]
+            return questions or None
+        prompt = str(arguments.get("question") or arguments.get("prompt") or "").strip()
+    else:
+        prompt = str(arguments or "").strip()
+    return [("answer", prompt or "Clarification")]
+
+
+def elicitation_schema(questions: list[tuple[str, str]]) -> ElicitationSchema:
+    """Build the ACP form schema for free-text questions."""
+    single = len(questions) == 1
+    return ElicitationSchema(
+        properties={
+            key: ElicitationStringPropertySchema(
+                type="string",
+                title="Answer" if single else f"Question {index + 1}",
+                description=prompt,
+            )
+            for index, (key, prompt) in enumerate(questions)
+        }
+    )
+
+
+def _supports_form_elicitation(capabilities: Any) -> bool:
+    """Read ``clientCapabilities.elicitation.form`` from a model or a dict."""
+    if isinstance(capabilities, dict):
+        elicitation = capabilities.get("elicitation")
+    else:
+        elicitation = getattr(capabilities, "elicitation", None)
+    if isinstance(elicitation, dict):
+        return elicitation.get("form") is not None
+    return getattr(elicitation, "form", None) is not None
+
+
 class CopperAcpAgent:
     """ACP agent that proxies prompts to the hosted CopperPilot agent.
 
@@ -284,6 +454,7 @@ class CopperAcpAgent:
         self.approval = approval
         self.default_mode = default_mode
         self.default_effort = default_effort
+        self.elicitation_form = False
         self.sessions: dict[str, AcpSession] = {}
         self._conn: Client | None = None
 
@@ -356,7 +527,8 @@ class CopperAcpAgent:
         client_info: Any = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        del client_capabilities, client_info, kwargs
+        del client_info, kwargs
+        self.elicitation_form = _supports_form_elicitation(client_capabilities)
         return InitializeResponse(
             protocol_version=min(protocol_version, PROTOCOL_VERSION),
             agent_capabilities=AgentCapabilities(load_session=True),
@@ -423,6 +595,7 @@ class CopperAcpAgent:
         session = self._register(session_id, workspace, mode=mode, effort=effort)
         for update in replay_updates(messages):
             await self.conn.session_update(session_id=session_id, update=update)
+        await self._announce_commands(session)
         return LoadSessionResponse(
             modes=mode_state(session.mode),
             config_options=config_options(session.mode, session.effort),
@@ -477,8 +650,14 @@ class CopperAcpAgent:
         message = prompt_text(prompt)
         if not message:
             raise RequestError.invalid_params({"details": "The prompt has no text content."})
+        await self._announce_commands(session)
+        is_command, argument = effort_command(message)
+        if is_command:
+            await self._apply_effort_command(session, argument)
+            return PromptResponse(stop_reason="end_turn")
         session.cancelled = False
         session.subagents = {}
+        session.tool_paths = {}
         session.turn = asyncio.create_task(self._run_turn(session, credential, message))
         try:
             await session.turn
@@ -541,6 +720,52 @@ class CopperAcpAgent:
         if failure and not session.cancelled:
             raise RuntimeError(failure)
 
+    async def _announce_commands(self, session: AcpSession) -> None:
+        """Advertise local slash commands once per session."""
+        if session.commands_sent:
+            return
+        session.commands_sent = True
+        await self.conn.session_update(
+            session_id=session.session_id, update=update_available_commands(available_commands())
+        )
+
+    async def _apply_effort_command(self, session: AcpSession, argument: str | None) -> None:
+        """Answer ``/effort [balanced|intelligence]`` without a hosted turn."""
+        session_id = session.session_id
+        if argument is None:
+            label = _EFFORT_LABELS[session.effort][0]
+            text = f"Effort is {label}. Use `/effort balanced` or `/effort intelligence`."
+        else:
+            try:
+                session.effort = CopperEffort(argument.lower())
+            except ValueError:
+                text = f"Unknown effort {argument!r}; use `balanced` or `intelligence`."
+            else:
+                await self.conn.session_update(
+                    session_id=session_id,
+                    update=ConfigOptionUpdate(
+                        session_update="config_option_update",
+                        config_options=config_options(session.mode, session.effort),
+                    ),
+                )
+                text = f"Effort set to {_EFFORT_LABELS[session.effort][0]}."
+        await self.conn.session_update(
+            session_id=session_id, update=update_agent_message_text(text)
+        )
+
+    async def _emit_plan_artifact(self, session: AcpSession, path: str) -> None:
+        """Publish the todos of a freshly written plan file as an ACP plan."""
+        try:
+            plan = parse_plan(session.workspace / path, session.workspace)
+        except (OSError, ValueError) as exc:
+            logger.debug("Plan artifact %s not published: %s", path, exc)
+            return
+        entries = plan_entries_from_plan(plan)
+        if entries:
+            await self.conn.session_update(
+                session_id=session.session_id, update=update_plan(entries)
+            )
+
     async def _emit(self, session: AcpSession, event: dict[str, Any]) -> str | None:
         """Translate one hosted event into ACP session updates; return an error."""
         kind = str(event.get("type") or "").removeprefix("copper.")
@@ -556,42 +781,60 @@ class CopperAcpAgent:
         elif kind == EventKind.STATUS_EVENT.value and isinstance(payload, dict):
             if payload.get("kind") == "subagent":
                 identifier = str(payload.get("id") or "")
-                status = normalize_subagent_status(payload, session.subagents.get(identifier))
+                previous = session.subagents.get(identifier)
+                status = normalize_subagent_status(payload, previous)
                 if status is not None:
                     session.subagents[status.id] = status
                     await send(
                         session_id=session_id,
-                        update=update_agent_thought_text(subagent_progress_label(status)),
+                        update=subagent_tool_update(status, started=previous is not None),
                     )
+            elif payload.get("kind") == "todo_list":
+                entries = plan_entries_from_todo_list(payload)
+                if entries:
+                    await send(session_id=session_id, update=update_plan(entries))
             elif payload.get("kind") == "plan_mode_switch":
                 await send(
                     session_id=session_id, update=update_agent_thought_text("Switched to Plan mode")
                 )
+        elif kind == EventKind.USAGE.value and isinstance(payload, dict):
+            update = usage_update(payload)
+            if update is not None and payload != session.last_usage:
+                session.last_usage = dict(payload)
+                await send(session_id=session_id, update=update)
         elif kind == EventKind.TOOL_REQUEST.value and isinstance(payload, dict):
             arguments = payload.get("arguments") or {}
             name = str(payload.get("tool_name") or "tool")
+            tool_call_id = str(payload.get("tool_call_id") or "")
+            locations = tool_locations(arguments)
+            if locations and canonical_tool_name(name) in _PLAN_WRITERS:
+                session.tool_paths[tool_call_id] = locations[0].path
             await send(
                 session_id=session_id,
                 update=start_tool_call(
-                    str(payload.get("tool_call_id") or ""),
+                    tool_call_id,
                     tool_title(name, arguments),
                     kind=tool_kind(name),
                     status="in_progress",
-                    locations=tool_locations(arguments),
+                    locations=locations,
                     raw_input=arguments,
                 ),
             )
         elif kind == EventKind.TOOL_RESULT.value and isinstance(payload, dict):
             text, is_error, raw = _tool_result_payload(payload.get("result"))
+            tool_call_id = str(payload.get("tool_call_id") or "")
             await send(
                 session_id=session_id,
                 update=update_tool_call(
-                    str(payload.get("tool_call_id") or ""),
+                    tool_call_id,
                     status="failed" if is_error else "completed",
                     content=[tool_content(text_block(text))] if text else None,
                     raw_output=raw,
                 ),
             )
+            path = session.tool_paths.pop(tool_call_id, None)
+            if path and not is_error and is_plan_artifact(path):
+                await self._emit_plan_artifact(session, path)
         elif kind == EventKind.ERROR.value:
             return error_message(payload)
         elif kind == EventKind.FINAL.value and isinstance(payload, dict):
@@ -633,11 +876,42 @@ class CopperAcpAgent:
 
         return approve
 
+    async def _ask_free_text(self, session: AcpSession, arguments: Any) -> Any:
+        """Collect free-text answers through ACP form elicitation."""
+        questions = elicitation_questions(arguments)
+        if not self.elicitation_form or questions is None:
+            raise ToolRejected(QUESTION_MESSAGE)
+        multi = isinstance(arguments, dict) and isinstance(arguments.get("questions"), list)
+        message = "CopperPilot needs a few answers to continue." if multi else questions[0][1]
+        response = await self.conn.create_elicitation(
+            message,
+            ElicitationFormSessionMode(
+                session_id=session.session_id, requested_schema=elicitation_schema(questions)
+            ),
+        )
+        content = (
+            getattr(response, "content", None)
+            if getattr(response, "action", None) == "accept"
+            else None
+        )
+        answers = content if isinstance(content, dict) else {}
+        if multi:
+            return {
+                "answers": [
+                    {"question": prompt, "answer": str(answers.get(key) or "").strip()}
+                    for key, prompt in questions
+                ]
+            }
+        answer = str(answers.get("answer") or "").strip()
+        if not answer:
+            return {"status": "skipped"}
+        return {"status": "answered", "answer": answer, "source": "custom"}
+
     def _question_handler(self, session: AcpSession) -> Callable[[Any], Awaitable[Any]]:
         async def ask(arguments: Any) -> Any:
             parsed = question_options(arguments)
             if parsed is None:
-                raise ToolRejected(QUESTION_MESSAGE)
+                return await self._ask_free_text(session, arguments)
             prompt, options = parsed
             response = await self.conn.request_permission(
                 session_id=session.session_id,
