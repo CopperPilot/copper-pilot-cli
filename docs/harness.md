@@ -35,6 +35,10 @@ Use `--mode plan` for a plan, `--mode agent -y` for Auto local writes, and
 `--yolo` only when the user asked to skip local approval. Add
 `--effort intelligence` for a paid Intelligence turn; Balanced is the default.
 
+For sign-off, run `copper-pilot validate --json`, read
+`.copperpilot/validate/latest/next_actions.json`, fix with `--mode agent -y`
+citing the finding IDs, and re-run. See [validate.md](validate.md).
+
 ## Option 2: MCP conductor (`copper-pilot mcp`)
 
 The same process as the CLI, same stored credential. Stdio JSON-RPC; do not
@@ -88,6 +92,7 @@ Point the host at `copper-pilot mcp` on stdio. Tools:
 | `run` | Mutating agent turn (`--mode agent`); optional `effort` |
 | `resume` | Continue `thread_id` (`mode` defaults to `agent`; optional `effort`) |
 | `threads_list` | List threads for this workspace |
+| `validate` | Read-only stage-gated review graph (`copper-pilot validate`); returns `next_actions` |
 
 Workspace is the tool `workspace` argument, else `CLAUDE_PROJECT_DIR`, else the
 process current directory.

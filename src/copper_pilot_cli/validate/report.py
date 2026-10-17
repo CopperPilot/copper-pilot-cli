@@ -1,9 +1,10 @@
-"""Run outputs: report.json, REPORT.md, next_actions.json."""
+"""Run outputs: report.json, REPORT.md, next_actions.json, junit.xml, fix prompt."""
 
 from __future__ import annotations
 
 import json
 import os
+import xml.etree.ElementTree as ET  # noqa: S405 - we only build XML here
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,40 @@ def _action(check_id: str, finding: Finding) -> dict[str, Any]:
     }
 
 
+def fix_prompt(actions: dict[str, Any]) -> str:
+    """A ready message for `copper-pilot -n --mode agent -y -m "..."`."""
+    stage = actions.get("stage")
+    if not stage:
+        return "Validation passed; nothing to fix."
+    lines = [
+        f"Fix only the following validation findings from stage {stage} "
+        f"({actions.get('stage_title') or ''}). Do not change anything else.",
+        "Cite each finding ID in the change you make for it.",
+        "Do not loosen design rules, net classes, or fab limits, and do not exclude "
+        "ERC/DRC violations to make a check pass.",
+        "",
+    ]
+    for item in actions.get("actions") or []:
+        locator = item.get("locator") or {}
+        where = ", ".join(
+            f"{key}={value}" for key, value in locator.items() if value not in (None, [], "")
+        )
+        lines.append(f"- [{item['id']}] {item['severity']} {item['title']}")
+        if where:
+            lines.append(f"  where: {where}")
+        if item.get("evidence"):
+            lines.append(f"  evidence: {item['evidence']}")
+        if item.get("rule"):
+            lines.append(f"  rule: {item['rule']}")
+        if item.get("action"):
+            lines.append(f"  action: {item['action']}")
+    if actions.get("more"):
+        lines.append(f"- ... and {actions['more']} more in the report")
+    lines.append("")
+    lines.append(f"When done, re-run `{actions.get('rerun') or 'copper-pilot validate'}`.")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- renderers
 
 
@@ -185,6 +220,43 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_junit(report: dict[str, Any]) -> str:
+    results = [CheckResult.model_validate(raw) for raw in report["results"]]
+    suite = ET.Element(
+        "testsuite",
+        name="copper-pilot validate",
+        tests=str(len(results)),
+        failures=str(sum(1 for r in results if r.status in {Status.FAIL, Status.ERROR})),
+        skipped=str(sum(1 for r in results if r.status is Status.SKIPPED)),
+        time=f"{sum(r.seconds for r in results):.3f}",
+    )
+    for result in results:
+        case = ET.SubElement(
+            suite,
+            "testcase",
+            name=result.check_id,
+            classname=f"validate.{result.stage}",
+            time=f"{result.seconds:.3f}",
+        )
+        text = "\n".join(
+            f"{f.id} {f.severity.value} {f.title}: {f.detail}".strip() for f in result.findings
+        )
+        if result.status in {Status.FAIL, Status.ERROR}:
+            failure = ET.SubElement(
+                case,
+                "failure" if result.status is Status.FAIL else "error",
+                message=result.error or f"{result.check_id} {result.status.value}",
+            )
+            failure.text = text or result.error or ""
+        elif result.status is Status.SKIPPED:
+            ET.SubElement(case, "skipped", message="; ".join(result.blocked_by) or "skipped")
+        elif result.status is Status.WARN:
+            out = ET.SubElement(case, "system-out")
+            out.text = text
+    ET.indent(suite)
+    return ET.tostring(suite, encoding="unicode", xml_declaration=True) + "\n"
+
+
 # ------------------------------------------------------------------ writing
 
 
@@ -224,6 +296,8 @@ def write_outputs(
     run_dir: Path,
     report: dict[str, Any],
     actions: dict[str, Any],
+    *,
+    junit_path: Path | None = None,
 ) -> dict[str, Path]:
     run_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -234,6 +308,10 @@ def write_outputs(
     paths["report"].write_text(json.dumps(report, indent=2), encoding="utf-8")
     paths["markdown"].write_text(render_markdown(report), encoding="utf-8")
     paths["next_actions"].write_text(json.dumps(actions, indent=2), encoding="utf-8")
+    if junit_path is not None:
+        junit_path.parent.mkdir(parents=True, exist_ok=True)
+        junit_path.write_text(render_junit(report), encoding="utf-8")
+        paths["junit"] = junit_path
     _point_latest(run_dir)
     return paths
 

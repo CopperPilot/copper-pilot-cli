@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -74,8 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repeat", type=int, help="Consensus runs for agent checks (overrides the graph)"
     )
+    parser.add_argument("--json", action="store_true", help="Stream JSON events to stdout")
+    parser.add_argument("--junit", type=Path, metavar="PATH", help="Also write JUnit XML")
     parser.add_argument(
         "--out", type=Path, metavar="DIR", help="Output directory (default: .copperpilot/validate)"
+    )
+    parser.add_argument(
+        "--emit-fix-prompt",
+        action="store_true",
+        help="Also print a ready prompt for `copper-pilot --mode agent`",
     )
     return parser
 
@@ -165,10 +173,14 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
         no_cache=args.no_cache,
         repeat=args.repeat,
         out_dir=args.out,
+        junit_path=args.junit,
+        emit_fix_prompt=args.emit_fix_prompt,
     )
 
 
-def _print_outcome(outcome: RunOutcome) -> None:
+def _print_outcome(outcome: RunOutcome, *, as_json: bool) -> None:
+    if as_json:
+        return
     counts = {"FAIL": 0, "ERROR": 0, "WARN": 0, "PASS": 0, "SKIPPED": 0}
     for result in outcome.results:
         counts[result.status.value] += 1
@@ -180,6 +192,11 @@ def _print_outcome(outcome: RunOutcome) -> None:
     print(f"report: {outcome.paths['markdown']}")
     print(f"json: {outcome.paths['report']}")
     print(f"next actions: {outcome.paths['next_actions']}")
+    if "junit" in outcome.paths:
+        print(f"junit: {outcome.paths['junit']}")
+    if outcome.fix_prompt is not None:
+        print()
+        print(outcome.fix_prompt)
 
 
 def run_command(args: argparse.Namespace, **runner_kwargs: Any) -> int:
@@ -193,7 +210,10 @@ def run_command(args: argparse.Namespace, **runner_kwargs: Any) -> int:
             print(render_graph(config))
             return 0
         options = options_from_args(args)
-        options.on_progress = lambda line: print(line, file=sys.stderr, flush=True)
+        if args.json:
+            options.on_event = lambda event: print(json.dumps(event), flush=True)
+        else:
+            options.on_progress = lambda line: print(line, file=sys.stderr, flush=True)
         runner = Runner(workspace, config, options, **runner_kwargs)
         try:
             outcome = asyncio.run(runner.run())
@@ -201,9 +221,9 @@ def run_command(args: argparse.Namespace, **runner_kwargs: Any) -> int:
             outcome = runner.last_outcome
             if outcome is None:
                 return EXIT_INTERRUPTED
-            _print_outcome(outcome)
+            _print_outcome(outcome, as_json=args.json)
             return EXIT_INTERRUPTED
-        _print_outcome(outcome)
+        _print_outcome(outcome, as_json=args.json)
         return outcome.exit_code
     except (ConfigError, FileNotFoundError, NotADirectoryError) as exc:
         print(f"copper-pilot validate: {exc}", file=sys.stderr)

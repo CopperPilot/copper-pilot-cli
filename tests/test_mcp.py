@@ -340,11 +340,95 @@ async def test_collect_turn_reports_bounded_subagent_progress(tmp_path, monkeypa
     assert "output" not in status_events[-1]["data"]
 
 
-def test_server_registers_six_tools() -> None:
+def test_server_registers_seven_tools() -> None:
     names = registered_tool_names(create_server())
-    assert names == {"status", "ask", "plan", "run", "resume", "threads_list"}
+    assert names == {"status", "ask", "plan", "run", "resume", "threads_list", "validate"}
 
 
 def test_status_payload_is_json_serializable(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("copper_pilot_cli.copper_mcp.load_credential", lambda: None)
     json.dumps(handle_status(str(tmp_path)))
+
+
+def test_validate_tool_is_registered() -> None:
+    assert "validate" in registered_tool_names()
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_returns_verdict_and_next_actions(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli.copper_mcp import handle_validate
+    from copper_pilot_cli.validate.config import CheckResult, Status
+    from copper_pilot_cli.validate.runner import RunOutcome
+
+    seen: dict[str, object] = {}
+
+    async def fake_avalidate(workspace, **kwargs):
+        seen["workspace"] = workspace
+        seen.update(kwargs)
+        kwargs["on_progress"]("running  sch.erc")
+        return RunOutcome(
+            verdict="FAIL",
+            exit_code=1,
+            run_dir=tmp_path,
+            report={"schema": "copper-pilot.validate/v1"},
+            next_actions={"stage": "S3", "actions": [{"id": "sch.erc/001"}]},
+            results=[
+                CheckResult(
+                    check_id="sch.erc", stage="S3", title="ERC", status=Status.FAIL, gate="blocking"
+                )
+            ],
+            paths={"report": tmp_path / "report.json", "markdown": tmp_path / "REPORT.md"},
+        )
+
+    monkeypatch.setattr("copper_pilot_cli.validate.avalidate", fake_avalidate)
+    progress: list[str] = []
+
+    async def report(message: str) -> None:
+        progress.append(message)
+
+    payload = await handle_validate(
+        workspace=str(tmp_path),
+        profile="release",
+        gate="full",
+        until="S3",
+        only=["sch.erc"],
+        effort="balanced",
+        no_cache=True,
+        progress=report,
+    )
+    assert payload["ok"] is False
+    assert payload["verdict"] == "FAIL"
+    assert payload["exit_code"] == 1
+    assert payload["next_actions"]["actions"][0]["id"] == "sch.erc/001"
+    assert payload["report_path"] == str(tmp_path / "report.json")
+    assert seen["workspace"] == tmp_path.resolve()
+    assert seen["profile"] == "release" and seen["gate"] == "full" and seen["until"] == "S3"
+    assert seen["only"] == ["sch.erc"] and seen["no_cache"] is True
+    assert progress == ["running  sch.erc"]
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_reports_config_and_login_errors(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli.copper_mcp import handle_validate
+    from copper_pilot_cli.validate.config import ConfigError
+    from copper_pilot_cli.validate.runner import EnvironmentError_
+
+    async def bad_config(workspace, **kwargs):
+        raise ConfigError("check 'a': dependency cycle")
+
+    monkeypatch.setattr("copper_pilot_cli.validate.avalidate", bad_config)
+    payload = await handle_validate(workspace=str(tmp_path))
+    assert payload == {
+        "ok": False,
+        "error": "config_error",
+        "message": "check 'a': dependency cycle",
+        "exit_code": 2,
+    }
+
+    async def not_logged_in(workspace, **kwargs):
+        raise EnvironmentError_("Not logged in. Run `copper-pilot auth login`.")
+
+    monkeypatch.setattr("copper_pilot_cli.validate.avalidate", not_logged_in)
+    payload = await handle_validate(workspace=str(tmp_path))
+    assert payload["error"] == "login_required" and payload["exit_code"] == 4
+    assert (await handle_validate(workspace="/no/such/dir"))["error"] == "invalid_workspace"

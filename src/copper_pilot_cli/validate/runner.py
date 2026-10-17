@@ -42,7 +42,13 @@ from copper_pilot_cli.validate.design import (
     snapshot_hashes,
 )
 from copper_pilot_cli.validate.kicad import KicadCli, find_kicad_cli
-from copper_pilot_cli.validate.report import build_report, next_actions, verdict_for, write_outputs
+from copper_pilot_cli.validate.report import (
+    build_report,
+    fix_prompt,
+    next_actions,
+    verdict_for,
+    write_outputs,
+)
 from copper_pilot_cli.validate.reviewer import (
     HostedTurnRunner,
     ReviewTurn,
@@ -85,6 +91,8 @@ class RunOptions:
     no_cache: bool = False
     repeat: int | None = None
     out_dir: Path | None = None
+    junit_path: Path | None = None
+    emit_fix_prompt: bool = False
     on_event: EventFn | None = None
     on_progress: ProgressFn | None = None
 
@@ -98,6 +106,7 @@ class RunOutcome:
     next_actions: dict[str, Any]
     paths: dict[str, Path]
     results: list[CheckResult]
+    fix_prompt: str | None = None
     interrupted: bool = False
 
 
@@ -660,7 +669,8 @@ class Runner:
         if self.usage_limit is not None:
             report["usage_limit"] = self.usage_limit
         actions = next_actions(results, self.config)
-        paths = write_outputs(self.run_dir, report, actions)
+        paths = write_outputs(self.run_dir, report, actions, junit_path=self.options.junit_path)
+        prompt = fix_prompt(actions) if self.options.emit_fix_prompt else None
         self._emit(
             "validate.end",
             {
@@ -679,6 +689,7 @@ class Runner:
             next_actions=actions,
             paths=paths,
             results=results,
+            fix_prompt=prompt,
             interrupted=self.interrupted,
         )
         return self.last_outcome

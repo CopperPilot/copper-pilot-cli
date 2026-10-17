@@ -277,6 +277,7 @@ def test_validate_help_describes_exit_codes() -> None:
     help_text = command_parser("validate").format_help()
     assert "read-only" in help_text
     assert "3 incomplete" in help_text
+    assert "--emit-fix-prompt" in help_text
     assert "validate list|graph" in help_text
     assert "copper-pilot validate" in parser().format_help()
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import xml.etree.ElementTree as ET  # noqa: S405 - our own JUnit output
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from copper_pilot_cli.validate.design import (
     snapshot_hashes,
 )
 from copper_pilot_cli.validate.kicad import KicadError
+from copper_pilot_cli.validate.report import fix_prompt, next_actions, render_junit
 from copper_pilot_cli.validate.reviewer import (
     QUESTION_REJECTION,
     HostedTurnRunner,
@@ -1041,6 +1043,109 @@ async def test_until_and_only_exit_3_when_clean(tmp_path) -> None:
         await runner_for(tmp_path, options=RunOptions(only=["nope"])).run()
 
 
+@pytest.mark.asyncio
+async def test_json_events_and_junit(tmp_path) -> None:
+    make_project(tmp_path)
+    events: list[dict[str, Any]] = []
+    junit = tmp_path / "out" / "junit.xml"
+    kicad = FakeKicad(
+        erc=[
+            {
+                "severity": "warning",
+                "type": "lib_symbol_mismatch",
+                "description": "Symbol differs",
+                "items": [],
+            }
+        ]
+    )
+    turn = FakeTurn({"arch.review": reply([finding("P1", "Bad rail", refs=["U1"])])})
+    options = RunOptions(until="S3", junit_path=junit, on_event=events.append)
+    outcome = await runner_for(tmp_path, options=options, kicad=kicad, turn=turn).run()
+    kinds = [event["type"] for event in events]
+    assert kinds[0] == "validate.start" and kinds[-1] == "validate.end"
+    assert "validate.check" in kinds and "validate.result" in kinds
+    assert events[0]["data"]["run_id"] == outcome.run_dir.name
+    assert events[-1]["data"]["exit_code"] == EXIT_FAIL
+    for event in events:
+        json.dumps(event)
+    tree = ET.parse(junit)  # noqa: S314
+    cases = {case.get("name"): case for case in tree.getroot().iter("testcase")}
+    assert cases["arch.review"].find("failure") is not None
+    assert cases["sch.erc"].find("skipped") is not None
+    assert "stage gate: S1" in (cases["sch.erc"].find("skipped").get("message") or "")
+    assert cases["intake.project"].find("failure") is None
+    assert cases["parts.bom_fields"].find("skipped") is not None
+    assert tree.getroot().get("failures") == "1"
+
+
+def test_junit_maps_warn_and_error() -> None:
+    report = {
+        "results": [
+            CheckResult(
+                check_id="a",
+                stage="S0",
+                title="a",
+                status=Status.WARN,
+                gate="blocking",
+                findings=[Finding(id="a/001", title="hm")],
+            ).model_dump(mode="json"),
+            CheckResult(
+                check_id="b",
+                stage="S0",
+                title="b",
+                status=Status.ERROR,
+                gate="blocking",
+                error="boom",
+            ).model_dump(mode="json"),
+        ]
+    }
+    xml = render_junit(report)
+    root = ET.fromstring(xml)  # noqa: S314
+    cases = {case.get("name"): case for case in root.iter("testcase")}
+    assert cases["a"].find("system-out").text.startswith("a/001")
+    assert cases["b"].find("error").get("message") == "boom"
+
+
+def test_fix_prompt_cites_ids_and_rules() -> None:
+    config = build_config(packaged_default_raw())
+    results = [
+        CheckResult(
+            check_id="sch.erc",
+            stage="S3",
+            title="ERC",
+            status=Status.FAIL,
+            gate="blocking",
+            findings=[
+                Finding(
+                    id="sch.erc/001",
+                    severity=Severity.P1,
+                    title="pin_not_connected",
+                    locator=Locator(refs=["U1"]),
+                    evidence="erc.json",
+                    rule="ERC",
+                    suggested_action="Connect it",
+                )
+            ],
+        ),
+        CheckResult(
+            check_id="pcb.drc",
+            stage="S7",
+            title="DRC",
+            status=Status.SKIPPED,
+            gate="blocking",
+            blocked_by=["stage gate: S3 (sch.erc)"],
+        ),
+    ]
+    actions = next_actions(results, config)
+    assert actions["checks_blocked_downstream"] == ["pcb.drc"]
+    text = fix_prompt(actions)
+    assert "[sch.erc/001] P1 pin_not_connected" in text
+    assert "refs=['U1']" in text
+    assert "Do not loosen design rules" in text
+    assert "copper-pilot validate --until S3" in text
+    assert fix_prompt(next_actions([], config)) == "Validation passed; nothing to fix."
+
+
 # --------------------------------------------------------------- builtins
 
 
@@ -1207,7 +1312,7 @@ async def test_hosted_turn_runner_uses_ask_mode_and_read_only_broker(tmp_path, m
 def test_cli_run_prints_verdict_and_paths(tmp_path, capsys) -> None:
     make_project(tmp_path)
     code = run_command(
-        parse_args([str(tmp_path), "--until", "S0"]),
+        parse_args([str(tmp_path), "--until", "S0", "--emit-fix-prompt"]),
         turn=FakeTurn(),
         kicad_finder=lambda: FakeKicad(),
         credential_loader=lambda: CREDENTIAL,
@@ -1216,7 +1321,24 @@ def test_cli_run_prints_verdict_and_paths(tmp_path, capsys) -> None:
     assert code == EXIT_INCOMPLETE
     assert captured.out.startswith("INCOMPLETE:")
     assert "report:" in captured.out and "next actions:" in captured.out
+    assert "Validation passed; nothing to fix." in captured.out
     assert "PASS     intake.tools" in captured.err
+
+
+def test_cli_json_streams_events(tmp_path, capsys) -> None:
+    make_project(tmp_path)
+    code = run_command(
+        parse_args([str(tmp_path), "--until", "S0", "--json", "--out", str(tmp_path / "o")]),
+        turn=FakeTurn(),
+        kicad_finder=lambda: FakeKicad(),
+        credential_loader=lambda: CREDENTIAL,
+    )
+    assert code == EXIT_INCOMPLETE
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert lines[0]["type"] == "validate.start"
+    assert lines[-1]["type"] == "validate.end"
+    assert lines[-1]["data"]["exit_code"] == EXIT_INCOMPLETE
+    assert (tmp_path / "o" / "latest").exists()
 
 
 def test_cli_exit_codes(tmp_path, capsys) -> None:
@@ -1271,6 +1393,8 @@ def test_parse_args_flags() -> None:
             "--concurrency",
             "2",
             "--no-cache",
+            "--junit",
+            "j.xml",
             "--effort",
             "intelligence",
         ]
@@ -1279,7 +1403,7 @@ def test_parse_args_flags() -> None:
     assert args.only == ["a", "b", "c"] and args.skip == ["d"]
     assert args.profile == "release" and args.gate == "strict" and args.until == "S3"
     assert args.repeat == 3 and args.concurrency == 2 and args.no_cache
-    assert args.effort == "intelligence"
+    assert str(args.junit) == "j.xml" and args.effort == "intelligence"
     assert parse_args(["list"]).action == "list"
 
 

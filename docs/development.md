@@ -6,7 +6,7 @@ How to build, test, and release this package. Contributor workflow lives in
 ## Layout
 
 ```
-src/copper_pilot_cli/   Python package
+src/copper_pilot_cli/   Python package (validate/ holds the review graph engine)
 tests/                  pytest suite
 examples/               Runnable examples
 docs/                   User and developer docs
@@ -53,6 +53,9 @@ unreleased Python.
   credential is stored.
 - ESP32 example helpers are covered in `tests/test_esp32_example.py`. Running
   `python examples/001_esp32/main.py` needs KiCad 10 and a live account.
+- `tests/test_validate.py` covers the validate engine with a fake `kicad-cli`
+  and fake hosted turns; `tests/test_validate_live.py` runs
+  `validate --until S2` on `examples/001_esp32` under `pytest -m live`.
 
 Do not commit credentials, `.venv/`, or `dist/`.
 
