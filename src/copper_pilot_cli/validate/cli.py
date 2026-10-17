@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import signal
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +280,17 @@ def _print_outcome(outcome: RunOutcome, *, as_json: bool) -> None:
         print(outcome.fix_prompt)
 
 
+def _terminate_like_interrupt() -> None:
+    """Make SIGTERM (CI timeouts, `timeout(1)`) write the partial report like Ctrl-C."""
+
+    def _raise(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    if threading.current_thread() is threading.main_thread():
+        with contextlib.suppress(ValueError, OSError, AttributeError):
+            signal.signal(signal.SIGTERM, _raise)
+
+
 def run_command(args: argparse.Namespace, **runner_kwargs: Any) -> int:
     """Dispatch list/graph/explain/run; returns the process exit code."""
     try:
@@ -300,6 +314,7 @@ def run_command(args: argparse.Namespace, **runner_kwargs: Any) -> int:
         else:
             options.on_progress = lambda line: print(line, file=sys.stderr, flush=True)
         runner = Runner(workspace, config, options, **runner_kwargs)
+        _terminate_like_interrupt()
         try:
             outcome = asyncio.run(runner.run())
         except KeyboardInterrupt:

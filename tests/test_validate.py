@@ -1494,6 +1494,58 @@ def test_python_api_returns_validation_report(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reviewer_timeout_is_an_error(tmp_path) -> None:
+    import asyncio
+
+    async def slow(turn: ReviewTurn) -> TurnResult:
+        await asyncio.sleep(5)
+        return TurnResult(text=reply())
+
+    config = load_config(tmp_path if make_project(tmp_path) else tmp_path)
+    config.reviewer.timeout_s = 1
+    runner = Runner(
+        tmp_path,
+        config,
+        RunOptions(only=["sch.ratings"]),
+        turn=slow,
+        kicad_finder=lambda: FakeKicad(),
+        credential_loader=lambda: CREDENTIAL,
+        snapshot_root=tmp_path.parent / "snapshots",
+    )
+    outcome = await runner.run()
+    result = by_id(outcome.results)["sch.ratings"]
+    assert result.status is Status.ERROR
+    assert "timed out after 1 s" in (result.error or "")
+
+
+def test_sigterm_writes_partial_report_like_ctrl_c(tmp_path, capsys) -> None:
+    import os
+    import signal
+    import threading
+
+    make_project(tmp_path)
+
+    async def slow(turn: ReviewTurn) -> TurnResult:
+        import asyncio
+
+        threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+        await asyncio.sleep(30)
+        return TurnResult(text=reply())
+
+    code = run_command(
+        parse_args([str(tmp_path), "--only", "sch.ratings", "--out", str(tmp_path / "o")]),
+        turn=slow,
+        kicad_finder=lambda: FakeKicad(),
+        credential_loader=lambda: CREDENTIAL,
+        snapshot_root=tmp_path.parent / "snapshots",
+    )
+    assert code == 130
+    out = capsys.readouterr().out
+    assert "(interrupted)" in out
+    assert (tmp_path / "o" / "latest" / "report.json").is_file()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_run_writes_partial_report(tmp_path) -> None:
     import asyncio
 

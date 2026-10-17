@@ -625,7 +625,15 @@ class Runner:
         async with self.semaphore:
             if self.usage_limit is not None:
                 return SliceResult(thread_id=thread_id, error=self._usage_label())
-            result = await review_slice(self.turn, turn)
+            timeout_s = self.config.reviewer.timeout_s
+            try:
+                async with asyncio.timeout(timeout_s if timeout_s > 0 else None):
+                    result = await review_slice(self.turn, turn)
+            except TimeoutError:
+                result = SliceResult(
+                    thread_id=thread_id,
+                    error=f"reviewer timed out after {timeout_s} s (reviewer.timeout_s)",
+                )
         suffix = f"{slice_index}-{run_index}"
         for number, (sent, reply) in enumerate(
             zip(result.prompts, result.replies, strict=False), start=1
