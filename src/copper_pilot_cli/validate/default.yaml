@@ -54,6 +54,7 @@ reviewer:
       or assembly risk; P2 = an expert reviewer would flag it; P3 = polish.
 
 checks:
+  # ---------------------------------------------------------------- S0 Intake
   - id: intake.tools
     stage: S0
     title: kicad-cli is available
@@ -77,6 +78,24 @@ checks:
     gate: advisory
     inputs: [intent]
 
+  # ---------------------------------------------------------- S1 Architecture
+  - id: arch.review
+    stage: S1
+    title: Architecture, power tree, protection, clocks and boot path
+    kind: agent
+    effort: intelligence
+    requires: [intake.project]
+    after: [intake.intent]
+    inputs: [sch, intent]
+    prompt: |
+      Review the system architecture of this design against its stated intent (project index,
+      plans). Cover: the block diagram implied by the schematic; the power tree with a current
+      budget per rail and the headroom of every regulator; protection strategy (ESD, reverse
+      polarity, inrush, overcurrent) on every external connector; clock sources and their
+      loading; reset and boot strapping; any interface whose standard is not met.
+      Report only architecture-level issues; leave per-part and per-net detail to other reviewers.
+
+  # ------------------------------------------------------------------ S2 Parts
   - id: parts.bom_fields
     stage: S2
     title: BOM fields are complete
@@ -85,6 +104,55 @@ checks:
     requires: [intake.project]
     inputs: [sch]
 
+  - id: parts.lcsc
+    stage: S2
+    title: LCSC parts exist, match the MPN, and are stocked
+    kind: agent
+    scope: per_part
+    batch: 6
+    requires: [intake.project]
+    after: [parts.bom_fields]
+    inputs: [sch]
+    prompt: |
+      For each part below, confirm that the LCSC part number exists, that it is the same device
+      as the MPN and value in the schematic (same package and electrical variant), whether it is
+      a JLCPCB Basic or Extended part, and whether stock is a risk. A part without an LCSC number
+      is a P2 finding unless it is a mechanical item or marked DNP.
+      {items}
+
+  - id: parts.symbols
+    stage: S2
+    title: Symbols match datasheet pinouts
+    kind: agent
+    scope: per_part
+    batch: 4
+    requires: [intake.project]
+    after: [parts.bom_fields]
+    inputs: [sch, libs]
+    prompt: |
+      For each part below, compare the schematic symbol's pins (numbers, names, electrical
+      types) with the manufacturer datasheet pinout. Report a missing, swapped, or mis-typed
+      pin as P0 when it changes connectivity, P1 when it only affects ERC. Passive two-terminal
+      parts need no review unless polarized.
+      {items}
+
+  - id: parts.footprints
+    stage: S2
+    title: Footprints match datasheets and the LCSC package
+    kind: agent
+    scope: per_part
+    batch: 4
+    requires: [intake.project]
+    after: [parts.bom_fields]
+    inputs: [sch, pcb, libs]
+    prompt: |
+      For each part below, compare the assigned footprint with the datasheet land pattern and
+      with the package LCSC ships: pad count, pitch, pad size, pin-1 position and the
+      symbol-to-footprint pin map. A pin-map mismatch is P0. A land pattern that deviates from
+      the datasheet recommendation is P1; a missing courtyard or 3D model is P3.
+      {items}
+
+  # -------------------------------------------------------------- S3 Schematic
   - id: sch.erc
     stage: S3
     title: ERC is clean
@@ -93,6 +161,53 @@ checks:
     requires: [intake.project]
     inputs: [sch, libs]
 
+  - id: sch.conventions
+    stage: S3
+    title: Schematic conventions
+    kind: agent
+    scope: per_sheet
+    batch: 3
+    requires: [intake.project]
+    inputs: [sch]
+    prompt: |
+      For each sheet below, review drawing conventions: signal flow left to right, power at
+      the top and ground at the bottom, consistent net naming, labelled off-sheet connections,
+      no four-way junctions, readable values and designators, decoupling drawn beside its
+      consumer, and a title block that is filled in. These are P2 or P3 findings unless they
+      hide a connectivity error.
+      {items}
+
+  - id: sch.circuits
+    stage: S3
+    title: Circuit correctness per sheet
+    kind: agent
+    scope: per_sheet
+    batch: 2
+    effort: intelligence
+    requires: [intake.project, arch.review, parts.symbols, sch.erc]
+    inputs: [sch, intent]
+    prompt: |
+      For each sheet below, verify every circuit against the relevant datasheet application
+      notes and reference designs: regulator input/output capacitance and feedback networks,
+      pull-ups and strapping pins, crystal loading, USB termination and CC resistors, level
+      shifting, ESD placement, LED current, button debounce, interface pin assignments.
+      Report wrong connections and missing parts as P0, marginal values as P1.
+      {items}
+
+  - id: sch.ratings
+    stage: S3
+    title: Ratings, derating and thermal calculations
+    kind: agent
+    requires: [intake.project]
+    after: [sch.erc]
+    inputs: [sch]
+    prompt: |
+      Check every part that handles power or voltage: capacitor voltage derating (DC bias of
+      MLCCs), resistor power at worst case, regulator and MOSFET dissipation with junction
+      temperature calculated from the package thermal resistance, diode and fuse ratings, and
+      connector current. Show the calculation and its numbers for each finding.
+
+  # --------------------------------------------------------- S4 Netlist to layout
   - id: pcb.parity
     stage: S4
     title: PCB matches the schematic and has no unconnected items
@@ -109,6 +224,50 @@ checks:
     requires: [intake.project]
     inputs: [pro, pcb]
 
+  # ------------------------------------------------------------- S5 Placement
+  - id: pcb.placement
+    stage: S5
+    title: Placement serves the circuits and the mechanicals
+    kind: agent
+    requires: [intake.project, pcb.parity, parts.footprints]
+    inputs: [pcb, sch]
+    prompt: |
+      Review component placement: decoupling next to the pins it serves, regulator loops kept
+      short, crystals and antennas with keep-outs, connectors on the edge with mating clearance,
+      polarity and pin-1 orientation consistent, test points and mounting holes reachable,
+      thermal parts spread. Give coordinates for every finding.
+
+  # ------------------------------------------------------------ S6 Routing SI/PI
+  - id: pcb.power_routing
+    stage: S6
+    title: Power routing carries the budget (IPC-2152)
+    kind: agent
+    requires: [intake.project, pcb.parity]
+    after: [pcb.placement]
+    inputs: [pcb, pro]
+    prompt: |
+      Check every power net on the PCB: trace width and copper weight against the current
+      budget using IPC-2152 (show the calculation), via count and size for current carrying,
+      plane connections, and the return path for each rail. Report an under-sized trace as P1,
+      a missing return path as P0.
+
+  - id: pcb.signal_integrity
+    stage: S6
+    title: Signal integrity per net class
+    kind: agent
+    scope: per_netclass
+    batch: 2
+    requires: [intake.project, pcb.parity]
+    after: [pcb.placement]
+    inputs: [pcb, pro]
+    prompt: |
+      For each net class below, review the routed nets: impedance targets and stackup,
+      differential pair gap and length match, reference plane continuity, stubs, crosstalk from
+      neighbours, and clock routing. Report a missing reference plane under a controlled
+      impedance net as P1.
+      {items}
+
+  # ---------------------------------------------------------------- S7 DFM/DFA
   - id: pcb.drc
     stage: S7
     title: DRC is clean
@@ -117,6 +276,45 @@ checks:
     requires: [intake.project]
     inputs: [pcb, pro]
 
+  - id: dfm.fab
+    stage: S7
+    title: Fabrication readiness
+    kind: agent
+    requires: [intake.project]
+    after: [pcb.drc]
+    inputs: [pcb, pro]
+    prompt: |
+      Review the board for fabrication at the fab named in the limits: outline closed and on
+      Edge.Cuts, copper-to-edge clearance, drill sizes and annular rings, solder mask slivers,
+      silkscreen on pads, panelisation needs, and anything the fab will reject or charge extra
+      for. Cite the fab limit for each finding.
+
+  - id: dfa.assembly
+    stage: S7
+    title: Assembly readiness
+    kind: agent
+    requires: [intake.project]
+    after: [pcb.drc]
+    inputs: [pcb, sch]
+    prompt: |
+      Review the board for automated assembly: parts on one side where possible, polarity
+      marks and pin-1 indicators visible, no components under others, courtyards not
+      overlapping, fiducials present, hand-solder parts identified, and part orientation
+      consistent with the fab's rotation convention.
+
+  - id: pcb.silkscreen
+    stage: S7
+    title: Silkscreen legibility
+    kind: agent
+    gate: advisory
+    requires: [intake.project]
+    after: [pcb.drc]
+    inputs: [pcb]
+    prompt: |
+      Review silkscreen: designator text size and stroke against the fab minimum, text under
+      parts or over pads, connector pin labels, board name and revision, and polarity marks.
+
+  # ----------------------------------------------------------------- S8 Release
   - id: release.outputs
     stage: S8
     title: Gerbers and drill files generate
@@ -132,3 +330,16 @@ checks:
     builtin: repo
     requires: [intake.project]
     inputs: [all]
+
+  - id: release.cpl
+    stage: S8
+    title: BOM and CPL are assembler-ready
+    kind: agent
+    requires: [intake.project]
+    after: [release.outputs]
+    inputs: [sch, pcb]
+    prompt: |
+      Check the exported BOM and placement (CPL) data the assembler needs: column headers the
+      fab expects, designator parity between BOM, CPL and the PCB, DNP handling, and part
+      rotation offsets against the JLCPCB rotation convention for each footprint family.
+      Export to the scratch folder with kicad-cli if you need to inspect the files.

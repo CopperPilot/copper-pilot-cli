@@ -1,10 +1,11 @@
-"""Stage-gated execution: waves, gating, status, cache."""
+"""Stage-gated execution: waves, gating, fan-out, grounding, status, cache."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
+from copper_pilot_cli.copper_protocol import CopperEffort
 from copper_pilot_cli.copper_workspace import discover_workspace
 from copper_pilot_cli.validate.builtins import BUILTINS, CheckOutcome
 from copper_pilot_cli.validate.config import (
@@ -29,9 +32,30 @@ from copper_pilot_cli.validate.config import (
     ValidateConfig,
     hard_prerequisites,
 )
-from copper_pilot_cli.validate.design import DesignContext, design_hash, input_hashes
+from copper_pilot_cli.validate.design import (
+    DesignContext,
+    create_snapshot,
+    design_hash,
+    input_hashes,
+    remove_snapshot,
+    snapshot_changes,
+    snapshot_hashes,
+)
 from copper_pilot_cli.validate.kicad import KicadCli, find_kicad_cli
 from copper_pilot_cli.validate.report import build_report, next_actions, verdict_for, write_outputs
+from copper_pilot_cli.validate.reviewer import (
+    HostedTurnRunner,
+    ReviewTurn,
+    SliceResult,
+    TurnFn,
+    batches,
+    build_prompt,
+    consensus,
+    fan_out_items,
+    ground_findings,
+    make_broker,
+    review_slice,
+)
 
 EXIT_PASS = 0
 EXIT_FAIL = 1
@@ -56,7 +80,10 @@ class RunOptions:
     until: str | None = None
     only: list[str] = field(default_factory=list)
     skip: list[str] = field(default_factory=list)
+    effort: str | None = None
+    concurrency: int = 3
     no_cache: bool = False
+    repeat: int | None = None
     out_dir: Path | None = None
     on_event: EventFn | None = None
     on_progress: ProgressFn | None = None
@@ -132,18 +159,28 @@ class Runner:
         config: ValidateConfig,
         options: RunOptions,
         *,
+        turn: TurnFn | None = None,
         kicad_finder: Callable[[], KicadCli | None] = find_kicad_cli,
+        credential_loader: Callable[[], DeviceCredential | None] = load_credential,
+        snapshot_root: Path | None = None,
     ) -> None:
         self.workspace = workspace
         self.config = config
         self.options = options
+        self.turn = turn
         self.kicad_finder = kicad_finder
+        self.credential_loader = credential_loader
+        self.snapshot_root = snapshot_root
         self.profile_name, self.profile = config.profile(options.profile)
         self.results: dict[str, CheckResult] = {}
         self.out_dir = options.out_dir or workspace / ".copperpilot" / "validate"
         self.cache_dir = self.out_dir / "cache"
         self.run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
         self.run_dir = self.out_dir / "runs" / self.run_id
+        self.snapshot: Path | None = None
+        self._snapshot_tmp: tempfile.TemporaryDirectory[str] | None = None
+        self.semaphore = asyncio.Semaphore(max(1, options.concurrency))
+        self.usage_limit: dict[str, Any] | None = None
         self.halt: str | None = None
         self.interrupted = False
         self.design: DesignContext | None = None
@@ -219,6 +256,9 @@ class Runner:
             run_dir=self.run_dir,
             kicad=self.kicad_finder(),
         )
+        needs_agent = any(check.kind == "agent" for check in selected)
+        if needs_agent:
+            self._prepare_hosted()
         try:
             await self._run_stages(selected)
         except asyncio.CancelledError:
@@ -228,7 +268,35 @@ class Runner:
                     self._record_skip(check, ["interrupted"])
             outcome = self._finish()
             raise _Interrupted(outcome) from None
+        finally:
+            self._cleanup_snapshot()
         return self._finish()
+
+    def _prepare_hosted(self) -> None:
+        try:
+            credential = self.credential_loader()
+        except AuthenticationError:
+            credential = None
+        if self.turn is None:
+            if credential is None:
+                raise EnvironmentError_(f"Not logged in. {LOGIN_HINT}.")
+            self.turn = HostedTurnRunner(credential)
+        parent = self.snapshot_root
+        if parent is not None:
+            parent.mkdir(parents=True, exist_ok=True)
+        self._snapshot_tmp = tempfile.TemporaryDirectory(
+            prefix="copper-pilot-validate-", dir=str(parent) if parent else None
+        )
+        self.snapshot = create_snapshot(self.workspace, Path(self._snapshot_tmp.name) / "design")
+        self._progress(f"snapshot: {self.snapshot}")
+
+    def _cleanup_snapshot(self) -> None:
+        if self.snapshot is not None:
+            remove_snapshot(self.snapshot)
+            self.snapshot = None
+        if self._snapshot_tmp is not None:
+            self._snapshot_tmp.cleanup()
+            self._snapshot_tmp = None
 
     async def _run_stages(self, selected: list[CheckSpec]) -> None:
         by_stage: dict[str, list[CheckSpec]] = {}
@@ -278,10 +346,16 @@ class Runner:
                 continue
             if check.kind == "builtin":
                 await self._run_check(check)
+            elif self.usage_limit is not None:
+                self._record_skip(check, [self._usage_label()])
             else:
                 agents.append(check)
         if agents:
             await asyncio.gather(*(self._run_check(check) for check in agents))
+
+    def _usage_label(self) -> str:
+        reason = (self.usage_limit or {}).get("block_reason") or "blocked"
+        return f"usage limit: {reason}"
 
     def _failed_prerequisites(self, check: CheckSpec) -> list[str]:
         """Prerequisites that failed outright; a gate label is used otherwise."""
@@ -326,6 +400,8 @@ class Runner:
             "limits": self.config.limits,
             "profile": {self.profile_name: self.profile.model_dump(mode="json")},
             "inputs": input_hashes(self.workspace, list(check.inputs)),
+            "repeat": self.options.repeat,
+            "effort": self.options.effort,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -370,14 +446,7 @@ class Runner:
         if check.kind == "builtin":
             result = self._run_builtin(check)
         else:
-            result = CheckResult(
-                check_id=check.id,
-                stage=check.stage,
-                title=check.title or check.id,
-                status=Status.ERROR,
-                gate=check.gate,
-                error="agent reviewers are not available in this build",
-            )
+            result = await self._run_agent(check)
         result.seconds = round(time.monotonic() - started, 3)
         result.cache_key = key
         if self._cacheable(check):
@@ -423,6 +492,125 @@ class Runner:
             finding.id = f"{check.id}/{position:03d}"
         return findings
 
+    async def _run_agent(self, check: CheckSpec) -> CheckResult:
+        assert self.design is not None and self.snapshot is not None and self.turn is not None
+        design = self.design
+        index = design.index
+        items = fan_out_items(check, index)
+        if check.scope != "project" and not items:
+            return CheckResult(
+                check_id=check.id,
+                stage=check.stage,
+                title=check.title or check.id,
+                status=Status.PASS,
+                gate=check.gate,
+                summary="nothing to review for this scope",
+            )
+        slices = batches(items, check.batch) if items else [None]
+        repeat = max(1, self.options.repeat or check.repeat)
+        effort = CopperEffort(self.options.effort or check.effort or self.config.reviewer.effort)
+        before = snapshot_hashes(self.snapshot)
+        artifacts = design.artifacts_dir(check.id)
+        tasks = []
+        for slice_index, slice_items in enumerate(slices):
+            prompt = build_prompt(
+                self.config,
+                check,
+                design,
+                self.snapshot,
+                items=slice_items,
+            )
+            for run_index in range(repeat):
+                thread_id = f"validate-{self.run_id}-{check.id}-{slice_index}-{run_index}"
+                tasks.append(
+                    self._review(
+                        check, prompt, thread_id, effort, slice_index, run_index, artifacts
+                    )
+                )
+        slice_results: list[SliceResult] = await asyncio.gather(*tasks)
+        after = snapshot_hashes(self.snapshot)
+        changed = snapshot_changes(before, after)
+        threads = [item.thread_id for item in slice_results]
+        errors = [item.error for item in slice_results if item.error]
+        for item in slice_results:
+            if item.usage_limit is not None and self.usage_limit is None:
+                retryable = item.usage_limit.get("retryable")
+                if retryable is not True:
+                    self.usage_limit = item.usage_limit
+        findings: list[Finding] = []
+        summaries: list[str] = []
+        for slice_index in range(len(slices)):
+            runs = [
+                item.findings
+                for item in slice_results[slice_index * repeat : (slice_index + 1) * repeat]
+                if item.error is None
+            ]
+            if runs:
+                findings.extend(consensus(runs))
+            summary = next(
+                (
+                    item.summary
+                    for item in slice_results[slice_index * repeat : (slice_index + 1) * repeat]
+                    if item.summary
+                ),
+                "",
+            )
+            if summary:
+                summaries.append(summary)
+        error: str | None = None
+        if changed:
+            error = f"reviewer modified the snapshot: {', '.join(changed[:10])}"
+        elif errors:
+            error = errors[0] if len(errors) == 1 else f"{len(errors)} slices failed: {errors[0]}"
+        ground_findings(findings, index)
+        findings = self._number(check, findings)
+        return CheckResult(
+            check_id=check.id,
+            stage=check.stage,
+            title=check.title or check.id,
+            status=compute_status(check, findings, self.profile, error=error),
+            gate=check.gate,
+            findings=findings,
+            summary=" ".join(summaries)[:2000],
+            threads=threads,
+            error=error,
+        )
+
+    async def _review(
+        self,
+        check: CheckSpec,
+        prompt: str,
+        thread_id: str,
+        effort: CopperEffort,
+        slice_index: int,
+        run_index: int,
+        artifacts: Path,
+    ) -> SliceResult:
+        assert self.snapshot is not None and self.turn is not None
+        turn = ReviewTurn(
+            snapshot=self.snapshot,
+            prompt=prompt,
+            thread_id=thread_id,
+            effort=effort,
+            broker=make_broker(self.snapshot),
+            check_id=check.id,
+            on_event=lambda event: self._emit(
+                str(event.get("type") or "copper.retry"),
+                {"check_id": check.id, **(event.get("data") or {}), "title": event.get("title")},
+            ),
+        )
+        async with self.semaphore:
+            if self.usage_limit is not None:
+                return SliceResult(thread_id=thread_id, error=self._usage_label())
+            result = await review_slice(self.turn, turn)
+        suffix = f"{slice_index}-{run_index}"
+        for number, (sent, reply) in enumerate(
+            zip(result.prompts, result.replies, strict=False), start=1
+        ):
+            (artifacts / f"prompt-{suffix}-{number}.md").write_text(sent, encoding="utf-8")
+            (artifacts / f"reply-{suffix}-{number}.md").write_text(reply, encoding="utf-8")
+        return result
+
     # -------------------------------------------------------------- finish
 
     def _ordered_results(self) -> list[CheckResult]:
@@ -437,6 +625,8 @@ class Runner:
         )
 
     def exit_code(self, results: list[CheckResult]) -> int:
+        if self.usage_limit is not None:
+            return EXIT_ENVIRONMENT
         if any(
             result.gate == "blocking" and result.status in {Status.FAIL, Status.ERROR}
             for result in results
@@ -467,6 +657,8 @@ class Runner:
             interrupted=self.interrupted,
             exit_code=code,
         )
+        if self.usage_limit is not None:
+            report["usage_limit"] = self.usage_limit
         actions = next_actions(results, self.config)
         paths = write_outputs(self.run_dir, report, actions)
         self._emit(

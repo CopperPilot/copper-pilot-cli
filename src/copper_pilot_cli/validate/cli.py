@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from copper_pilot_cli.copper_protocol import CopperEffort
 from copper_pilot_cli.copper_workspace import canonical_workspace
 from copper_pilot_cli.validate.config import ConfigError, GateMode, ValidateConfig, load_config
 from copper_pilot_cli.validate.runner import (
@@ -22,7 +23,7 @@ from copper_pilot_cli.validate.runner import (
 
 SUBCOMMANDS = ("list", "graph")
 DESCRIPTION = (
-    "Run a stage-gated graph of read-only checks over a KiCad workspace. "
+    "Run a stage-gated graph of read-only reviewers over a KiCad workspace. "
     "Exit codes: 0 pass, 1 fail, 2 usage/config error, 3 incomplete, 4 environment."
 )
 
@@ -61,7 +62,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip", type=_csv, action="extend", default=[], metavar="ID[,ID...]", help="Skip checks"
     )
+    parser.add_argument(
+        "--effort",
+        choices=[item.value for item in CopperEffort],
+        help="Effort for agent checks (a per-check value wins)",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=3, help="Concurrent hosted turns (default: 3)"
+    )
     parser.add_argument("--no-cache", action="store_true", help="Ignore cached results")
+    parser.add_argument(
+        "--repeat", type=int, help="Consensus runs for agent checks (overrides the graph)"
+    )
     parser.add_argument(
         "--out", type=Path, metavar="DIR", help="Output directory (default: .copperpilot/validate)"
     )
@@ -148,7 +160,10 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
         until=args.until,
         only=list(args.only),
         skip=list(args.skip),
+        effort=args.effort,
+        concurrency=args.concurrency,
         no_cache=args.no_cache,
+        repeat=args.repeat,
         out_dir=args.out,
     )
 
