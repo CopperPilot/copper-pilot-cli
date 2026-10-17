@@ -1,0 +1,134 @@
+# Default `copper-pilot validate` graph. Projects extend it from
+# .copperpilot/validate.yaml with `extends: default`.
+version: 1
+
+stages:
+  - {id: S0, title: Intake, question: "Can the design be read, and is its intent known?"}
+  - {id: S1, title: Architecture, question: "Is the system design sound before any detail is reviewed?"}
+  - {id: S2, title: Parts, question: "Do the parts exist, match the schematic, and have correct footprints?"}
+  - {id: S3, title: Schematic, question: "Is every circuit correct, rated, and drawn to convention?"}
+  - {id: S4, title: Netlist to layout, question: "Does the PCB implement the schematic under rules the fab can build?"}
+  - {id: S5, title: Placement, question: "Are parts placed where the circuits and the mechanicals need them?"}
+  - {id: S6, title: Routing SI/PI, question: "Will power and signals behave once routed?"}
+  - {id: S7, title: DFM/DFA, question: "Will the fab build it and the assembler populate it?"}
+  - {id: S8, title: Release, question: "Are the outputs and the repository ready to hand over?"}
+
+policy:
+  default_profile: dev
+  profiles:
+    dev: {fail_on: [P0, P1], min_confidence_to_fail: medium}
+    release: {fail_on: [P0, P1, P2], min_confidence_to_fail: low}
+  error_blocks_dependents: true
+
+limits:
+  fab: jlcpcb
+  jlcpcb:
+    min_clearance_mm: 0.127
+    min_track_mm: 0.127
+    min_via_diameter_mm: 0.45
+    min_drill_mm: 0.30
+    min_copper_edge_mm: 0.30
+    min_silk_text_height_mm: 1.0
+
+reviewer:
+  effort: balanced
+  timeout_s: 1800
+  preamble: |
+    You are one read-only reviewer on a panel that validates a KiCad design before it is
+    sent to fabrication. Other reviewers cover the other concerns; stay inside your single
+    responsibility and do not repeat ERC/DRC output that a deterministic check already reports.
+    Apply the CopperPilot review skills that match your responsibility: schematic conventions,
+    schematic engineer, schematic reviewer, PCB layout, PCB DFM engineer, PCB engineering
+    judgment, and PCB design reviewer.
+    Rules:
+    - Never modify the design. The workspace is a read-only snapshot; only the scratch
+      folder named in the design paths block is writable, use it for renders or exports.
+    - Cite evidence for every finding: a datasheet section, a file and line, a report line,
+      or a calculation with its numbers. A finding without evidence is an opinion; mark it
+      low confidence.
+    - Name real reference designators, net names, sheets and layers exactly as they appear in
+      the design. Findings that name things that do not exist are discarded.
+    - If you cannot answer because information is missing, state the assumption you made
+      instead of asking a question; nobody can answer during this run.
+    - Severity: P0 = will not work, unsafe, or the fab will reject it; P1 = reliability, yield
+      or assembly risk; P2 = an expert reviewer would flag it; P3 = polish.
+
+checks:
+  - id: intake.tools
+    stage: S0
+    title: kicad-cli is available
+    kind: builtin
+    builtin: tools
+    inputs: [pro]
+
+  - id: intake.project
+    stage: S0
+    title: Project, schematic, PCB and netlist can be read
+    kind: builtin
+    builtin: project
+    requires: [intake.tools]
+    inputs: [all]
+
+  - id: intake.intent
+    stage: S0
+    title: Design intent is recorded
+    kind: builtin
+    builtin: intent
+    gate: advisory
+    inputs: [intent]
+
+  - id: parts.bom_fields
+    stage: S2
+    title: BOM fields are complete
+    kind: builtin
+    builtin: bom_fields
+    requires: [intake.project]
+    inputs: [sch]
+
+  - id: sch.erc
+    stage: S3
+    title: ERC is clean
+    kind: builtin
+    builtin: erc
+    requires: [intake.project]
+    inputs: [sch, libs]
+
+  - id: pcb.parity
+    stage: S4
+    title: PCB matches the schematic and has no unconnected items
+    kind: builtin
+    builtin: parity
+    requires: [intake.project]
+    inputs: [sch, pcb]
+
+  - id: pcb.rules
+    stage: S4
+    title: Board rules and net classes meet the fab limits
+    kind: builtin
+    builtin: rules
+    requires: [intake.project]
+    inputs: [pro, pcb]
+
+  - id: pcb.drc
+    stage: S7
+    title: DRC is clean
+    kind: builtin
+    builtin: drc
+    requires: [intake.project]
+    inputs: [pcb, pro]
+
+  - id: release.outputs
+    stage: S8
+    title: Gerbers and drill files generate
+    kind: builtin
+    builtin: outputs
+    requires: [intake.project]
+    inputs: [pcb, pro]
+
+  - id: release.repo
+    stage: S8
+    title: Repository is portable
+    kind: builtin
+    builtin: repo
+    requires: [intake.project]
+    inputs: [all]

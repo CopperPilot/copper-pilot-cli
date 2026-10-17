@@ -262,3 +262,62 @@ def test_cli_main_acp_auth_login_failure_exits_nonzero(monkeypatch) -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli_main()
     assert excinfo.value.code == 2
+
+
+def test_validate_subcommand_parses_run_flags() -> None:
+    args = command_parser("validate").parse_args(["board", "--gate", "full", "--until", "S3"])
+    assert args.command == "validate"
+    assert args.action == "run"
+    assert args.workspace == "board"
+    assert args.gate == "full"
+    assert args.until == "S3"
+
+
+def test_validate_help_describes_exit_codes() -> None:
+    help_text = command_parser("validate").format_help()
+    assert "read-only" in help_text
+    assert "3 incomplete" in help_text
+    assert "validate list|graph" in help_text
+    assert "copper-pilot validate" in parser().format_help()
+
+
+def test_cli_main_validate_dispatches_and_exits_with_run_code(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run_command(args, **_kwargs):
+        seen["action"] = args.action
+        seen["workspace"] = args.workspace
+        return 3
+
+    monkeypatch.setattr("copper_pilot_cli.validate.cli.run_command", fake_run_command)
+    monkeypatch.setattr(sys, "argv", ["copper-pilot", "validate", "board", "--until", "S2"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main()
+    assert excinfo.value.code == 3
+    assert seen == {"action": "run", "workspace": "board"}
+
+
+def test_cli_main_validate_list_subcommand(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run_command(args, **_kwargs):
+        seen["action"] = args.action
+        return 0
+
+    monkeypatch.setattr("copper_pilot_cli.validate.cli.run_command", fake_run_command)
+    monkeypatch.setattr(sys, "argv", ["copper-pilot", "validate", "list"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main()
+    assert excinfo.value.code == 0
+    assert seen == {"action": "list"}
+
+
+def test_cli_main_validate_keyboard_interrupt_exits_130(monkeypatch) -> None:
+    def fake_run_command(_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("copper_pilot_cli.validate.cli.run_command", fake_run_command)
+    monkeypatch.setattr(sys, "argv", ["copper-pilot", "validate"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main()
+    assert excinfo.value.code == 130
