@@ -557,6 +557,7 @@ async def test_finished_and_running_background_processes_resume_together(
     assert manager.processes() == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="process-group signals are POSIX-only")
 @pytest.mark.asyncio
 async def test_background_process_killed_before_the_final_frame_does_not_resume(
     monkeypatch, tmp_path
