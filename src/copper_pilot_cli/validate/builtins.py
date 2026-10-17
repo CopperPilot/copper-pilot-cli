@@ -592,7 +592,10 @@ def check_repo(design: DesignContext, check: CheckSpec, limits: dict[str, Any]) 
     findings: list[Finding] = []
     absolute: dict[str, list[str]] = {}
     external_libs: list[str] = []
-    for path in iter_design_files(design.workspace):
+    # Scope to the KiCad project folder so generated boards elsewhere in the
+    # repository (build pipelines, renders) do not count against it.
+    scope = design.project_path.parent if design.project_path is not None else design.workspace
+    for path in iter_design_files(scope):
         if path.suffix.lower() not in {
             ".kicad_pro",
             ".kicad_sch",

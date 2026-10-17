@@ -570,6 +570,13 @@ def test_extract_last_json_block_and_parse() -> None:
         parse_reply("```json\n{oops}\n```")
     with pytest.raises(ValueError, match="findings list"):
         parse_reply('```json\n{"summary": 1}\n```')
+    # Markdown-escaped characters inside strings are tolerated.
+    lenient = (
+        '```json\n{"findings": [{"title": "C = 22 uF \\* 0.8", "detail": "a\\_b"}],'
+        ' "summary": "ok"}\n```'
+    )
+    findings, _ = parse_reply(lenient)
+    assert findings[0].title == "C = 22 uF * 0.8" and findings[0].detail == "a_b"
 
 
 def test_fan_out_collapses_identical_parts_and_skips_dnp() -> None:
@@ -1241,6 +1248,21 @@ async def test_bom_fields_and_repo_paths(tmp_path) -> None:
     assert repo[0].severity is Severity.P1 and "Absolute user paths" in repo[0].title
     assert any("library table entries outside" in item.title for item in repo)
     assert results["release.repo"].status is Status.FAIL
+
+
+@pytest.mark.asyncio
+async def test_repo_check_scopes_to_the_project_folder(tmp_path) -> None:
+    make_project(tmp_path)
+    generated = tmp_path / "video" / "tmp_pcbs"
+    generated.mkdir(parents=True)
+    (generated / "frame.kicad_pcb").write_text('(kicad_pcb (path "/home/x/y"))', encoding="utf-8")
+    build = tmp_path / "build" / "out.kicad_pcb"
+    build.parent.mkdir()
+    build.write_text('(kicad_pcb (path "/home/x/y"))', encoding="utf-8")
+    outcome = await runner_for(tmp_path, options=RunOptions(only=["release.repo"])).run()
+    assert by_id(outcome.results)["release.repo"].status is Status.PASS
+    assert "build/out.kicad_pcb" not in input_hashes(tmp_path, ["all"])
+    assert "video/tmp_pcbs/frame.kicad_pcb" in input_hashes(tmp_path, ["all"])
 
 
 @pytest.mark.asyncio

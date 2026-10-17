@@ -14,22 +14,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from copper_pilot_cli.copper_workspace import WorkspaceContext
+from copper_pilot_cli.copper_workspace import IGNORED_NAMES, WorkspaceContext
 
 SCRATCH_DIR = ".validate-scratch"
 INTENT_FILES = (
     Path(".copperpilot") / "README.md",
     Path(".copperpilot") / "PLANS.md",
 )
-_SNAPSHOT_EXCLUDED_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
+_SNAPSHOT_EXCLUDED_DIRS = IGNORED_NAMES | {
     ".copperpilot",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "node_modules",
     ".ruff_cache",
     ".pytest_cache",
     SCRATCH_DIR,

@@ -57,6 +57,7 @@ assembly risk; P2 = an expert reviewer would flag it; P3 = polish."""
 
 _FENCE_RE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _USAGE_CODES = {"http_402"}
+_INVALID_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrtu])')
 
 
 # ------------------------------------------------------------------ broker
@@ -338,7 +339,12 @@ def parse_reply(text: str) -> tuple[list[Finding], str]:
     try:
         payload = json.loads(block)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON: {exc.msg}") from exc
+        # Models often markdown-escape characters inside strings ("\*", "\_");
+        # drop escapes JSON does not define before asking for a repair turn.
+        try:
+            payload = json.loads(_INVALID_ESCAPE_RE.sub("", block))
+        except json.JSONDecodeError:
+            raise ValueError(f"invalid JSON: {exc.msg}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
         raise ValueError("expected an object with a findings list")
     findings: list[Finding] = []
