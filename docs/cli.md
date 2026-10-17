@@ -61,7 +61,7 @@ copper-pilot validate explain CHECK_ID [workspace]
 ```
 
 Runs a stage-gated graph of read-only reviewers: `kicad-cli` checks (ERC,
-DRC, parity, rules, Gerbers) and hosted Ask-mode reviewers scoped to one
+DRC, parity, rules, Gerbers) and hosted Agent-mode reviewers scoped to one
 concern each, in the order a hardware engineer reviews (intake, architecture,
 parts, schematic, netlist-to-layout, placement, routing, DFM/DFA, release).
 It never modifies design files. Outputs land in `.copperpilot/validate/latest/`:

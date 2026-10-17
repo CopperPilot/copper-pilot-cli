@@ -63,6 +63,30 @@ _INVALID_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrtu])')
 # ------------------------------------------------------------------ broker
 
 
+def _path_in_snapshot(root: Path, raw: str) -> Path:
+    """Map a tool path onto the snapshot.
+
+    Hosted tools address the snapshot with POSIX virtual paths (`/board/x`,
+    `/.validate-scratch/render.png`). On Windows a leading slash is a root
+    without a drive, and joining it replaces the snapshot directory, so those
+    paths are taken from the virtual root instead of `Path`.
+    """
+    root = root.resolve(strict=False)
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            pass
+        else:
+            return resolved
+    virtual = raw.replace("\\", "/")
+    if virtual.startswith("/"):
+        return (root / virtual.lstrip("/")).resolve(strict=False)
+    return (root / candidate).resolve(strict=False)
+
+
 def review_policy(snapshot: Path) -> Callable[[ApprovalRequest], Awaitable[bool]]:
     """Approve reads, scratch writes, and non-dangerous shell; reject the rest."""
     root = snapshot.resolve()
@@ -71,17 +95,8 @@ def review_policy(snapshot: Path) -> Callable[[ApprovalRequest], Awaitable[bool]
     def _within_scratch(raw: object) -> bool:
         if not isinstance(raw, str) or not raw:
             return False
-        candidate = Path(raw)
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        else:
-            try:
-                candidate.resolve(strict=False).relative_to(root)
-            except ValueError:
-                # Hosted tools use virtual paths rooted at the snapshot ("/board/x").
-                candidate = root / candidate.relative_to(candidate.anchor)
         try:
-            candidate.resolve(strict=False).relative_to(scratch)
+            _path_in_snapshot(root, raw).relative_to(scratch)
         except ValueError:
             return False
         return True
@@ -139,7 +154,7 @@ TurnFn = Callable[[ReviewTurn], Awaitable[TurnResult]]
 
 
 class HostedTurnRunner:
-    """Default TurnFn: one checkpointed hosted Ask turn through the durability graph."""
+    """Default TurnFn: one checkpointed hosted Agent turn through the durability graph."""
 
     def __init__(
         self,
@@ -157,7 +172,7 @@ class HostedTurnRunner:
             turn.snapshot,
             credential=self.credential,
             conversation_id=turn.thread_id,
-            mode=CopperMode.ASK,
+            mode=CopperMode.AGENT,
             effort=turn.effort,
             tool_broker=turn.broker,
         )
@@ -168,7 +183,7 @@ class HostedTurnRunner:
             config = runtime.config(turn.thread_id, turn.snapshot)
             values = {
                 "messages": [HumanMessage(content=turn.prompt)],
-                "copper_mode": CopperMode.ASK.value,
+                "copper_mode": CopperMode.AGENT.value,
                 "copper_effort": turn.effort.value,
             }
             try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import xml.etree.ElementTree as ET  # noqa: S405 - our own JUnit output
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from copper_pilot_cli.copper_auth import DeviceCredential
 from copper_pilot_cli.copper_protocol import CopperEvent, CopperMode, EventKind, ToolRequest
 from copper_pilot_cli.copper_tools import ApprovalRequest, ToolRejected
 from copper_pilot_cli.validate import avalidate
+from copper_pilot_cli.validate.builtins import _library_uri_outside_project
 from copper_pilot_cli.validate.cli import parse_args, render_graph, render_list, run_command
 from copper_pilot_cli.validate.config import (
     CheckResult,
@@ -1250,6 +1252,15 @@ async def test_bom_fields_and_repo_paths(tmp_path) -> None:
     assert results["release.repo"].status is Status.FAIL
 
 
+def test_library_uris_outside_the_project_are_platform_independent() -> None:
+    assert _library_uri_outside_project("/home/someone/libs/x.pretty")
+    assert _library_uri_outside_project("C:/Users/someone/libs/x.pretty")
+    assert _library_uri_outside_project(r"C:\Users\someone\libs\x.pretty")
+    assert _library_uri_outside_project("~/libs/x.pretty")
+    assert not _library_uri_outside_project("${KIPRJMOD}/libs/x.pretty")
+    assert not _library_uri_outside_project("libs/x.pretty")
+
+
 @pytest.mark.asyncio
 async def test_repo_check_scopes_to_the_project_folder(tmp_path) -> None:
     make_project(tmp_path)
@@ -1319,7 +1330,9 @@ class FakeClient:
 
 
 @pytest.mark.asyncio
-async def test_hosted_turn_runner_uses_ask_mode_and_read_only_broker(tmp_path, monkeypatch) -> None:
+async def test_hosted_turn_runner_uses_agent_mode_and_read_only_broker(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
     make_project(tmp_path)
@@ -1340,7 +1353,7 @@ async def test_hosted_turn_runner_uses_ask_mode_and_read_only_broker(tmp_path, m
     assert result.findings[0].title == "Rail"
     assert result.summary == "done"
     request = client.requests[0]
-    assert request.mode is CopperMode.ASK
+    assert request.mode is CopperMode.AGENT
     assert request.workspace_path != str(tmp_path)  # the snapshot, not the workspace
     assert "Ratings, derating" in request.query
     assert result.threads[0].startswith("validate-")
@@ -1518,6 +1531,10 @@ async def test_reviewer_timeout_is_an_error(tmp_path) -> None:
     assert "timed out after 1 s" in (result.error or "")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.kill(SIGTERM) terminates the process on Windows instead of running the handler",
+)
 def test_sigterm_writes_partial_report_like_ctrl_c(tmp_path, capsys) -> None:
     import os
     import signal

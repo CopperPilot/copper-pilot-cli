@@ -76,7 +76,7 @@ copper-pilot validate ./my-board
 
 Runs a stage-gated graph of read-only reviewers over the KiCad workspace:
 `kicad-cli` checks (ERC, DRC, schematic parity, board rules, Gerbers) plus
-hosted Ask-mode reviewers, each scoped to one concern, in the order a hardware
+hosted Agent-mode reviewers, each scoped to one concern, in the order a hardware
 engineer reviews a board. It never edits design files. The verdict, a
 `REPORT.md`, and `next_actions.json` (only the earliest failing stage, worst
 first) land in `.copperpilot/validate/latest/`; `--emit-fix-prompt` prints a

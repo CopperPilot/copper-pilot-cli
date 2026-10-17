@@ -2,7 +2,7 @@
 
 `copper-pilot validate` runs a stage-gated graph of narrow, read-only reviewers
 over a KiCad workspace. Deterministic checks call `kicad-cli`; the others are
-hosted CopperPilot Ask turns, each scoped to one concern. It never modifies
+hosted CopperPilot Agent turns, each scoped to one concern. It never modifies
 schematic, PCB, library or project files: reviewers work on a read-only
 snapshot behind a broker that only permits writes under a scratch folder, and
 any change to the snapshot turns that check into an ERROR.
@@ -151,7 +151,7 @@ for that stage.
   temporary snapshot (excluding `.git`, `.copperpilot`, `*-backups`, lock
   files and caches) with every file read-only and one writable
   `.validate-scratch/` folder. Reviewers run as
-  `CopperPilotAgent(snapshot, mode=ask)` behind a Manual broker whose policy
+  `CopperPilotAgent(snapshot, mode=agent)` behind a Manual broker whose policy
   approves reads, approves writes and edits only under the scratch folder,
   approves shell only when `dangerous_shell_command()` is false, and rejects
   deletes and unknown tools. `ask_user_question` is rejected with a message

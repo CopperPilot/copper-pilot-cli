@@ -587,6 +587,22 @@ def check_outputs(design: DesignContext, check: CheckSpec, limits: dict[str, Any
     )
 
 
+def _library_uri_outside_project(uri: str) -> bool:
+    """True when a library-table URI is not project-local.
+
+    POSIX absolute URIs (`/home/...`) are not `Path.is_absolute()` on Windows,
+    and Windows drive URIs are not absolute on POSIX, so this checks the text.
+    """
+    if uri.startswith("${KIPRJMOD}"):
+        return False
+    if uri.startswith(("~", "../", "..\\")):
+        return True
+    normalized = uri.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        return True
+    return Path(uri).is_absolute()
+
+
 def check_repo(design: DesignContext, check: CheckSpec, limits: dict[str, Any]) -> CheckOutcome:
     del check, limits
     findings: list[Finding] = []
@@ -611,9 +627,7 @@ def check_repo(design: DesignContext, check: CheckSpec, limits: dict[str, Any]) 
             absolute.setdefault(relative, []).append(match.group(0))
         if path.name in {"fp-lib-table", "sym-lib-table"}:
             for uri in re.findall(r"\(uri\s+\"?([^\")]+)\"?\)", text):
-                if not uri.startswith("${KIPRJMOD}") and (
-                    Path(uri).is_absolute() or uri.startswith(("~", "../"))
-                ):
+                if _library_uri_outside_project(uri):
                     external_libs.append(f"{relative}: {uri}")
     if absolute:
         files = sorted(absolute)
