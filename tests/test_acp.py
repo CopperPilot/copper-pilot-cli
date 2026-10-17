@@ -46,6 +46,7 @@ from copper_pilot_cli.copper_acp import (
     effort_command,
     elicitation_questions,
     elicitation_schema,
+    first_text_block,
     is_plan_artifact,
     mode_state,
     plan_entries_from_todo_list,
@@ -880,6 +881,13 @@ def test_effort_command_parsing() -> None:
     assert effort_command(wrapped) == (True, "intelligence")
     assert user_request_text(wrapped) == "/effort intelligence"
     assert user_request_text("plain") == "plain"
+    blocks = [
+        TextContentBlock(type="text", text="  "),
+        TextContentBlock(type="text", text="/effort"),
+        TextContentBlock(type="text", text="<runtime_info>T3 Code</runtime_info>"),
+    ]
+    assert first_text_block(blocks) == "/effort"
+    assert first_text_block([]) == ""
 
 
 def test_available_commands_advertise_effort() -> None:
@@ -1165,6 +1173,19 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert agent.sessions[session_id].effort is CopperEffort.INTELLIGENCE
 
     await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Go")])
+    assert runtime.values["copper_effort"] == "intelligence"
+
+    # T3 Code appends runtime context as a second text block; the command still wins.
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id,
+        prompt=[
+            TextContentBlock(type="text", text="/effort balanced"),
+            TextContentBlock(type="text", text="<runtime_info>T3 Code</runtime_info>"),
+        ],
+    )
+    assert agent.sessions[session_id].effort is CopperEffort.BALANCED
+    assert kinds(conn) == ["config_option_update", "agent_message_chunk"]
     assert runtime.values["copper_effort"] == "intelligence"
 
 

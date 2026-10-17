@@ -260,6 +260,19 @@ def tool_locations(arguments: dict[str, Any]) -> list[ToolCallLocation] | None:
     return None
 
 
+def first_text_block(blocks: list[Any]) -> str:
+    """Return the first text block, which carries the user's own words.
+
+    Clients append context in later blocks (T3 Code adds ``<runtime_info>`` and
+    tool guidance), so only the first block can hold a slash command.
+    """
+    for block in blocks:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
 def prompt_text(blocks: list[Any]) -> str:
     """Join the text-bearing prompt blocks into one hosted query."""
     parts: list[str] = []
@@ -673,7 +686,7 @@ class CopperAcpAgent:
         if not message:
             raise RequestError.invalid_params({"details": "The prompt has no text content."})
         await self._announce_commands(session)
-        is_command, argument = effort_command(message)
+        is_command, argument = effort_command(first_text_block(prompt))
         if is_command:
             await self._apply_effort_command(session, argument)
             return PromptResponse(stop_reason="end_turn")
