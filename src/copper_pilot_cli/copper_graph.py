@@ -9,8 +9,9 @@ client's chat manager:
 * deterministic failures (invalid requests, plan refusals, auth) fail fast;
 * whatever the turn produced before a terminal failure is still checkpointed,
   so a later manual "continue" has the prior tool work in context;
-* shell commands that moved to the background are awaited after the final
-  frame and their results are fed back in a continuation turn.
+* shell commands that moved to the background are reported after the final
+  frame, including ones that already exited while the model was still
+  working, and their results are fed back in a continuation turn.
 """
 
 from __future__ import annotations
@@ -365,28 +366,37 @@ class _TurnRun:
     # ---------------------------------------------------------- background
 
     async def wait_for_background(self) -> bool:
-        """Await backgrounded shell commands and run continuation turns for them."""
+        """Report background shells and resume the hosted agent with their output.
+
+        Commands still running after the final frame are awaited. Commands that
+        already exited while the model was still working are delivered too: the
+        tool result promised that full output, and ending the turn without a
+        continuation drops it.
+        """
         manager = _background_manager(self.agent)
         if manager is None:
             return True
-        while manager.has_running():
+        while manager.processes():
             running = [item for item in manager.processes() if item["status"] == "running"]
-            self.emit(
-                {
-                    "type": "copper.status",
-                    "data": (
-                        f"Waiting for {len(running)} background process"
-                        f"{'es' if len(running) != 1 else ''} to finish…"
-                    ),
-                    "title": "background_processes_waiting",
-                }
-            )
-            try:
-                await manager.wait_all()
-            except asyncio.CancelledError:
-                await manager.kill_all()
-                raise
+            if running:
+                self.emit(
+                    {
+                        "type": "copper.status",
+                        "data": (
+                            f"Waiting for {len(running)} background process"
+                            f"{'es' if len(running) != 1 else ''} to finish…"
+                        ),
+                        "title": "background_processes_waiting",
+                    }
+                )
+                try:
+                    await manager.wait_all()
+                except asyncio.CancelledError:
+                    await manager.kill_all()
+                    raise
             finished = manager.drain()
+            if not finished:
+                return True
             if getattr(self.agent, "cancel_requested", False) or any(
                 item["status"] == "killed" for item in finished
             ):

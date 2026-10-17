@@ -2,9 +2,11 @@
 
 The desktop client runs a shell command in the foreground for a bounded
 window and then, instead of killing it, hands it to a background manager.
-The hosted turn continues, and once the final frame arrives the client waits
-for the background processes and reports their output in a continuation
-turn. This module provides the same primitives for the CLI.
+The hosted turn continues, and once the final frame arrives the client
+reports every background process in a continuation turn. Processes still
+running are awaited first. Processes that already exited while the model was
+still working are delivered too, so their output is not dropped. This module
+provides the same primitives for the CLI.
 """
 
 from __future__ import annotations
