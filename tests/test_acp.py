@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +20,7 @@ from acp.schema import (
     DeclineElicitationResponse,
     DeniedOutcome,
     EmbeddedResourceContentBlock,
+    ImageContentBlock,
     RequestPermissionResponse,
     TextContentBlock,
     TextResourceContents,
@@ -29,6 +32,7 @@ from websockets.http11 import Response
 
 from copper_pilot_cli import copper_acp
 from copper_pilot_cli.copper_acp import (
+    ATTACHMENT_DIR,
     EFFORT_COMMAND,
     EFFORT_CONFIG_ID,
     LOGIN_METHOD_ID,
@@ -47,19 +51,23 @@ from copper_pilot_cli.copper_acp import (
     elicitation_questions,
     elicitation_schema,
     first_text_block,
+    image_suffix,
     is_plan_artifact,
     mode_state,
     plan_entries_from_todo_list,
+    prompt_images,
     prompt_text,
     question_options,
     replay_updates,
     run_acp,
+    save_attachments,
     subagent_tool_update,
     tool_kind,
     tool_locations,
     tool_title,
     usage_update,
     user_request_text,
+    with_attachment_paths,
 )
 from copper_pilot_cli.copper_auth import DeviceCredential, save_credential
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ProtocolError
@@ -114,13 +122,22 @@ class FakeAgent:
     last: FakeAgent | None = None
 
     def __init__(
-        self, workspace, *, credential, conversation_id, mode=None, effort=None, tool_broker=None
+        self,
+        workspace,
+        *,
+        credential,
+        conversation_id,
+        mode=None,
+        effort=None,
+        runtime_context=None,
+        tool_broker=None,
     ):
         self.workspace = workspace
         self.credential = credential
         self.conversation_id = conversation_id
         self.mode = mode
         self.effort = effort
+        self.runtime_context = runtime_context
         self.tool_broker = tool_broker
         type(self).last = self
 
@@ -306,6 +323,62 @@ def test_prompt_text_joins_text_and_resources() -> None:
     assert prompt_text([]) == ""
 
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
+PNG_B64 = base64.b64encode(PNG_BYTES).decode()
+
+
+def image_block(data: str = PNG_B64, mime_type: str = "image/png") -> ImageContentBlock:
+    return ImageContentBlock(type="image", data=data, mime_type=mime_type)
+
+
+@pytest.mark.parametrize(
+    ("mime_type", "expected"),
+    [
+        ("image/png", "png"),
+        ("image/jpeg", "jpg"),
+        ("IMAGE/WEBP", "webp"),
+        ("image/svg+xml", "svg"),
+        ("image/png; charset=binary", "png"),
+        ("image/", "png"),
+        ("image/../../etc", "png"),
+        ("", "png"),
+        (None, "png"),
+    ],
+)
+def test_image_suffix(mime_type, expected) -> None:
+    assert image_suffix(mime_type) == expected
+
+
+def test_prompt_images_decodes_only_image_blocks() -> None:
+    blocks = [
+        TextContentBlock(type="text", text="Look"),
+        image_block(),
+        image_block(mime_type="image/jpeg"),
+    ]
+    assert prompt_images(blocks) == [(PNG_BYTES, "png"), (PNG_BYTES, "jpg")]
+    assert prompt_images([TextContentBlock(type="text", text="x")]) == []
+
+
+@pytest.mark.parametrize(("data", "details"), [("not base64!", "valid base64"), ("", "empty")])
+def test_prompt_images_rejects_bad_payloads(data, details) -> None:
+    with pytest.raises(RequestError) as exc:
+        prompt_images([image_block(data)])
+    assert exc.value.code == -32602
+    assert details in exc.value.data["details"]
+
+
+def test_save_attachments_writes_path_first_files(tmp_path) -> None:
+    assert save_attachments([], tmp_path) == []
+    assert not (tmp_path / ATTACHMENT_DIR).exists()
+    attachments = save_attachments([(PNG_BYTES, "png"), (b"jpg", "jpg")], tmp_path)
+    assert [item["type"] for item in attachments] == ["file", "file"]
+    assert [Path(item["path"]).suffix for item in attachments] == [".png", ".jpg"]
+    for item in attachments:
+        assert Path(item["path"]).parent.as_posix() == ATTACHMENT_DIR.as_posix()
+        assert (tmp_path / item["path"]).read_bytes() in {PNG_BYTES, b"jpg"}
+    assert attachments[0]["size"] == len(PNG_BYTES)
+
+
 def test_question_options_parsing() -> None:
     assert question_options("not a dict") is None
     assert question_options({"questions": [{"question": "a"}]}) is None
@@ -394,6 +467,7 @@ async def test_initialize_advertises_login_and_load_session() -> None:
     response = await agent.initialize(protocol_version=7)
     assert response.protocol_version == 1
     assert response.agent_capabilities.load_session is True
+    assert response.agent_capabilities.prompt_capabilities.image is True
     assert response.auth_methods[0].id == LOGIN_METHOD_ID
     assert response.auth_methods[0].args == ["auth", "login"]
     assert response.agent_info.name == "copper-pilot"
@@ -538,6 +612,63 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
     assert updates[8].title == "Survey: Audit" and updates[8].kind == "think"
     assert updates[8].status == "failed" and updates[8].tool_call_id == "subagent:w1"
     assert FakeAgent.last.tool_broker is agent.sessions[session_id].broker
+    assert FakeAgent.last.runtime_context is None
+
+
+async def test_prompt_passes_images_as_workspace_attachments(tmp_path, monkeypatch) -> None:
+    agent, _conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    response = await agent.prompt(
+        session_id=session_id,
+        prompt=[TextContentBlock(type="text", text="Check placement"), image_block()],
+    )
+    assert response.stop_reason == "end_turn"
+    (attachment,) = FakeAgent.last.runtime_context["attachments"]
+    assert attachment["type"] == "file" and attachment["path"].endswith(".png")
+    assert (tmp_path / attachment["path"]).read_bytes() == PNG_BYTES
+    assert runtime.values["messages"] == [
+        HumanMessage(
+            content="Check placement\n\nAttached images, saved in the workspace:\n"
+            f"- {attachment['path']}"
+        )
+    ]
+
+
+async def test_image_only_prompt_asks_for_analysis(tmp_path, monkeypatch) -> None:
+    agent, _conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    await agent.prompt(session_id=session_id, prompt=[image_block(mime_type="image/jpeg")])
+    (attachment,) = FakeAgent.last.runtime_context["attachments"]
+    assert attachment["path"].endswith(".jpg")
+    query = runtime.values["messages"][0].content
+    assert query.startswith(copper_acp.IMAGE_ONLY_QUERY)
+    assert query.endswith(f"- {attachment['path']}")
+
+
+def test_with_attachment_paths_lists_each_file() -> None:
+    assert with_attachment_paths("Hi", []) == "Hi"
+    assert with_attachment_paths("Hi", [{"path": "a.png"}, {"path": "b.jpg"}]) == (
+        "Hi\n\nAttached images, saved in the workspace:\n- a.png\n- b.jpg"
+    )
+
+
+async def test_effort_command_with_image_writes_no_attachment(tmp_path, monkeypatch) -> None:
+    agent, _conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    await agent.prompt(
+        session_id=session_id,
+        prompt=[TextContentBlock(type="text", text="/effort intelligence"), image_block()],
+    )
+    assert runtime.values is None
+    assert not (tmp_path / ATTACHMENT_DIR).exists()
+
+
+async def test_prompt_rejects_invalid_image_before_running(tmp_path, monkeypatch) -> None:
+    agent, _conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(
+            session_id=session_id,
+            prompt=[TextContentBlock(type="text", text="x"), image_block("%%%")],
+        )
+    assert exc.value.code == -32602
+    assert runtime.values is None
 
 
 async def test_prompt_rejects_empty_busy_and_logged_out(tmp_path, monkeypatch) -> None:

@@ -8,6 +8,8 @@ is the checkpoint thread id, and the session ``cwd`` is the workspace.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import re
 import uuid
@@ -46,6 +48,7 @@ from acp.schema import (
     PermissionOption,
     PlanEntry,
     PlanEntryStatus,
+    PromptCapabilities,
     PromptResponse,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
@@ -65,7 +68,11 @@ from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
-from copper_pilot_cli.copper_features import parse_plan
+from copper_pilot_cli.copper_features import (
+    encode_runtime_context,
+    parse_plan,
+    path_first_attachment,
+)
 from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import (
@@ -116,7 +123,10 @@ OPTION_ALLOW = "allow"
 OPTION_ALLOW_SESSION = "allow_session"
 OPTION_REJECT = "reject"
 OPTION_SKIP = "skip"
+IMAGE_ONLY_QUERY = "Analyze the attached image."
+ATTACHMENT_DIR = Path(".copperpilot") / "attachments"
 _MAX_TOOL_OUTPUT_CHARS = 4_000
+_IMAGE_SUFFIX = re.compile(r"^[a-z0-9]{1,10}$")
 _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _USER_REQUEST = re.compile(r"<user_request>\s*(.*?)\s*</user_request>", re.DOTALL)
 _PLAN_ARTIFACT = re.compile(
@@ -288,6 +298,61 @@ def prompt_text(blocks: list[Any]) -> str:
             uri = getattr(resource, "uri", None) or "resource"
             parts.append(f"[{uri}]\n{resource_text}")
     return "\n\n".join(parts).strip()
+
+
+def image_suffix(mime_type: Any) -> str:
+    """Return a file suffix for an image MIME type, defaulting to ``png``."""
+    subtype = str(mime_type or "").partition("/")[2].split(";")[0].split("+")[0].strip().lower()
+    subtype = "jpg" if subtype == "jpeg" else subtype
+    return subtype if _IMAGE_SUFFIX.match(subtype) else "png"
+
+
+def prompt_images(blocks: list[Any]) -> list[tuple[bytes, str]]:
+    """Decode the ``image`` prompt blocks into ``(bytes, suffix)`` pairs."""
+    images: list[tuple[bytes, str]] = []
+    for block in blocks:
+        if getattr(block, "type", None) != "image":
+            continue
+        try:
+            payload = base64.b64decode(str(getattr(block, "data", "") or ""), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RequestError.invalid_params(
+                {"details": "An image block is not valid base64."}
+            ) from exc
+        if not payload:
+            raise RequestError.invalid_params({"details": "An image block is empty."})
+        images.append((payload, image_suffix(getattr(block, "mime_type", None))))
+    return images
+
+
+def save_attachments(images: list[tuple[bytes, str]], workspace: Path) -> list[dict[str, Any]]:
+    """Write prompt images under the workspace and describe them path-first.
+
+    The hosted agent reads attachments through its file tools, the same way the
+    TUI passes pasted clipboard images, so no image bytes go over the socket.
+    """
+    if not images:
+        return []
+    root = workspace / ATTACHMENT_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    attachments: list[dict[str, Any]] = []
+    for payload, suffix in images:
+        file = root / f"{uuid.uuid4()}.{suffix}"
+        file.write_bytes(payload)
+        attachments.append(path_first_attachment(file, workspace))
+    return attachments
+
+
+def with_attachment_paths(message: str, attachments: list[dict[str, Any]]) -> str:
+    """Name each saved image in the query so the agent reads the workspace copy.
+
+    Clients such as T3 Code also mention their own copy, which lives outside the
+    workspace where the hosted agent's file tools are rejected.
+    """
+    if not attachments:
+        return message
+    lines = "\n".join(f"- {item['path']}" for item in attachments)
+    return f"{message}\n\nAttached images, saved in the workspace:\n{lines}"
 
 
 def question_options(arguments: Any) -> tuple[str, list[str]] | None:
@@ -567,7 +632,9 @@ class CopperAcpAgent:
         self.elicitation_form = _supports_form_elicitation(client_capabilities)
         return InitializeResponse(
             protocol_version=min(protocol_version, PROTOCOL_VERSION),
-            agent_capabilities=AgentCapabilities(load_session=True),
+            agent_capabilities=AgentCapabilities(
+                load_session=True, prompt_capabilities=PromptCapabilities(image=True)
+            ),
             auth_methods=[
                 TerminalAuthMethod(
                     type="terminal",
@@ -684,18 +751,21 @@ class CopperAcpAgent:
             raise RequestError.invalid_request({"details": "A turn is already running."})
         credential = self._require_credential()
         message = prompt_text(prompt)
-        if not message:
-            raise RequestError.invalid_params({"details": "The prompt has no text content."})
+        images = prompt_images(prompt)
+        if not message and not images:
+            raise RequestError.invalid_params({"details": "The prompt has no text or images."})
         await self._announce_commands(session)
         is_command, argument = effort_command(first_text_block(prompt))
         if is_command:
             await self._apply_effort_command(session, argument)
             return PromptResponse(stop_reason="end_turn")
+        attachments = save_attachments(images, session.workspace)
         session.cancelled = False
         session.subagents = {}
         session.tool_paths = {}
         session.failure = None
-        session.turn = asyncio.create_task(self._run_turn(session, credential, message))
+        query = with_attachment_paths(message or IMAGE_ONLY_QUERY, attachments)
+        session.turn = asyncio.create_task(self._run_turn(session, credential, query, attachments))
         try:
             await session.turn
         except asyncio.CancelledError:
@@ -731,7 +801,11 @@ class CopperAcpAgent:
         return _turn_error(f"{type(exc).__name__}: {exc}".strip(": "))
 
     async def _run_turn(
-        self, session: AcpSession, credential: DeviceCredential, message: str
+        self,
+        session: AcpSession,
+        credential: DeviceCredential,
+        message: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         agent = CopperPilotAgent(
             session.workspace,
@@ -739,6 +813,7 @@ class CopperAcpAgent:
             conversation_id=session.session_id,
             mode=session.mode,
             effort=session.effort,
+            runtime_context=encode_runtime_context(attachments=attachments),
             tool_broker=session.broker,
         )
         failure: str | None = None
