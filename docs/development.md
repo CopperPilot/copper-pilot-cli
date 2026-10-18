@@ -88,7 +88,9 @@ the object.
 `classify_error` in `copper_protocol.py` ports the desktop client's error
 categories (`timeout`, `connection`, `server`, `rate_limit`, `usage_limit`,
 `authentication`, `invalid_request`, `payload_too_large`, `protocol`,
-`network`, `aborted`, `unknown`) with a `retryable` flag. The graph node in
+`network`, `aborted`, `unknown`) with a `retryable` flag, including websocket
+handshakes the server refuses with an HTTP status (`InvalidStatus`: 5xx and
+429 retry, auth and other 4xx do not). The graph node in
 `copper_graph.py` owns the retry loop, the stitched "Resume where we left off"
 re-prompt, partial-progress checkpointing, and the background shell wait;
 `copper_background.py` owns the foreground-to-background shell contract.

@@ -50,8 +50,11 @@ from copper_pilot_cli.sessions import get_checkpointer
 
 logger = logging.getLogger(__name__)
 
-MAX_TURN_ATTEMPTS = 3
-RETRY_BACKOFF_SECONDS: tuple[float, ...] = (5.0, 10.0, 20.0)
+MAX_TURN_ATTEMPTS = 4
+# A pod restart on the hosted side takes longer than a single short retry: the
+# reconnect 5 s after a drop is usually refused (HTTP 503) while the backend is
+# still coming back, so the budget stretches past a typical restart window.
+RETRY_BACKOFF_SECONDS: tuple[float, ...] = (5.0, 10.0, 20.0, 30.0)
 RESUME_PREFIX = "Resume where we left off: "
 RETRY_EVENT = "copper.retry"
 INTERRUPTED_CONTEXT = "[Turn interrupted before completion: {}]"
