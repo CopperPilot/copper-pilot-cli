@@ -4,6 +4,165 @@ Changelog
 
 (unreleased)
 ------------
+
+Fix
+~~~
+- Skip the killed-background resume test on Windows. [AdityaNG, Cursor]
+
+  os.killpg is POSIX-only, and that failure was the Windows CI break.
+- Resume the agent when a background shell already exited. [AdityaNG,
+  Cursor]
+
+  The continuation turn only ran while a background command was still alive, so a search that finished during the rest of the turn never woke the agent.
+
+Other
+~~~~~
+- Merge pull request #23 from CopperPilot/feat/acp-image-prompts.
+  [Aditya]
+
+  feat(acp): accept image prompts
+- Feat(acp): accept image prompts. [AdityaNG, Cursor]
+
+  T3 Code refused to start any ACP turn that carried an image because initialize never advertised promptCapabilities.image, and prompt() dropped image blocks anyway. Advertise image support, save each image block under .copperpilot/attachments, pass it as a path-first runtime attachment like the TUI does, and list the saved paths in the query so the agent reads the workspace copy.
+- Merge pull request #22 from CopperPilot/fix/resume-finished-
+  background-shell. [Aditya]
+
+  fix: resume the agent when a background shell already exited
+- Merge pull request #21 from CopperPilot/feat/validate. [Aditya]
+
+  feat: copper-pilot validate, a stage-gated read-only review graph
+- Fix(validate): default reviewers to agent mode and pass Windows CI.
+  [AdityaNG, Cursor]
+
+  Agent mode is the better default for hosted reviewers; the read-only broker still blocks design writes. Windows treated POSIX virtual paths and library URIs as relative, and os.kill(SIGTERM) aborted pytest before it could report.
+- Fix(validate): enforce reviewer.timeout_s and treat SIGTERM like
+  Ctrl-C. [AdityaNG, Claude Fable 5.1]
+
+  A hosted architecture review on a 68-part board outlived an external
+  timeout(1) wrapper; SIGTERM killed the process with no report, and the
+  graph's reviewer.timeout_s had never been applied. Each reviewer slice now
+  runs under asyncio.timeout(reviewer.timeout_s) and times out as an ERROR,
+  and the CLI maps SIGTERM onto the same partial-report path as Ctrl-C.
+- Fix(validate): scope release.repo to the project folder; tolerate
+  markdown escapes in replies. [AdityaNG, Claude Fable 5.1]
+
+  Running validate on a repository that keeps generated boards outside the
+  KiCad project (video/build/tmp_pcbs) counted them as portability failures.
+  The workspace walker now skips the same build/dist/node_modules folders as
+  discover_workspace, and release.repo only scans the project folder.
+
+  A live sch.ratings reviewer wrote '\*' inside JSON strings, which is not a
+  JSON escape and cost a repair turn; invalid escapes are now dropped before
+  the repair path is used.
+- Feat(validate): explain, --context, Python validate() API, and live
+  test. [AdityaNG, Claude Fable 5.1]
+
+  Add copper-pilot validate explain CHECK_ID (config, rendered prompt, input
+  hashes, last result), --context FILE ... (appended to every reviewer prompt
+  under Reference material and folded into the cache key), the
+  copper_pilot_cli.validate.validate()/avalidate() API returning a
+  ValidationReport, and a pytest -m live end-to-end run of validate --until S2
+  on examples/001_esp32.
+- Feat(validate): --json events, --junit, --emit-fix-prompt, MCP
+  validate tool, skill and docs. [AdityaNG, Claude Fable 5.1]
+
+  Stream validate.start/check/result/end events (plus copper.retry pass-through)
+  with --json, write JUnit XML with --junit (FAIL/ERROR -> failure/error,
+  SKIPPED -> skipped naming the blocker, WARN -> system-out), and print a
+  ready fix message for copper-pilot --mode agent with --emit-fix-prompt.
+  Expose validate(workspace?, profile?, gate?, until?, only?, effort?,
+  no_cache?) on the MCP server with per-check progress and the fixed read-only
+  reviewer policy. Add a Validate section to the review skill and plugin,
+  docs/validate.md, and the CLI reference with the exit-code table.
+- Feat(validate): hosted agent reviewers with read-only broker,
+  grounding and consensus. [AdityaNG, Claude Fable 5.1]
+
+  Add the reviewer adapter: each agent check runs CopperPilot in Ask mode
+  against a read-only snapshot of the workspace through a Manual broker whose
+  policy approves reads, scratch-folder writes and non-dangerous shell only.
+  The snapshot is re-hashed after every check; any change outside scratch is
+  an ERROR. Replies must end with a fenced json findings block (two repair
+  turns, then ERROR); findings are grounded against the design index and
+  ungrounded ones can never fail a check. per_part, per_sheet and per_netclass
+  checks fan out in batches, repeat: N takes a majority consensus, and a
+  non-retryable usage-limit block stops scheduling agent checks and exits 4.
+  default.yaml gains the agent checks for S1-S8 and the CLI gains --effort,
+  --concurrency and --repeat.
+- Feat(validate): engine, builtin checks, reports, and validate
+  list|graph|run. [AdityaNG, Claude Fable 5.1]
+
+  Add the copper-pilot validate subcommand: a stage-gated graph of read-only
+  checks loaded from a packaged default.yaml and extended by
+  .copperpilot/validate.yaml. This slice ships the engine (config models and
+  graph validation, design snapshot/hash/index, kicad-cli wrappers, dependency
+  waves, stage/full/strict gating, result cache) with the deterministic builtin
+  checks (intake.tools, intake.project, intake.intent, parts.bom_fields,
+  sch.erc, pcb.parity, pcb.rules, pcb.drc, release.outputs, release.repo) and
+  writes report.json, REPORT.md and next_actions.json under
+  .copperpilot/validate/runs/<id>/ with a latest pointer.
+- Merge pull request #20 from CopperPilot/feat/acp-session-updates.
+  [Aditya]
+
+  feat(acp): usage, plan, subagent, elicitation, and /effort session updates
+- Merge origin/main into feat/acp-session-updates. [AdityaNG, Claude
+  Fable 5.1]
+- Merge pull request #19 from CopperPilot/feat/client-turn-durability.
+  [Aditya]
+
+  feat: make hosted turns durable across transport drops
+- Fix(background): normalize CRLF shell output on Windows. [AdityaNG,
+  Claude Fable 5.1]
+- Feat: make hosted turns durable across transport drops. [AdityaNG,
+  Claude Fable 5.1]
+
+  Port the desktop client's chat-manager resilience into the shared graph
+  node so every front-end (TUI, headless, MCP, ACP) benefits:
+
+  - Retry a dropped stream up to three times with 5/10/20 s backoff and a
+    stitched "Resume where we left off" re-prompt carrying the partial
+    transcript, so the hosted agent continues instead of restarting.
+  - Classify failures like `_categorizeError`: drops, timeouts, 5xx and 429
+    retry; 4xx, invalid/oversized requests, plan refusals and auth fail fast.
+  - Capture the websocket close code and reason in the error message and log,
+    including drops that happen while a tool result is being sent.
+  - Checkpoint partial progress (text, tool calls, results) on a terminal
+    failure or cancellation with a hidden interruption note, so a later
+    manual "continue" has the prior work in context.
+  - Surface retry progress as `copper.retry` events: ACP agent thoughts, TUI
+    status/notification, headless yellow lines, MCP progress.
+  - Honour the desktop foreground-to-background shell contract: commands
+    outliving their timeout keep running, the turn continues, and their
+    output is fed back in a continuation turn after the final frame.
+  - Drop the 300 s idle-frame timeout; websocket keepalive still detects dead
+    peers and long hosted reasoning no longer trips a client limit.
+  - Fix the ACP cancel race where a server close after `session/cancel`
+    surfaced as an error instead of `cancelled`.
+- Fix(acp): read slash commands from the first prompt block. [AdityaNG,
+  Claude Fable 5.1]
+
+  T3 Code appends runtime context as a second text block, so /effort was
+  reaching the hosted agent instead of being answered locally.
+- Fix(acp): elicit option questions, unwrap T3 prompts, bound question
+  waits. [AdityaNG, Claude Fable 5.1]
+
+  T3 Code in Full access auto-selects the first option of a permission prompt,
+  so clarifying questions with options now use form elicitation (enum) when the
+  client supports it. /effort is recognised inside T3's <user_request> envelope.
+  Questions nobody answers within 100 seconds are skipped with a note, because
+  the hosted service drops a turn whose tool result takes longer than two minutes.
+- Feat(acp): usage, plan, subagent, elicitation, and /effort updates.
+  [AdityaNG, Claude Fable 5.1]
+
+  Emit usage_update from hosted token counts so T3 Code's context meter works,
+  project hosted todo_list events and .copperpilot/plans artifacts onto ACP plan
+  entries, render Intelligence survey workers as think tool calls, collect
+  free-text clarifications through ACP form elicitation when the client supports
+  it, and advertise a locally handled /effort command.
+
+
+0.1.9 (2026-10-16)
+------------------
+- Release: version 0.1.9 🚀 [AdityaNG]
 - Merge pull request #18 from CopperPilot/feat/acp-server. [Aditya]
 
   feat: add `copper-pilot acp` Agent Client Protocol server
