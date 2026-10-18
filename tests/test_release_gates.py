@@ -80,8 +80,11 @@ def test_product_ui_has_copper_only_identity() -> None:
         PACKAGE / "copper_widgets.py",
     ]
     combined = "\n".join(file.read_text(encoding="utf-8").lower() for file in surfaces)
+    # CopperPilot ships its own `/model` picker for the hosted Intelligence catalog;
+    # what must not leak is the upstream local-provider selector and its vendors.
     assert "model selector" not in combined
-    assert "/model" not in combined
+    assert "ollama" not in combined
+    assert "openrouter" not in combined
     assert "langsmith" not in combined
     assert "deep agents" not in combined
 

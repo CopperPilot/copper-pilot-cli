@@ -34,6 +34,8 @@ next turn can pass `--resume THREAD_ID`.
 Use `--mode plan` for a plan, `--mode agent -y` for Auto local writes, and
 `--yolo` only when the user asked to skip local approval. Add
 `--effort intelligence` for a paid Intelligence turn; Balanced is the default.
+`--model <id>` picks the Intelligence model (and implies Intelligence); ids
+are listed in [cli.md](cli.md#effort-intelligence-and-models).
 
 For sign-off, run `copper-pilot validate --json`, read
 `.copperpilot/validate/latest/next_actions.json`, fix with `--mode agent -y`
@@ -87,10 +89,11 @@ Point the host at `copper-pilot mcp` on stdio. Tools:
 | Tool | Role |
 |------|------|
 | `status` | Login state and discovered schematic/PCB paths |
-| `ask` | Read-oriented specialist (`--mode ask`); optional `effort` |
-| `plan` | Plan without applying (`--mode plan`); optional `effort` |
-| `run` | Mutating agent turn (`--mode agent`); optional `effort` |
-| `resume` | Continue `thread_id` (`mode` defaults to `agent`; optional `effort`) |
+| `models` | Intelligence model catalog for the `model` argument; no hosted turn |
+| `ask` | Read-oriented specialist (`--mode ask`); optional `effort`, `model` |
+| `plan` | Plan without applying (`--mode plan`); optional `effort`, `model` |
+| `run` | Mutating agent turn (`--mode agent`); optional `effort`, `model` |
+| `resume` | Continue `thread_id` (`mode` defaults to `agent`; optional `effort`, `model`) |
 | `threads_list` | List threads for this workspace |
 | `validate` | Read-only stage-gated review graph (`copper-pilot validate`); returns `next_actions` |
 
@@ -124,9 +127,10 @@ Add an external agent to Zed `settings.json`:
 
 Open the agent panel, pick CopperPilot, and chat. The project root is the
 workspace. The mode picker switches `ask`, `plan`, and `agent`; the `effort`
-option selects Balanced or Intelligence. If no credential is stored the server
-answers `auth_required` and offers a terminal login method that runs
-`copper-pilot auth login`.
+option selects Balanced or Intelligence, and the `model` option (ACP category
+`model`, so T3 Code shows it in its own model picker) selects the Intelligence
+model. If no credential is stored the server answers `auth_required` and
+offers a terminal login method that runs `copper-pilot auth login`.
 
 ### Other ACP clients
 
@@ -166,10 +170,37 @@ Further session updates:
 - Intelligence survey workers are `think` tool calls titled `Survey: <task>`
   with `in_progress`, `completed`, or `failed` status and the worker's output
   or error as content, mirroring the Electron client's subagent card.
-- `available_commands_update` once per session advertising `/effort`. A prompt
-  of `/effort balanced` or `/effort intelligence` is answered locally with a
-  `config_option_update` and a confirmation; `/effort` alone reports the
-  current value.
+- `available_commands_update` once per session advertising `/effort` and
+  `/model`. A prompt of `/effort balanced`, `/effort intelligence`, or
+  `/model <id>` is answered locally with a `config_option_update` and a
+  confirmation; `/effort` or `/model` alone reports the current value (and
+  `/model` lists the ids).
+- `model_fallback` status events (the selected model failed before any
+  output and the server switched to a Gemini model) are relayed as an agent
+  message carrying the server's copy, because ACP has no system-message type.
+
+### Effort and model as ACP config options
+
+`session/new` and `session/load` return three select options: `mode`
+(category `mode`), `effort` (category `thought_level`), and `model` (category
+`model`). The `model` option lists the Intelligence catalog (fetched from the
+server once per process, else bundled) and its current value is always the
+model the next turn will run on: the Balanced model (Gemini 3.8 Flash) while
+effort is Balanced, otherwise the selected Intelligence model (Claude Opus 5.5
+until changed). The two options stay consistent on every
+`session/set_config_option`:
+
+| Change | Result |
+|--------|--------|
+| `model` = any Intelligence model while Balanced | Effort becomes Intelligence (paid plan); the response carries both values |
+| `model` = the Balanced model while Balanced | Stays Balanced; nothing paid is requested |
+| `effort` = `balanced` | The model option shows the Balanced model; the Intelligence choice is remembered |
+| `effort` = `intelligence` | The remembered model (default Claude Opus 5.5) is shown again |
+| unknown model id | `invalid_params` listing the known ids |
+
+Free accounts get the server's 402 "Upgrade to a paid plan to use
+Intelligence." as the turn error, exactly as with `/effort intelligence`. Both
+values persist in the thread checkpoint, so `session/load` restores them.
 
 ## Approval
 
@@ -199,7 +230,12 @@ result takes longer than two minutes.
 
 `effort` is `balanced` (default) or `intelligence`. Intelligence requires a
 paid plan. It may run server-owned survey subagents; Plan turns survey before
-the parent writes a plan. Progress reports compact worker transitions and the
+the parent writes a plan. `model` is an Intelligence model id from the
+`models` tool; passing one selects Intelligence on that model, and `resume`
+without `effort` or `model` keeps what the thread last used. Results include
+`model` (the model requested) and `answered_model` (the model that answered
+after any server fallback, also reported through progress and the digest).
+Progress reports compact worker transitions and the
 result digest omits full worker output. If the hosted agent asks a clarification,
 MCP returns a clear rejection because it cannot present the interactive options
 and Skip UI; continue the returned `thread_id` in the terminal TUI to answer.

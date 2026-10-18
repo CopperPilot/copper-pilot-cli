@@ -13,6 +13,7 @@ from copper_pilot_cli.copper_mcp import (
     collect_turn,
     create_server,
     handle_ask,
+    handle_models,
     handle_plan,
     handle_resume,
     handle_run,
@@ -20,6 +21,11 @@ from copper_pilot_cli.copper_mcp import (
     handle_threads_list,
     registered_tool_names,
     resolve_workspace,
+)
+from copper_pilot_cli.copper_models import (
+    BALANCED_MODEL,
+    DEFAULT_INTELLIGENCE_MODEL,
+    FALLBACK_CATALOG,
 )
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode
 from copper_pilot_cli.copper_tools import ApprovalMode
@@ -43,20 +49,30 @@ class FakeAgent:
         mode,
         effort,
         tool_broker,
+        model=None,
     ) -> None:
         self.workspace = workspace
         self.credential = credential
         self.conversation_id = conversation_id
         self.mode = mode
         self.effort = effort
+        self.model = model
         self.tool_broker = tool_broker
         type(self).last = self
 
 
 class FakeRuntime:
-    def __init__(self, text: str = "Looks good.", success: bool = True) -> None:
+    def __init__(
+        self,
+        text: str = "Looks good.",
+        success: bool = True,
+        extra_events: list[dict[str, object]] | None = None,
+        final_model: str | None = None,
+    ) -> None:
         self.text = text
         self.success = success
+        self.extra_events = list(extra_events or [])
+        self.final_model = final_model
         self.values: dict[str, object] | None = None
 
     def config(self, thread_id, workspace):
@@ -69,12 +85,13 @@ class FakeRuntime:
             "custom",
             {"type": "copper.status", "data": "Inspecting", "title": "status"},
         )
+        for event in self.extra_events:
+            yield ((), "custom", event)
         yield ((), "custom", {"type": "copper.text", "data": self.text})
-        yield (
-            (),
-            "custom",
-            {"type": "copper.final", "data": {"success": self.success}},
-        )
+        final: dict[str, object] = {"success": self.success}
+        if self.final_model:
+            final["model"] = self.final_model
+        yield ((), "custom", {"type": "copper.final", "data": final})
 
     async def aget_state(self, _config):
         return SimpleNamespace(values={"messages": [AIMessage(content=self.text)]})
@@ -165,6 +182,98 @@ async def test_plan_can_use_intelligence_effort(tmp_path, monkeypatch) -> None:
     assert FakeAgent.last.effort is CopperEffort.INTELLIGENCE
     assert runtime.values is not None
     assert runtime.values["copper_effort"] == "intelligence"
+    assert payload["model"] == DEFAULT_INTELLIGENCE_MODEL
+    assert payload["answered_model"] == DEFAULT_INTELLIGENCE_MODEL
+
+
+@pytest.mark.asyncio
+async def test_model_argument_selects_intelligence_on_that_model(tmp_path, monkeypatch) -> None:
+    runtime = _patch_turn(monkeypatch, tmp_path, FakeRuntime(final_model="gpt-6.1-sol"))
+    payload = await handle_ask(message="Review U3", workspace=str(tmp_path), model="GPT-6.1-Sol")
+    assert payload["effort"] == CopperEffort.INTELLIGENCE.value
+    assert payload["model"] == "gpt-6.1-sol"
+    assert payload["answered_model"] == "gpt-6.1-sol"
+    assert FakeAgent.last is not None
+    assert FakeAgent.last.effort is CopperEffort.INTELLIGENCE
+    assert FakeAgent.last.model == "gpt-6.1-sol"
+    assert runtime.values == {
+        "messages": runtime.values["messages"],
+        "copper_mode": "ask",
+        "copper_effort": "intelligence",
+        "copper_model": "gpt-6.1-sol",
+    }
+
+
+@pytest.mark.asyncio
+async def test_balanced_turn_reports_the_balanced_model(tmp_path, monkeypatch) -> None:
+    runtime = _patch_turn(monkeypatch, tmp_path)
+    payload = await handle_run(message="Fix U3", workspace=str(tmp_path))
+    assert payload["effort"] == "balanced"
+    assert payload["model"] == BALANCED_MODEL
+    assert payload["answered_model"] == BALANCED_MODEL
+    assert runtime.values is not None
+    assert "copper_model" not in runtime.values
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_thread_effort_and_model_unless_given(tmp_path, monkeypatch) -> None:
+    runtime = _patch_turn(monkeypatch, tmp_path)
+    await handle_resume(thread_id="t1", message="More", workspace=str(tmp_path))
+    assert runtime.values is not None
+    assert "copper_effort" not in runtime.values
+    assert "copper_model" not in runtime.values
+    await handle_resume(
+        thread_id="t1", message="More", workspace=str(tmp_path), model="claude-sonnet-5-5"
+    )
+    assert runtime.values["copper_effort"] == "intelligence"
+    assert runtime.values["copper_model"] == "claude-sonnet-5-5"
+
+
+@pytest.mark.asyncio
+async def test_model_fallback_is_reported_in_progress_digest_and_payload(
+    tmp_path, monkeypatch
+) -> None:
+    fallback = {
+        "kind": "model_fallback",
+        "from_model": "claude-opus-5-5",
+        "to_model": "gemini-4-argon",
+        "message": "Claude Opus 5.5 is unavailable right now. Switched this chat to Argon.",
+    }
+    _patch_turn(
+        monkeypatch,
+        tmp_path,
+        FakeRuntime(extra_events=[{"type": "copper.status_event", "data": fallback}]),
+    )
+    lines: list[str] = []
+
+    async def progress(message: str) -> None:
+        lines.append(message)
+
+    payload = await handle_plan(
+        message="Plan", workspace=str(tmp_path), model="claude-opus-5-5", progress=progress
+    )
+    assert fallback["message"] in lines
+    assert payload["model"] == "claude-opus-5-5"
+    assert payload["answered_model"] == "gemini-4-argon"
+    digest = [item for item in payload["events"] if item["kind"] == "status_event"]
+    assert digest[0]["data"] == fallback
+
+
+@pytest.mark.asyncio
+async def test_models_tool_lists_catalog(monkeypatch) -> None:
+    async def fake_catalog(_credential, *, force=False):
+        return FALLBACK_CATALOG
+
+    monkeypatch.setattr("copper_pilot_cli.copper_mcp.load_credential", lambda: CREDENTIAL)
+    monkeypatch.setattr("copper_pilot_cli.copper_mcp.load_chat_model_catalog", fake_catalog)
+    payload = await handle_models()
+    assert payload["ok"] is True
+    assert [model["id"] for model in payload["models"]] == list(FALLBACK_CATALOG.ids)
+    assert payload["models"][0]["default"] is True
+    assert payload["default_intelligence_model"] == DEFAULT_INTELLIGENCE_MODEL
+    assert payload["balanced_model"] == BALANCED_MODEL
+    assert payload["from_server"] is False
+    json.dumps(payload)
 
 
 @pytest.mark.asyncio
@@ -342,7 +451,16 @@ async def test_collect_turn_reports_bounded_subagent_progress(tmp_path, monkeypa
 
 def test_server_registers_seven_tools() -> None:
     names = registered_tool_names(create_server())
-    assert names == {"status", "ask", "plan", "run", "resume", "threads_list", "validate"}
+    assert names == {
+        "status",
+        "models",
+        "ask",
+        "plan",
+        "run",
+        "resume",
+        "threads_list",
+        "validate",
+    }
 
 
 def test_status_payload_is_json_serializable(tmp_path, monkeypatch) -> None:

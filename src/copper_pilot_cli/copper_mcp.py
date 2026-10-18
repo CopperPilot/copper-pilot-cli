@@ -14,6 +14,14 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
 from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_models import (
+    ChatModelCatalog,
+    cached_chat_model_catalog,
+    is_model_fallback_event,
+    load_chat_model_catalog,
+    model_fallback_notice,
+    normalize_model_id,
+)
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind, error_message
 from copper_pilot_cli.copper_status_events import (
@@ -35,7 +43,9 @@ INSTRUCTIONS = (
     "user asked for a schematic or PCB change. Do not hand-edit KiCad files "
     "while a CopperPilot run is in flight. Run `copper-pilot auth login` in a "
     "terminal if a tool reports that login is required. Effort defaults to "
-    "balanced; use intelligence only for paid-plan deep surveys. MCP cannot "
+    "balanced; use intelligence only for paid-plan deep surveys. Passing "
+    "`model` (an id from the `models` tool) selects Intelligence on that model; "
+    "Balanced always runs on the server default model. MCP cannot "
     "answer interactive clarifications; continue the thread in the terminal TUI. "
     "`validate` runs the read-only stage-gated review graph and returns "
     "next_actions to fix with `run`."
@@ -112,7 +122,18 @@ def _digest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     subagents[status.id] = status
                 continue
             item["data"] = {
-                key: data[key] for key in ("kind", "id", "task", "status", "error") if key in data
+                key: data[key]
+                for key in (
+                    "kind",
+                    "id",
+                    "task",
+                    "status",
+                    "error",
+                    "from_model",
+                    "to_model",
+                    "message",
+                )
+                if key in data
             }
         digest.append(item)
     digest.extend(
@@ -156,12 +177,21 @@ async def collect_turn(
     thread_id: str,
     approval: ApprovalMode,
     effort: CopperEffort | None = CopperEffort.BALANCED,
+    model: str | None = None,
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
-    """Run one hosted turn and return a compact conductor payload."""
+    """Run one hosted turn and return a compact conductor payload.
+
+    ``model`` is an Intelligence model id; passing one selects Intelligence,
+    the same rule the desktop picker applies. ``effort=None`` and
+    ``model=None`` keep whatever the thread last used.
+    """
     credential = current_credential()
     if credential is None:
         return _login_error()
+    model = normalize_model_id(model) or None
+    if model is not None:
+        effort = CopperEffort.INTELLIGENCE
     context = discover_workspace(workspace)
     remember_workspace(context)
     normal_shell, dangerous_shell = shell_auto_allow_settings()
@@ -178,10 +208,12 @@ async def collect_turn(
         conversation_id=thread_id,
         mode=mode,
         effort=initial_effort,
+        model=model,
         tool_broker=broker,
     )
     events: list[dict[str, Any]] = []
     subagents: dict[str, SubagentStatus] = {}
+    answered_model: str | None = None
     if progress is not None:
         await progress(f"Starting CopperPilot {mode.value} turn")
     async with create_copper_graph(agent) as runtime:
@@ -192,6 +224,8 @@ async def collect_turn(
         }
         if effort is not None:
             values["copper_effort"] = effort.value
+        if model is not None:
+            values["copper_model"] = model
         async for item in runtime.astream(values, config):
             _namespace, stream_mode, data = item
             if stream_mode != "custom" or not isinstance(data, dict):
@@ -219,18 +253,31 @@ async def collect_turn(
                         await progress(subagent_progress_label(status))
                 elif payload.get("kind") == "plan_mode_switch":
                     await progress("Switched to Plan mode")
+                elif is_model_fallback_event(payload):
+                    answered_model = normalize_model_id(payload.get("to_model")) or None
+                    await progress(model_fallback_notice(payload))
+            elif kind == EventKind.STATUS_EVENT.value and is_model_fallback_event(data.get("data")):
+                answered_model = normalize_model_id(data["data"].get("to_model")) or None
+            elif kind == EventKind.FINAL.value and isinstance(data.get("data"), dict):
+                final_model = normalize_model_id(data["data"].get("model"))
+                if final_model:
+                    answered_model = final_model
         state = await runtime.aget_state(config)
     messages = (getattr(state, "values", {}) or {}).get("messages", [])
     assistant = str(messages[-1].content) if messages else ""
     failed, error = _turn_failed(events)
     if progress is not None:
         await progress("CopperPilot turn complete")
+    catalog = cached_chat_model_catalog()
+    requested_model = catalog.effective_model(agent.effort, getattr(agent, "model", None))
     return {
         "ok": not failed,
         "text": assistant,
         "thread_id": thread_id,
         "mode": mode.value,
         "effort": agent.effort.value,
+        "model": requested_model,
+        "answered_model": answered_model or requested_model,
         "success": not failed,
         "error": error,
         "events": _digest(events),
@@ -256,18 +303,50 @@ def handle_status(workspace: str | None = None) -> dict[str, Any]:
     }
 
 
+def models_payload(catalog: ChatModelCatalog) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "models": [
+            {
+                "id": model.id,
+                "label": model.label,
+                "short_label": model.short_label,
+                "vendor": model.vendor,
+                "input_usd_per_mtok": model.input_usd_per_mtok,
+                "output_usd_per_mtok": model.output_usd_per_mtok,
+                "default": model.id == catalog.default_intelligence_model,
+            }
+            for model in catalog.models
+        ],
+        "default_intelligence_model": catalog.default_intelligence_model,
+        "balanced_model": catalog.balanced_model,
+        "from_server": catalog.from_server,
+        "note": (
+            "Pass `model` to ask/plan/run/resume to select Intelligence on that model "
+            "(paid plan). Balanced always runs on balanced_model."
+        ),
+    }
+
+
+async def handle_models() -> dict[str, Any]:
+    """List selectable Intelligence models (server catalog, else the bundled list)."""
+    return models_payload(await load_chat_model_catalog(current_credential()))
+
+
 async def handle_ask(
     *,
     message: str,
     workspace: str | None = None,
     thread_id: str | None = None,
     effort: EffortName = "balanced",
+    model: str | None = None,
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     return await _handle_named_turn(
         message=message,
         mode=CopperMode.ASK,
         effort=CopperEffort(effort),
+        model=model,
         workspace=workspace,
         thread_id=thread_id,
         approval=ApprovalMode.AUTO,
@@ -281,12 +360,14 @@ async def handle_plan(
     workspace: str | None = None,
     thread_id: str | None = None,
     effort: EffortName = "balanced",
+    model: str | None = None,
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     return await _handle_named_turn(
         message=message,
         mode=CopperMode.PLAN,
         effort=CopperEffort(effort),
+        model=model,
         workspace=workspace,
         thread_id=thread_id,
         approval=ApprovalMode.AUTO,
@@ -300,6 +381,7 @@ async def handle_run(
     workspace: str | None = None,
     thread_id: str | None = None,
     effort: EffortName = "balanced",
+    model: str | None = None,
     approval: ApprovalName = "auto",
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
@@ -307,6 +389,7 @@ async def handle_run(
         message=message,
         mode=CopperMode.AGENT,
         effort=CopperEffort(effort),
+        model=model,
         workspace=workspace,
         thread_id=thread_id,
         approval=_approval_mode(approval),
@@ -321,6 +404,7 @@ async def handle_resume(
     workspace: str | None = None,
     mode: ModeName = "agent",
     effort: EffortName | None = None,
+    model: str | None = None,
     approval: ApprovalName = "auto",
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
@@ -334,6 +418,7 @@ async def handle_resume(
         message=message,
         mode=CopperMode(mode),
         effort=CopperEffort(effort) if effort is not None else None,
+        model=model,
         workspace=workspace,
         thread_id=thread_id,
         approval=_approval_mode(approval),
@@ -455,6 +540,7 @@ async def _handle_named_turn(
     thread_id: str | None,
     approval: ApprovalMode,
     progress: ProgressFn | None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     try:
         path = resolve_workspace(workspace)
@@ -464,6 +550,7 @@ async def _handle_named_turn(
         message=message,
         mode=mode,
         effort=effort,
+        model=model,
         workspace=path,
         thread_id=thread_id or generate_thread_id(),
         approval=approval,
@@ -472,7 +559,7 @@ async def _handle_named_turn(
 
 
 def create_server() -> FastMCP:
-    """Build the stdio MCP server with the seven conductor tools."""
+    """Build the stdio MCP server with the eight conductor tools."""
     mcp = FastMCP("copper-pilot", instructions=INSTRUCTIONS, log_level="WARNING")
 
     @mcp.tool()
@@ -481,19 +568,30 @@ def create_server() -> FastMCP:
         return handle_status(workspace)
 
     @mcp.tool()
+    async def models() -> dict[str, Any]:
+        """List Intelligence model ids for the `model` argument. No hosted turn."""
+        return await handle_models()
+
+    @mcp.tool()
     async def ask(
         message: str,
         workspace: str | None = None,
         thread_id: str | None = None,
         effort: EffortName = "balanced",
+        model: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Ask CopperPilot a read-oriented electronics question. Does not YOLO."""
+        """Ask CopperPilot a read-oriented electronics question. Does not YOLO.
+
+        model is an Intelligence model id (see `models`); passing one selects
+        Intelligence (paid plan).
+        """
         return await handle_ask(
             message=message,
             workspace=workspace,
             thread_id=thread_id,
             effort=effort,
+            model=model,
             progress=_progress(ctx),
         )
 
@@ -503,6 +601,7 @@ def create_server() -> FastMCP:
         workspace: str | None = None,
         thread_id: str | None = None,
         effort: EffortName = "balanced",
+        model: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Ask CopperPilot to propose a design plan without applying it."""
@@ -511,6 +610,7 @@ def create_server() -> FastMCP:
             workspace=workspace,
             thread_id=thread_id,
             effort=effort,
+            model=model,
             progress=_progress(ctx),
         )
 
@@ -521,6 +621,7 @@ def create_server() -> FastMCP:
         thread_id: str | None = None,
         approval: ApprovalName = "auto",
         effort: EffortName = "balanced",
+        model: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Delegate a mutating electronics task. approval is auto or yolo."""
@@ -530,6 +631,7 @@ def create_server() -> FastMCP:
             thread_id=thread_id,
             approval=approval,
             effort=effort,
+            model=model,
             progress=_progress(ctx),
         )
 
@@ -541,12 +643,14 @@ def create_server() -> FastMCP:
         mode: ModeName = "agent",
         approval: ApprovalName = "auto",
         effort: EffortName | None = None,
+        model: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Continue an existing CopperPilot thread. thread_id is required.
 
         mode defaults to agent (mutating). Pass mode="ask" to keep continuing
-        a read-only conversation without escalating to write access.
+        a read-only conversation without escalating to write access. effort
+        and model default to what the thread last used.
         """
         return await handle_resume(
             thread_id=thread_id,
@@ -555,6 +659,7 @@ def create_server() -> FastMCP:
             mode=mode,
             approval=approval,
             effort=effort,
+            model=model,
             progress=_progress(ctx),
         )
 

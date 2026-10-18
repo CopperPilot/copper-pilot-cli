@@ -86,6 +86,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         conversation_id: str | None = None,
         mode: CopperMode = CopperMode.AGENT,
         effort: CopperEffort = CopperEffort.BALANCED,
+        model: str | None = None,
         workflow: str | None = None,
         skill_manifest_id: str | None = None,
         plan_context: PlanContext | None = None,
@@ -100,6 +101,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         self.conversation_id = conversation_id or str(uuid.uuid4())
         self.mode = mode
         self.effort = effort
+        self.model = model
         self.workflow = workflow
         self.skill_manifest_id = skill_manifest_id
         self.plan_context = plan_context
@@ -125,6 +127,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             conversation_id=self.conversation_id,
             mode=self.mode,
             effort=self.effort,
+            model=self.model,
             agentic_mode=self.mode is CopperMode.AGENT or self.plan_context is not None,
             workflow=self.workflow,
             skill_manifest_id=self.skill_manifest_id,

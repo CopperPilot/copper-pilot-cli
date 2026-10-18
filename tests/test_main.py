@@ -16,6 +16,7 @@ from copper_pilot_cli.copper_main import (
     normalize_argv,
     parser,
 )
+from copper_pilot_cli.copper_protocol import CopperEffort
 
 
 def test_chat_cli_defaults_to_current_directory_and_fresh_thread() -> None:
@@ -47,6 +48,25 @@ def test_headless_flags_are_retained() -> None:
     assert args.json
     assert args.no_stream
     assert args.effort == "intelligence"
+
+
+def test_model_flag_selects_intelligence() -> None:
+    from copper_pilot_cli.copper_main import resolve_effort_and_model
+
+    args = parser().parse_args([])
+    assert args.model is None
+    assert resolve_effort_and_model(args) == (None, None)
+    args = parser().parse_args(["--effort", "balanced"])
+    assert resolve_effort_and_model(args) == (CopperEffort.BALANCED, None)
+    args = parser().parse_args(["--model", " GPT-6.1-Sol "])
+    assert args.model == " GPT-6.1-Sol "
+    assert resolve_effort_and_model(args) == (CopperEffort.INTELLIGENCE, "gpt-6.1-sol")
+    args = parser().parse_args(["--effort", "intelligence", "--model", "claude-opus-5-5"])
+    assert resolve_effort_and_model(args) == (CopperEffort.INTELLIGENCE, "claude-opus-5-5")
+    args = parser().parse_args(["--effort", "balanced", "--model", "claude-opus-5-5"])
+    with pytest.raises(ValueError, match="--model requires Intelligence"):
+        resolve_effort_and_model(args)
+    assert "--model" in parser().format_help()
 
 
 def test_auth_defaults_to_status() -> None:

@@ -33,6 +33,7 @@ valid.
 | `--json` | Emit JSON events (or a final JSON document with `--no-stream`). |
 | `--mode {agent,plan,ask}` | Hosted chat mode. Default: `agent`. |
 | `--effort {balanced,intelligence}` | Hosted effort. Default: `balanced`; Intelligence requires a paid plan. |
+| `--model MODEL` | Intelligence model id (see below). Implies `--effort intelligence`; rejected with `--effort balanced`. |
 | `-y`, `--auto-approve` | Auto approval: routine writes and known-safe shell still run; unknown actions prompt. |
 | `--yolo` | Permit local side effects without prompting. Must be set explicitly. |
 | `--version` | Print the package version. |
@@ -45,6 +46,7 @@ copper-pilot --resume
 copper-pilot -n -m "Review this board" --json
 copper-pilot ./my-board --mode plan -m "Propose a power tree"
 copper-pilot ./my-board --mode plan --effort intelligence -m "Survey and plan the power tree"
+copper-pilot ./my-board --model gpt-6.1-sol -m "Review the USB-C front end"
 ```
 
 Headless mode is also used when `--message` is set and stdout is not a TTY.
@@ -97,15 +99,18 @@ write to stdout; the protocol owns it.
 | Tool | Role |
 |------|------|
 | `status` | Login state and discovered schematic/PCB paths. No hosted call. |
-| `ask` | `--mode ask`. Auto approval. Optional `thread_id` and `effort`. |
-| `plan` | `--mode plan`. Auto approval. Optional `effort`. |
-| `run` | `--mode agent`. Optional `effort`; `approval` is `auto` (default) or `yolo`. |
-| `resume` | Continue `thread_id`. Optional `mode`, `effort`, and the same approval as `run`. |
+| `models` | Intelligence model ids, labels, prices, and the Balanced model. No hosted turn. |
+| `ask` | `--mode ask`. Auto approval. Optional `thread_id`, `effort`, `model`. |
+| `plan` | `--mode plan`. Auto approval. Optional `effort`, `model`. |
+| `run` | `--mode agent`. Optional `effort`, `model`; `approval` is `auto` (default) or `yolo`. |
+| `resume` | Continue `thread_id`. Optional `mode`, `effort`, `model`, and the same approval as `run`. |
 | `threads_list` | List threads for this workspace (`limit`, `all_workspaces`). |
 | `validate` | Read-only stage-gated review; returns `verdict`, `exit_code`, `report_path`, `next_actions`. |
 
 Workspace is the tool argument, else `CLAUDE_PROJECT_DIR`, else the process
-current directory. Manual approval is TUI-only. See [harness.md](harness.md).
+current directory. Manual approval is TUI-only. Passing `model` selects
+Intelligence on that model; the result carries `model` (requested) and
+`answered_model` (after any server fallback). See [harness.md](harness.md).
 
 ## ACP
 
@@ -125,14 +130,14 @@ advertises a terminal auth method that runs `copper-pilot auth login`.
 | ACP feature | CopperPilot behavior |
 |-------------|----------------------|
 | Session modes | `ask`, `plan`, `agent` (default `agent`) |
-| Config options | `mode` and `effort` (`balanced` default, `intelligence` paid) |
+| Config options | `mode`, `effort` (`balanced` default, `intelligence` paid), and `model` (category `model`; the Intelligence catalog) |
 | `session/load` | Resumes an existing thread id and replays its history |
 | `session/request_permission` | Auto approval; non-routine writes and shell prompt the editor |
 | `elicitation/create` | Clarifying questions (options or free text) when the client advertises form elicitation |
 | `session/cancel` | Cancels the hosted turn and local tools |
 | `usage_update` | Prompt tokens of the latest hosted turn; window size is unknown (0) |
 | `plan` | Hosted todo list events and `.copperpilot/plans/*.plan.md` todos |
-| `available_commands_update` | `/effort balanced\|intelligence`, answered locally |
+| `available_commands_update` | `/effort balanced\|intelligence` and `/model [id]`, answered locally |
 
 "Allow all for this session" switches that session to YOLO until the server
 exits; it is never saved. Clarifying questions use ACP form elicitation when
@@ -146,7 +151,7 @@ Intelligence survey workers appear as `think` tool calls named
 `Survey: <task>` whose status and output track the worker.
 See [harness.md](harness.md).
 
-## Effort and Intelligence
+## Effort, Intelligence, and models
 
 Balanced is the default. Intelligence is available on paid plans and lets the
 hosted parent run one to four survey subagents. Intelligence Plan turns survey
@@ -154,10 +159,33 @@ before creating or revising a plan. Workers are server-owned, survey-only, and
 appear in the TUI through the existing Deep Agents task rows; they do not open
 nested chats or execute through the local tool broker.
 
-The interactive `/effort` command changes effort for the current thread.
-Resuming that thread restores it; a new thread starts Balanced. In headless
-text mode, worker state changes print as compact lines. `--json` retains raw
-`status_event` objects.
+Balanced always runs on the server's Balanced model (Google Gemini 3.8 Flash);
+there is no model choice on a free account. Intelligence runs on one model
+from the catalog, Claude Opus 5.5 by default:
+
+| Id | Model |
+|----|-------|
+| `claude-opus-5-5` | Claude Opus 5.5 (Intelligence default) |
+| `claude-sonnet-5-5` | Claude Sonnet 5.5 |
+| `gpt-6-astra` | OpenAI GPT-6 Astra |
+| `gpt-6.1-sol` | OpenAI GPT-6.1 Sol |
+| `gemini-4-argon` | Google Gemini 4 Argon |
+| `gemini-3.8-flash` | Google Gemini 3.8 Flash (Balanced model) |
+
+The list is fetched from `GET /api/copperpilot/chat/models` once per process
+and falls back to this bundled copy when the deployment does not publish it.
+Choosing a model selects Intelligence, the same rule as the desktop picker;
+`--effort balanced` together with `--model` is an error. The model is sent
+only on Intelligence turns and the server resolves unknown ids to the default.
+
+The interactive `/effort` and `/model [id]` commands change effort and model
+for the current thread; `/context` shows the model the next turn will use.
+Resuming a thread restores both; a new thread starts Balanced. When the
+selected model is unavailable the server falls back to a Gemini model and
+sends a `model_fallback` status event; the TUI posts its message in the
+transcript, headless mode prints it in yellow, and `--json` retains the raw
+`status_event`. In headless text mode, worker state changes print as compact
+lines.
 
 Interactive clarification can offer suggested answers, custom text, or Skip
 and waits without a client timeout. Headless and MCP calls cannot present that

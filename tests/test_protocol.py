@@ -49,6 +49,18 @@ def test_effort_normalizes_and_serializes() -> None:
     assert make_chat_start(request(effort="intelligence"))["request"]["effort"] == ("intelligence")
 
 
+def test_model_is_sent_only_for_intelligence_turns() -> None:
+    # Balanced never carries a model: the server pins it to the default model.
+    balanced = request(effort="balanced", model="claude-opus-5-5")
+    assert balanced.model is None
+    assert "model" not in make_chat_start(balanced)["request"]
+    assert "model" not in make_chat_start(request(effort="intelligence"))["request"]
+    intelligence = request(effort="intelligence", model=" GPT-6.1-Sol ")
+    assert intelligence.model == "gpt-6.1-sol"
+    assert make_chat_start(intelligence)["request"]["model"] == "gpt-6.1-sol"
+    assert request(effort="intelligence", model="   ").model is None
+
+
 def test_context_strips_inline_attachments_and_keeps_newest() -> None:
     messages = [
         ChatMessage(role="user", content="old"),
