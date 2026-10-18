@@ -27,7 +27,7 @@ from copper_pilot_cli import copper_theme
 from copper_pilot_cli import textual_patches as _textual_patches  # noqa: F401
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.clipboard import copy_selection_to_clipboard
-from copper_pilot_cli.copper_api import format_token_limits, token_limits
+from copper_pilot_cli.copper_api import format_token_limits, token_limits, usage_error_message
 from copper_pilot_cli.copper_auth import DeviceLogin, clear_credential
 from copper_pilot_cli.copper_features import (
     LocalSkill,
@@ -62,7 +62,6 @@ from copper_pilot_cli.copper_protocol import (
     CopperEffort,
     CopperMode,
     HostedChatClient,
-    error_message,
     normalize_effort,
 )
 from copper_pilot_cli.copper_status_events import (
@@ -742,7 +741,7 @@ class CopperPilotApp(App[None]):
                 await self._mount(ErrorMessage(str(data.get("error") or "Hosted chat failed.")))
         elif kind == "copper.error":
             self._turn_error_rendered = True
-            message = error_message(data)
+            message = usage_error_message(data)
             self._settle_active_tools(message)
             if self._work_run is not None:
                 self._work_run.mark_failed()

@@ -132,7 +132,8 @@ advertises a terminal auth method that runs `copper-pilot auth login`.
 | `session/cancel` | Cancels the hosted turn and local tools |
 | `usage_update` | Prompt tokens of the latest hosted turn; window size is unknown (0) |
 | `plan` | Hosted todo list events and `.copperpilot/plans/*.plan.md` todos |
-| `available_commands_update` | `/effort balanced\|intelligence`, answered locally |
+| `available_commands_update` | `/effort balanced\|intelligence` and `/usage`, answered locally |
+| Prompt error `-32003` | A usage limit refused the turn; see below |
 
 "Allow all for this session" switches that session to YOLO until the server
 exits; it is never saved. Clarifying questions use ACP form elicitation when
@@ -145,6 +146,28 @@ hosted service drops a turn whose tool result takes longer than two minutes.
 Intelligence survey workers appear as `think` tool calls named
 `Survey: <task>` whose status and output track the worker.
 See [harness.md](harness.md).
+
+A turn refused by a usage limit fails with JSON-RPC error `-32003` (the code
+xAI's Grok ACP agent uses for the same condition). The message names the
+spent limit and when it lifts in local time, for example `CopperPilot usage
+limit reached: the current usage window is used up. It resets at 3:20 AM (in
+2h 23m).` `data` repeats it for clients that render a usage-limit notice:
+
+```json
+{
+  "details": "CopperPilot usage limit reached: ...",
+  "class": "usage_limit",
+  "blockReason": "window",
+  "resetAt": "2026-10-19T21:50:00Z",
+  "canPurchaseOverage": false,
+  "retryable": false
+}
+```
+
+When the hosted error carries no reset time (a refused handshake), the server
+reads it from the token-limits endpoint. A team cost cap, billing, or busy
+block has no reset time and keeps the hosted wording. `/usage` prints the
+current window, weekly balance, and reset times without a hosted turn.
 
 ## Effort and Intelligence
 
@@ -268,15 +291,18 @@ as an object:
     "status": 402,
     "block_reason": "weekly",
     "can_purchase_overage": true,
-    "retryable": false
+    "retryable": false,
+    "resets_at": "2026-10-21T02:56:47Z"
   }
 }
 ```
 
-`block_reason` is `window`, `weekly`, `cost_cap`, `busy`, or `billing` when
+`resets_at` is present for a `window` or `weekly` block when the server sends
+the reset time. `block_reason` is `window`, `weekly`, `cost_cap`, `busy`, or `billing` when
 the server sends one. A `busy` block and an ordinary rate limit use status
 `429` with `retryable: true`. `can_purchase_overage` only says whether the
-billing page can offer additional usage. The Textual UI prints `message`.
+billing page can offer additional usage. The Textual UI prints `message`,
+with a window or weekly reset time in local time (`It resets at 3:20 AM (in 2h 23m).`).
 
 ## Configuration
 

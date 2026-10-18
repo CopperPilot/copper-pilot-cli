@@ -67,6 +67,13 @@ from langchain_core.messages import HumanMessage
 from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.copper_api import (
+    format_token_limits,
+    is_usage_block,
+    limits_reset_time,
+    token_limits,
+    usage_limit_message,
+)
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
 from copper_pilot_cli.copper_features import (
     encode_runtime_context,
@@ -119,6 +126,11 @@ QUESTION_TIMEOUT_MESSAGE = (
 MODE_CONFIG_ID = "mode"
 EFFORT_CONFIG_ID = "effort"
 EFFORT_COMMAND = "effort"
+USAGE_COMMAND = "usage"
+# JSON-RPC error code for a turn refused by a usage limit. There is no ACP
+# standard; -32003 matches xAI's Grok ACP agent, which T3 Code already reads
+# as a usage limit. ``data`` carries ``class``/``resetAt`` for any client.
+USAGE_LIMIT_ERROR_CODE = -32003
 OPTION_ALLOW = "allow"
 OPTION_ALLOW_SESSION = "allow_session"
 OPTION_REJECT = "reject"
@@ -128,6 +140,8 @@ ATTACHMENT_DIR = Path(".copperpilot") / "attachments"
 _MAX_TOOL_OUTPUT_CHARS = 4_000
 _IMAGE_SUFFIX = re.compile(r"^[a-z0-9]{1,10}$")
 _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_LIMITS_TIMEOUT_SECONDS = 5.0
+_USAGE_COMMAND = re.compile(r"^/usage\s*$", re.IGNORECASE)
 _USER_REQUEST = re.compile(r"<user_request>\s*(.*?)\s*</user_request>", re.DOTALL)
 _PLAN_ARTIFACT = re.compile(
     r"(?:^|[\\/])\.copperpilot[\\/]plans[\\/][^\\/]+\.plan\.md$", re.IGNORECASE
@@ -394,7 +408,11 @@ def available_commands() -> list[AvailableCommand]:
             name=EFFORT_COMMAND,
             description="Set hosted effort: balanced (default) or intelligence (paid plan).",
             input=UnstructuredCommandInput(hint="balanced | intelligence"),
-        )
+        ),
+        AvailableCommand(
+            name=USAGE_COMMAND,
+            description="Show the CopperPilot usage window, weekly balance, and reset times.",
+        ),
     ]
 
 
@@ -414,6 +432,11 @@ def effort_command(message: str) -> tuple[bool, str | None]:
     if match is None:
         return False, None
     return True, match.group(1)
+
+
+def usage_command(message: str) -> bool:
+    """Return whether a prompt is the ``/usage`` command."""
+    return _USAGE_COMMAND.match(user_request_text(message).strip()) is not None
 
 
 def usage_update(payload: Any) -> UsageUpdate | None:
@@ -759,6 +782,9 @@ class CopperAcpAgent:
         if is_command:
             await self._apply_effort_command(session, argument)
             return PromptResponse(stop_reason="end_turn")
+        if usage_command(first_text_block(prompt)):
+            await self._answer_usage_command(session, credential)
+            return PromptResponse(stop_reason="end_turn")
         attachments = save_attachments(images, session.workspace)
         session.cancelled = False
         session.subagents = {}
@@ -777,11 +803,61 @@ class CopperAcpAgent:
                 # cancellation lands; a cancelled turn is not an error.
                 logger.info("Hosted turn ended after cancellation (%s)", type(exc).__name__)
             else:
-                raise self._map_turn_failure(exc) from exc
+                limited = await self._usage_limit_failure(exc, credential)
+                raise (limited or self._map_turn_failure(exc)) from exc
         finally:
             session.turn = None
             session.runtime = None
         return PromptResponse(stop_reason="cancelled" if session.cancelled else "end_turn")
+
+    @staticmethod
+    async def _usage_limit_failure(
+        exc: Exception, credential: DeviceCredential
+    ) -> RequestError | None:
+        """Explain a turn refused by a usage limit, including when it resets.
+
+        The hosted error frame names the spent limit and its reset time. When
+        it does not (a refused handshake, an older server) the token-limits
+        endpoint fills them in; a bare 402 the account view does not confirm
+        as blocked (the Intelligence plan gate) is left to the generic path.
+        """
+        if isinstance(exc, ProtocolError):
+            status, reason = exc.status, exc.block_reason
+            resets_at, can_purchase = exc.resets_at, exc.can_purchase_overage
+            hosted, retryable = str(exc), exc.retryable
+        elif isinstance(exc, InvalidStatus):
+            status, reason, resets_at, can_purchase = exc.response.status_code, None, None, None
+            hosted, retryable = "", None
+        else:
+            return None
+        if status not in {402, 429} or (status == 429 and not reason):
+            return None
+        if resets_at is None and reason in {None, "window", "weekly"}:
+            try:
+                limits = await token_limits(credential, request_timeout=_LIMITS_TIMEOUT_SECONDS)
+            except Exception as lookup:
+                logger.info("Usage limits lookup failed (%s)", type(lookup).__name__)
+            else:
+                reason = reason or _optional_str(limits.get("block_reason"))
+                resets_at = limits_reset_time({**limits, "block_reason": reason})
+                if can_purchase is None and isinstance(limits.get("can_purchase_overage"), bool):
+                    can_purchase = limits["can_purchase_overage"]
+        if not is_usage_block(status, reason):
+            return None
+        message = usage_limit_message(
+            block_reason=reason,
+            resets_at=resets_at,
+            can_purchase_overage=can_purchase,
+            hosted_message=hosted,
+        )
+        logger.warning("Hosted turn refused by a usage limit (%s)", reason or status)
+        return usage_limit_error(
+            message,
+            block_reason=reason,
+            resets_at=resets_at,
+            can_purchase_overage=can_purchase,
+            retryable=bool(retryable),
+        )
 
     @staticmethod
     def _map_turn_failure(exc: Exception) -> RequestError:
@@ -850,6 +926,7 @@ class CopperAcpAgent:
                     block_reason=payload.get("block_reason"),
                     can_purchase_overage=payload.get("can_purchase_overage"),
                     retryable=payload.get("retryable"),
+                    resets_at=_optional_str(payload.get("resets_at")),
                 )
             raise RuntimeError(failure)
 
@@ -884,6 +961,30 @@ class CopperAcpAgent:
                 text = f"Effort set to {_EFFORT_LABELS[session.effort][0]}."
         await self.conn.session_update(
             session_id=session_id, update=update_agent_message_text(text)
+        )
+
+    async def _answer_usage_command(
+        self, session: AcpSession, credential: DeviceCredential
+    ) -> None:
+        """Answer ``/usage`` from the token-limits endpoint without a hosted turn."""
+        try:
+            limits = await token_limits(credential, request_timeout=_LIMITS_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.info("Usage limits lookup failed (%s)", type(exc).__name__)
+            text = "Could not read CopperPilot usage limits right now; try again shortly."
+        else:
+            text = "\n".join(f"- {line}" for line in format_token_limits(limits).splitlines())
+            reason = _optional_str(limits.get("block_reason"))
+            if reason is not None:
+                notice = usage_limit_message(
+                    block_reason=reason,
+                    resets_at=limits_reset_time(limits),
+                    can_purchase_overage=bool(limits.get("can_purchase_overage")),
+                    hosted_message=str(limits.get("public_message") or ""),
+                )
+                text = f"{notice}\n\n{text}"
+        await self.conn.session_update(
+            session_id=session.session_id, update=update_agent_message_text(text)
         )
 
     async def _emit_plan_artifact(self, session: AcpSession, path: str) -> None:
@@ -972,6 +1073,11 @@ class CopperAcpAgent:
             session.failure = payload
             return error_message(payload)
         elif event.get("type") == RETRY_EVENT:
+            data = payload if isinstance(payload, dict) else {}
+            if data.get("stage") == "failed" and not data.get("will_retry"):
+                # The final attempt's failure becomes the turn error; a thought
+                # repeating it would show the raw hosted wording twice.
+                return None
             label = str(event.get("title") or "Retrying the hosted turn")
             # Thought chunks are concatenated by clients; keep each retry line separate.
             await send(session_id=session_id, update=update_agent_thought_text(f"{label}\n"))
@@ -1147,6 +1253,35 @@ def _coerce_mode(value: Any, fallback: CopperMode) -> CopperMode:
         return CopperMode(str(value)) if value else fallback
     except ValueError:
         return fallback
+
+
+def _optional_str(value: Any) -> str | None:
+    return str(value) if value is not None and str(value).strip() else None
+
+
+def usage_limit_error(
+    message: str,
+    *,
+    block_reason: str | None,
+    resets_at: str | None,
+    can_purchase_overage: bool | None,
+    retryable: bool,
+) -> RequestError:
+    """Build the JSON-RPC error for a turn refused by a usage limit.
+
+    The message is complete on its own (clients such as T3 Code show only the
+    message); ``data`` adds machine-readable fields for clients that render a
+    usage-limit notice or schedule a retry at ``resetAt``.
+    """
+    data: dict[str, Any] = {
+        "details": message,
+        "class": "usage_limit",
+        "blockReason": block_reason,
+        "resetAt": resets_at,
+        "canPurchaseOverage": can_purchase_overage,
+        "retryable": retryable,
+    }
+    return RequestError(USAGE_LIMIT_ERROR_CODE, message, data)
 
 
 def _turn_error(message: str, *, auth: bool = False) -> RequestError:

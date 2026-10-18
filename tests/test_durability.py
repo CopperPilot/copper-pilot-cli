@@ -484,6 +484,16 @@ async def test_hosted_error_frame_is_forwarded_once_when_terminal(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_refused_usage_handshake_reports_its_status(monkeypatch, tmp_path) -> None:
+    agent = ScriptedAgent([[refused(402)]])
+    events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["status"] == 402
+    assert error["data"]["type"] == "usage_limit"
+    assert len(agent.inputs) == 1
+
+
+@pytest.mark.asyncio
 async def test_retryable_hosted_error_frame_is_held_back_until_retry_succeeds(
     monkeypatch, tmp_path
 ) -> None:

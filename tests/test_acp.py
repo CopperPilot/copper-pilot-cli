@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -43,6 +44,8 @@ from copper_pilot_cli.copper_acp import (
     OPTION_SKIP,
     QUESTION_MESSAGE,
     QUESTION_TIMEOUT_MESSAGE,
+    USAGE_COMMAND,
+    USAGE_LIMIT_ERROR_CODE,
     AcpSession,
     CopperAcpAgent,
     available_commands,
@@ -65,12 +68,14 @@ from copper_pilot_cli.copper_acp import (
     tool_kind,
     tool_locations,
     tool_title,
+    usage_command,
     usage_update,
     user_request_text,
     with_attachment_paths,
 )
 from copper_pilot_cli.copper_auth import DeviceCredential, save_credential
-from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ProtocolError
+from copper_pilot_cli.copper_graph import retry_event
+from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ErrorInfo, ProtocolError
 from copper_pilot_cli.copper_status_events import SubagentStatus
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, ToolRejected
 
@@ -228,7 +233,26 @@ def _patch(
     monkeypatch.setattr(copper_acp, "load_credential", lambda: credential)
     monkeypatch.setattr(copper_acp, "CopperPilotAgent", FakeAgent)
     monkeypatch.setattr(copper_acp, "create_copper_graph", fake_graph)
+    _patch_limits(monkeypatch, {})
     return fake_runtime
+
+
+def _patch_limits(monkeypatch, limits: dict[str, Any] | BaseException) -> list[float]:
+    """Serve the token-limits endpoint from memory; return the request timeouts."""
+    calls: list[float] = []
+
+    async def fake_token_limits(_credential, *, request_timeout=15):
+        calls.append(request_timeout)
+        if isinstance(limits, BaseException):
+            raise limits
+        return limits
+
+    monkeypatch.setattr(copper_acp, "token_limits", fake_token_limits)
+    return calls
+
+
+def _in(**delta: float) -> str:
+    return (datetime.now(UTC) + timedelta(**delta, seconds=30)).isoformat()
 
 
 def _invalid_status(status: int) -> InvalidStatus:
@@ -603,7 +627,10 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
     ]
     updates = [update for _sid, update in conn.updates]
     assert updates[0].session_update == "available_commands_update"
-    assert [command.name for command in updates[0].available_commands] == [EFFORT_COMMAND]
+    assert [command.name for command in updates[0].available_commands] == [
+        EFFORT_COMMAND,
+        USAGE_COMMAND,
+    ]
     updates = updates[1:]
     assert updates[4].kind == "read" and updates[4].locations[0].path == "board.kicad_sch"
     assert updates[5].status == "completed"
@@ -770,6 +797,248 @@ async def test_prompt_error_message_carries_the_hosted_explanation(tmp_path, mon
     assert exc.value.code == -32603
     assert str(exc.value) == hosted
     assert exc.value.data == {"details": hosted}
+
+
+async def test_window_usage_limit_names_the_reset_time(tmp_path, monkeypatch) -> None:
+    hosted = "You have reached the current usage window. Usage limit resets at 2026-10-19T02:16Z."
+    reset = _in(hours=2, minutes=23)
+    error = ProtocolError(
+        hosted,
+        code="http_402",
+        status=402,
+        block_reason="window",
+        can_purchase_overage=False,
+        retryable=False,
+        resets_at=reset,
+    )
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(raise_exc=error)
+    )
+    lookups = _patch_limits(monkeypatch, {})
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    message = str(exc.value)
+    assert exc.value.code == USAGE_LIMIT_ERROR_CODE
+    assert message.startswith(
+        "CopperPilot usage limit reached: the current usage window is used up. It resets at "
+    )
+    assert message.endswith("(in 2h 23m).")
+    assert exc.value.data == {
+        "details": message,
+        "class": "usage_limit",
+        "blockReason": "window",
+        "resetAt": reset,
+        "canPurchaseOverage": False,
+        "retryable": False,
+    }
+    assert lookups == []
+
+
+async def test_usage_limit_from_an_error_event_keeps_the_reset_time(tmp_path, monkeypatch) -> None:
+    # The graph reports a spent retry budget as a copper.error event that the
+    # ACP turn re-raises; the reset time must survive that hop.
+    reset = _in(days=2, hours=4)
+    event = {
+        "type": "copper.error",
+        "data": {
+            "message": "You have reached your weekly usage limit.",
+            "status": 402,
+            "block_reason": "weekly",
+            "can_purchase_overage": True,
+            "retryable": False,
+            "resets_at": reset,
+        },
+    }
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime([event])
+    )
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert exc.value.code == USAGE_LIMIT_ERROR_CODE
+    assert str(exc.value).startswith("CopperPilot weekly usage limit reached. It resets on ")
+    assert "(in 2d 4h). You can buy additional usage" in str(exc.value)
+    assert exc.value.data["resetAt"] == reset
+
+
+async def test_retry_thoughts_skip_the_terminal_attempt(tmp_path, monkeypatch) -> None:
+    error = ErrorInfo("server", "boom", True)
+    events = [
+        retry_event("failed", 1, error=error, will_retry=True),
+        retry_event("scheduled", 2, delay_s=2, error=error, will_retry=True),
+        retry_event("failed", 2, error=ErrorInfo("usage_limit", "raw", False)),
+    ]
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(events)
+    )
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    thoughts = [
+        update.content.text
+        for _sid, update in conn.updates
+        if update.session_update == "agent_thought_chunk"
+    ]
+    assert thoughts == [
+        "Attempt 1/4 failed: boom (will retry)\n",
+        "Retrying (1/3) in 2s: boom\n",
+    ]
+
+
+async def test_usage_limit_without_a_reset_time_reads_the_limits(tmp_path, monkeypatch) -> None:
+    error = ProtocolError("You have reached your usage limit.", status=402, block_reason="weekly")
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(raise_exc=error)
+    )
+    reset = _in(hours=5)
+    lookups = _patch_limits(
+        monkeypatch,
+        {"block_reason": "weekly", "week_ends_at": reset, "can_purchase_overage": True},
+    )
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert lookups == [5.0]
+    assert "(in 5h). You can buy additional usage" in str(exc.value)
+    assert exc.value.data["resetAt"] == reset
+    assert exc.value.data["canPurchaseOverage"] is True
+
+
+async def test_refused_handshake_402_is_a_usage_limit_when_the_account_is_blocked(
+    tmp_path, monkeypatch
+) -> None:
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(raise_exc=_invalid_status(402))
+    )
+    reset = _in(minutes=42)
+    _patch_limits(monkeypatch, {"block_reason": "window", "window_ends_at": reset})
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert exc.value.code == USAGE_LIMIT_ERROR_CODE
+    assert str(exc.value).endswith("(in 42m).")
+    assert exc.value.data["blockReason"] == "window"
+
+
+async def test_refused_handshake_error_event_is_a_usage_limit(tmp_path, monkeypatch) -> None:
+    # In a real turn the graph turns a refused handshake into a copper.error
+    # event carrying the HTTP status rather than raising InvalidStatus.
+    event = {
+        "type": "copper.error",
+        "data": {
+            "message": "server rejected WebSocket connection: HTTP 402",
+            "type": "usage_limit",
+            "retryable": False,
+            "status": 402,
+        },
+    }
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime([event])
+    )
+    _patch_limits(monkeypatch, {"block_reason": "window", "window_ends_at": _in(hours=3)})
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert exc.value.code == USAGE_LIMIT_ERROR_CODE
+    assert str(exc.value).endswith("(in 3h).")
+
+
+async def test_usage_limit_lookup_failure_still_reports_the_limit(tmp_path, monkeypatch) -> None:
+    error = ProtocolError("x", status=402, block_reason="window")
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(raise_exc=error)
+    )
+    _patch_limits(monkeypatch, OSError("offline"))
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert exc.value.code == USAGE_LIMIT_ERROR_CODE
+    assert str(exc.value).endswith("Reset time unavailable; try again later.")
+    assert exc.value.data["resetAt"] is None
+
+
+async def test_team_cost_cap_keeps_the_hosted_copy(tmp_path, monkeypatch) -> None:
+    hosted = "Reached usage cap. Contact team admin to increase usage."
+    error = ProtocolError(hosted, status=402, block_reason="cost_cap")
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(raise_exc=error)
+    )
+    lookups = _patch_limits(monkeypatch, {})
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert (exc.value.code, str(exc.value)) == (USAGE_LIMIT_ERROR_CODE, hosted)
+    assert exc.value.data["class"] == "usage_limit"
+    assert lookups == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProtocolError("Too many requests. Wait a moment and try again.", status=429),
+        ProtocolError("CopperPilot ran into an error. Try again.", status=500),
+        RuntimeError("socket closed"),
+    ],
+)
+async def test_other_failures_are_not_usage_limits(tmp_path, monkeypatch, error) -> None:
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, FakeRuntime(raise_exc=error)
+    )
+    lookups = _patch_limits(monkeypatch, {"block_reason": "window", "window_ends_at": _in(hours=1)})
+    with pytest.raises(RequestError) as exc:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert (exc.value.code, str(exc.value)) == (-32603, str(error))
+    assert lookups == []
+
+
+async def test_usage_command_reports_the_limits_without_a_hosted_turn(
+    tmp_path, monkeypatch
+) -> None:
+    agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    reset = _in(hours=1, minutes=10)
+    _patch_limits(
+        monkeypatch,
+        {
+            "window_open": True,
+            "window_usage_percentage": 100,
+            "window_ends_at": reset,
+            "week_ends_at": _in(days=3),
+            "block_reason": "window",
+            "can_purchase_overage": False,
+        },
+    )
+    blocks = [
+        TextContentBlock(type="text", text="/usage"),
+        TextContentBlock(type="text", text="<runtime_info>x</runtime_info>"),
+    ]
+    response = await agent.prompt(session_id=session_id, prompt=blocks)
+    assert response.stop_reason == "end_turn"
+    assert runtime.values is None
+    text = conn.updates[-1][1].content.text
+    assert text.startswith("CopperPilot usage limit reached: the current usage window is used up.")
+    assert "(in 1h 10m)." in text
+    assert "\n\n- Current usage window: 100% used\n- Usage limit refreshes: " in text
+
+
+async def test_usage_command_reports_a_failed_lookup(tmp_path, monkeypatch) -> None:
+    agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    _patch_limits(monkeypatch, OSError("offline"))
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="/usage")])
+    assert runtime.values is None
+    assert conn.updates[-1][1].content.text.startswith("Could not read CopperPilot usage limits")
+
+
+async def test_usage_command_without_a_block_lists_the_limits(tmp_path, monkeypatch) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    _patch_limits(monkeypatch, {"window_open": False, "block_reason": None})
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="/usage")])
+    assert conn.updates[-1][1].content.text == "- Current usage window: Ready"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("/usage", True),
+        ("  /USAGE  ", True),
+        ("<user_request>/usage</user_request>", True),
+        ("/usage now", False),
+        ("what is my /usage", False),
+    ],
+)
+def test_usage_command_parsing(message, expected) -> None:
+    assert usage_command(message) is expected
 
 
 async def test_prompt_auth_error_message_carries_the_hosted_explanation(
@@ -1024,10 +1293,12 @@ def test_effort_command_parsing() -> None:
     assert first_text_block([]) == ""
 
 
-def test_available_commands_advertise_effort() -> None:
-    (command,) = available_commands()
-    assert command.name == EFFORT_COMMAND
-    assert command.input.root.hint == "balanced | intelligence"
+def test_available_commands_advertise_effort_and_usage() -> None:
+    effort, usage = available_commands()
+    assert effort.name == EFFORT_COMMAND
+    assert effort.input.root.hint == "balanced | intelligence"
+    assert usage.name == USAGE_COMMAND
+    assert usage.input is None
 
 
 def test_usage_update_maps_prompt_tokens() -> None:
