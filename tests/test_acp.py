@@ -819,8 +819,9 @@ async def test_window_usage_limit_names_the_reset_time(tmp_path, monkeypatch) ->
         await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
     message = str(exc.value)
     assert exc.value.code == USAGE_LIMIT_ERROR_CODE
+    # "at 3:20 AM" today, "on Oct 19 at 12:27 AM" when the reset crosses midnight.
     assert message.startswith(
-        "CopperPilot usage limit reached: the current usage window is used up. It resets at "
+        "CopperPilot usage limit reached: the current usage window is used up. It resets "
     )
     assert message.endswith("(in 2h 23m).")
     assert exc.value.data == {
