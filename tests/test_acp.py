@@ -748,6 +748,9 @@ async def test_prompt_failure_details_name_the_exception(tmp_path, monkeypatch, 
 
 
 async def test_prompt_refused_handshake_names_the_status(tmp_path, monkeypatch) -> None:
+    # A refused handshake only reaches the ACP layer once the graph's retry
+    # budget is spent (5xx) or when it is deterministic (auth); the message
+    # still names the status either way.
     runtime = FakeRuntime(raise_exc=_invalid_status(503))
     agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
     with pytest.raises(RequestError) as exc:

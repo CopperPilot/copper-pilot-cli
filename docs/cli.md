@@ -219,14 +219,16 @@ Every front-end (TUI, headless, MCP, ACP) runs a hosted turn through the same
 checkpointed graph node, which mirrors the desktop client's chat manager:
 
 - A stream that drops before the final frame (socket close, timeout, 5xx, 429)
-  is retried up to three times with 5 s, 10 s, and 20 s backoff. The retry
+  or a reconnect that the server refuses at the websocket handshake (HTTP 503
+  while a backend restarts, 429, other 5xx) is retried up to four times with
+  5 s, 10 s, 20 s, and 30 s backoff. The retry
   re-prompts the hosted agent with the partial transcript and
   `Resume where we left off: <original message>` so it continues rather than
   restarting. Deterministic failures (4xx other than 429, invalid or oversized
   requests, plan refusals, auth) fail immediately.
 - Retry progress is visible: the TUI status bar and a notification, a yellow
   line in headless text mode, MCP progress, and ACP agent thoughts
-  (`Retrying (1/2) in 5s: …`). `--json` emits `copper.retry` events.
+  (`Retrying (1/3) in 5s: …`). `--json` emits `copper.retry` events.
 - The websocket close code and reason are carried into the error message
   (`close code 1011 received: …`) and the log file.
 - Whatever a failed turn produced before the error (assistant text, tool calls

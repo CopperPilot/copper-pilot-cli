@@ -13,8 +13,10 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from websockets.exceptions import ConnectionClosedError
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidStatus
 from websockets.frames import Close
+from websockets.http11 import Response
 
 from copper_pilot_cli import copper_graph
 from copper_pilot_cli.copper_background import (
@@ -65,6 +67,11 @@ def dropped(code: int = 1011, reason: str = "pod restart") -> ConnectionClosedEr
     return ConnectionClosedError(Close(code, reason), None)
 
 
+def refused(status: int) -> InvalidStatus:
+    """The websockets exception for a handshake answered with an HTTP status."""
+    return InvalidStatus(Response(status, "Service Unavailable", Headers()))
+
+
 # ------------------------------------------------------------ classification
 
 
@@ -87,6 +94,14 @@ def dropped(code: int = 1011, reason: str = "pod restart") -> ConnectionClosedEr
         (TimeoutError(), "timeout", True),
         (dropped(), "connection", True),
         (ConnectionResetError("reset"), "network", True),
+        (refused(503), "server", True),
+        (refused(502), "server", True),
+        (refused(429), "rate_limit", True),
+        (refused(401), "authentication", False),
+        (refused(403), "authentication", False),
+        (refused(402), "usage_limit", False),
+        (refused(404), "invalid_request", False),
+        (InvalidHandshake("connection closed while reading HTTP status line"), "connection", True),
         (ValueError("odd"), "unknown", False),
         (asyncio.CancelledError(), "aborted", False),
     ],
@@ -104,9 +119,9 @@ def test_classify_connection_closed_names_the_close_code() -> None:
 
 def test_retry_labels_read_naturally() -> None:
     info = classify_error(ProtocolError("gone", code="STREAM_ENDED_WITHOUT_FINAL"))
-    assert retry_label("scheduled", 2, 3, 5.0, info, True) == "Retrying (1/2) in 5s: gone"
-    assert retry_label("restarted", 2, 3, 0, None, True) == "Restarting attempt 2/3"
-    assert retry_label("failed", 3, 3, 0, info, False) == "Attempt 3/3 failed: gone"
+    assert retry_label("scheduled", 2, 4, 5.0, info, True) == "Retrying (1/3) in 5s: gone"
+    assert retry_label("restarted", 2, 4, 0, None, True) == "Restarting attempt 2/4"
+    assert retry_label("failed", 4, 4, 0, info, False) == "Attempt 4/4 failed: gone"
 
 
 # --------------------------------------------------------------- transport
@@ -227,6 +242,40 @@ async def test_pre_first_event_retry_skips_deterministic_failures(monkeypatch) -
     assert attempts == 1
 
 
+@pytest.mark.asyncio
+async def test_pre_first_event_retry_covers_a_refused_handshake(monkeypatch) -> None:
+    attempts = 0
+
+    def connect(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise refused(503)
+        return _Socket([json.dumps({"type": "final", "success": True})])
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", connect)
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+    events = [event async for event in client.stream(request(), lambda _request: None)]
+    assert attempts == 2
+    assert events[-1].kind is EventKind.FINAL
+
+
+@pytest.mark.asyncio
+async def test_pre_first_event_retry_gives_up_on_a_refused_auth_handshake(monkeypatch) -> None:
+    attempts = 0
+
+    def connect(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise refused(401)
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", connect)
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+    with pytest.raises(InvalidStatus):
+        _ = [event async for event in client.stream(request(), lambda _request: None)]
+    assert attempts == 1
+
+
 # ------------------------------------------------------------------- graph
 
 
@@ -280,7 +329,7 @@ DROP = ProtocolError(
 async def run_graph(agent, monkeypatch, tmp_path, *, thread: str = "t"):
     monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
-    monkeypatch.setattr(copper_graph, "RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(copper_graph, "RETRY_BACKOFF_SECONDS", (0.0,) * MAX_TURN_ATTEMPTS)
     workspace = tmp_path / "project"
     workspace.mkdir(exist_ok=True)
     async with create_copper_graph(agent) as runtime:
@@ -379,6 +428,29 @@ async def test_deterministic_failure_persists_partial_work_without_retry(
     assert messages[-1].additional_kwargs[COPPER_CONTEXT_KEY] == (
         "[Turn interrupted before completion: Request invalid.]"
     )
+
+
+@pytest.mark.asyncio
+async def test_refused_reconnect_after_a_drop_is_retried(monkeypatch, tmp_path) -> None:
+    # The T3 Code failure: the pod restarts mid-stream, the reconnect 5 s later is
+    # refused with HTTP 503 while the backend is still coming back, and the next
+    # attempt succeeds. Before the fix the 503 was "unknown" and ended the turn.
+    agent = ScriptedAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Half"), DROP],
+            [refused(503)],
+            [CopperEvent(EventKind.TEXT, "done"), CopperEvent(EventKind.FINAL, {"success": True})],
+        ]
+    )
+    events, messages = await run_graph(agent, monkeypatch, tmp_path)
+    stages = retry_stages(events)
+    assert ("failed", 1, True) in stages
+    assert ("failed", 2, True) in stages
+    assert stages[-1] == ("restarted", 3, True)
+    assert len(agent.inputs) == 3
+    assert not [e for e in events if e["type"] == "copper.error"]
+    assert isinstance(messages[-1], AIMessage)
+    assert "done" in str(messages[-1].content)
 
 
 @pytest.mark.asyncio

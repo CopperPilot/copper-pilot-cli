@@ -18,7 +18,7 @@ import certifi
 from markdownify import markdownify
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from copper_pilot_cli._version import __version__
 
@@ -103,9 +103,33 @@ def classify_error(exc: BaseException) -> ErrorInfo:
         return ErrorInfo("timeout", message, True)
     if isinstance(exc, ConnectionClosed):
         return ErrorInfo("connection", f"Connection closed ({_close_detail(exc)})", True)
+    if isinstance(exc, InvalidStatus):
+        return _classify_refused_handshake(exc.response.status_code, message)
+    if isinstance(exc, InvalidHandshake):
+        # The upgrade failed without a usable HTTP status (EOF, bad upgrade header);
+        # that is a transport fault, typically a proxy whose backend went away.
+        return ErrorInfo("connection", f"Handshake failed ({message})", True)
     if isinstance(exc, OSError):
         return ErrorInfo("network", message, True)
     return ErrorInfo("unknown", message, False)
+
+
+def _classify_refused_handshake(status: int, message: str) -> ErrorInfo:
+    """Classify an HTTP status returned instead of the websocket upgrade.
+
+    A 503 here is the load balancer reporting that no backend is ready yet,
+    which is exactly what a reconnect sees for a short while after a pod
+    restart; it is retryable like any other 5xx. Auth and other 4xx are not.
+    """
+    if status in {401, 403}:
+        return ErrorInfo("authentication", message, False)
+    if status == 402:
+        return ErrorInfo("usage_limit", message, False)
+    if status == 429:
+        return ErrorInfo("rate_limit", message, True)
+    if 400 <= status < 500:
+        return ErrorInfo("invalid_request", message, False)
+    return ErrorInfo("server", message, True)
 
 
 def _classify_protocol_error(exc: ProtocolError, message: str) -> ErrorInfo:
@@ -419,7 +443,13 @@ class HostedChatClient:
                     observed = True
                     yield event
                 return
-            except (OSError, TimeoutError, ConnectionClosed, ProtocolError) as exc:
+            except (
+                OSError,
+                TimeoutError,
+                ConnectionClosed,
+                InvalidHandshake,
+                ProtocolError,
+            ) as exc:
                 info = classify_error(exc)
                 logger.warning(
                     "Hosted chat transport failed before completion "
