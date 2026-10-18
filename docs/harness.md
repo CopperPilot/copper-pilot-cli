@@ -141,6 +141,13 @@ Launch `copper-pilot acp` on stdio. The server implements `initialize`,
 `copper-pilot auth login`; clients that append it to the agent command, such as
 T3 Code, get `copper-pilot acp auth login`, which the CLI treats the same way.
 
+`initialize` advertises `promptCapabilities.image`. Each `image` prompt block
+is written to `.copperpilot/attachments/` in the workspace and passed to the
+hosted agent as a path-first attachment, the same way the TUI sends pasted
+images. The query also lists the saved paths, because clients such as T3 Code
+mention their own copy outside the workspace. A prompt with images but no text
+asks the agent to analyze them.
+
 Hosted text, reasoning, and status arrive as agent message and thought chunks;
 hosted tool requests and results arrive as `tool_call` and `tool_call_update`.
 A hosted error ends the prompt with a JSON-RPC error whose `details` carry the
