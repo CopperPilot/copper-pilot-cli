@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from copper_pilot_cli.copper_models import (
     BALANCED_MODEL,
     DEFAULT_INTELLIGENCE_MODEL,
     FALLBACK_CATALOG,
+    MODEL_FALLBACK_GENERIC_NOTICE,
 )
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode
 from copper_pilot_cli.copper_tools import ApprovalMode
@@ -169,6 +171,7 @@ async def test_plan_uses_plan_mode(tmp_path, monkeypatch) -> None:
     assert FakeAgent.last.mode is CopperMode.PLAN
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_plan_can_use_intelligence_effort(tmp_path, monkeypatch) -> None:
     runtime = _patch_turn(monkeypatch, tmp_path)
@@ -186,6 +189,7 @@ async def test_plan_can_use_intelligence_effort(tmp_path, monkeypatch) -> None:
     assert payload["answered_model"] == DEFAULT_INTELLIGENCE_MODEL
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_model_argument_selects_intelligence_on_that_model(tmp_path, monkeypatch) -> None:
     runtime = _patch_turn(monkeypatch, tmp_path, FakeRuntime(final_model="gpt-6.1-sol"))
@@ -204,6 +208,7 @@ async def test_model_argument_selects_intelligence_on_that_model(tmp_path, monke
     }
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_balanced_turn_reports_the_balanced_model(tmp_path, monkeypatch) -> None:
     runtime = _patch_turn(monkeypatch, tmp_path)
@@ -215,6 +220,7 @@ async def test_balanced_turn_reports_the_balanced_model(tmp_path, monkeypatch) -
     assert "copper_model" not in runtime.values
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_resume_keeps_thread_effort_and_model_unless_given(tmp_path, monkeypatch) -> None:
     runtime = _patch_turn(monkeypatch, tmp_path)
@@ -229,6 +235,7 @@ async def test_resume_keeps_thread_effort_and_model_unless_given(tmp_path, monke
     assert runtime.values["copper_model"] == "claude-sonnet-5-5"
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_model_fallback_is_reported_in_progress_digest_and_payload(
     tmp_path, monkeypatch
@@ -449,6 +456,7 @@ async def test_collect_turn_reports_bounded_subagent_progress(tmp_path, monkeypa
     assert "output" not in status_events[-1]["data"]
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_server_registers_seven_tools() -> None:
     names = registered_tool_names(create_server())
     assert names == {
@@ -550,3 +558,58 @@ async def test_validate_tool_reports_config_and_login_errors(tmp_path, monkeypat
     payload = await handle_validate(workspace=str(tmp_path))
     assert payload["error"] == "login_required" and payload["exit_code"] == 4
     assert (await handle_validate(workspace="/no/such/dir"))["error"] == "invalid_workspace"
+
+
+def test_server_hides_models_while_the_selector_is_off() -> None:
+    server = create_server()
+    assert registered_tool_names(server) == {
+        "status",
+        "ask",
+        "plan",
+        "run",
+        "resume",
+        "threads_list",
+        "validate",
+    }
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    for name in ("ask", "plan", "run", "resume"):
+        assert "model" not in tools[name].inputSchema["properties"]
+        assert "model" not in (tools[name].description or "").lower().split()
+    assert "`models`" not in (server.instructions or "")
+
+
+@pytest.mark.asyncio
+async def test_turn_names_no_model_while_the_selector_is_off(tmp_path, monkeypatch) -> None:
+    fallback = {
+        "kind": "model_fallback",
+        "from_model": "gemini-4-argon",
+        "to_model": "gemini-3.8-flash",
+        "message": "Google Gemini 4 Argon is unavailable right now.",
+    }
+    runtime = _patch_turn(
+        monkeypatch,
+        tmp_path,
+        FakeRuntime(extra_events=[{"type": "copper.status_event", "data": fallback}]),
+    )
+    lines: list[str] = []
+
+    async def progress(message: str) -> None:
+        lines.append(message)
+
+    payload = await handle_plan(
+        message="Plan",
+        workspace=str(tmp_path),
+        effort="intelligence",
+        model="claude-opus-5-5",
+        progress=progress,
+    )
+    assert runtime.values is not None
+    assert "copper_model" not in runtime.values
+    assert payload["effort"] == "intelligence"
+    assert "model" not in payload and "answered_model" not in payload
+    assert MODEL_FALLBACK_GENERIC_NOTICE in lines
+    digest = [item for item in payload["events"] if item["kind"] == "status_event"]
+    assert digest[0]["data"] == {
+        "kind": "model_fallback",
+        "message": MODEL_FALLBACK_GENERIC_NOTICE,
+    }

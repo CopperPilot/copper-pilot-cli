@@ -30,6 +30,7 @@ from copper_pilot_cli.copper_models import (
     is_model_fallback_event,
     load_chat_model_catalog,
     model_fallback_notice,
+    model_selector_enabled,
     normalize_model_id,
 )
 from copper_pilot_cli.copper_preferences import saved_approval_mode, shell_auto_allow_settings
@@ -119,15 +120,16 @@ def parser() -> argparse.ArgumentParser:
         default=None,
         help="Hosted chat effort (default: balanced; intelligence requires a paid plan)",
     )
-    result.add_argument(
-        "--model",
-        default=None,
-        metavar="MODEL",
-        help=(
-            "Intelligence model id; implies --effort intelligence. Known ids: "
-            + ", ".join(model.id for model in BUNDLED_MODELS)
-        ),
-    )
+    if model_selector_enabled():
+        result.add_argument(
+            "--model",
+            default=None,
+            metavar="MODEL",
+            help=(
+                "Intelligence model id; implies --effort intelligence. Known ids: "
+                + ", ".join(model.id for model in BUNDLED_MODELS)
+            ),
+        )
     result.add_argument(
         "-y",
         "--auto-approve",
@@ -285,7 +287,7 @@ def resolve_effort_and_model(args: argparse.Namespace) -> tuple[CopperEffort | N
     Returns ``(effort, model)`` where ``effort`` is None when neither flag was
     given, so a resumed thread keeps its stored effort.
     """
-    model = normalize_model_id(args.model) or None
+    model = normalize_model_id(getattr(args, "model", None)) or None
     if model is None:
         return (CopperEffort(args.effort) if args.effort else None), None
     if args.effort == CopperEffort.BALANCED.value:
@@ -434,7 +436,7 @@ async def async_main(args: argparse.Namespace) -> int:
             mode=CopperMode(args.mode),
             effort=effort,
             model=model,
-            catalog=await load_chat_model_catalog(credential),
+            catalog=await load_chat_model_catalog(credential if model_selector_enabled() else None),
             initial_message=args.message,
         )
         await app.run_async()

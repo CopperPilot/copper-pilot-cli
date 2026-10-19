@@ -34,8 +34,9 @@ next turn can pass `--resume THREAD_ID`.
 Use `--mode plan` for a plan, `--mode agent -y` for Auto local writes, and
 `--yolo` only when the user asked to skip local approval. Add
 `--effort intelligence` for a paid Intelligence turn; Balanced is the default.
-`--model <id>` picks the Intelligence model (and implies Intelligence); ids
-are listed in [cli.md](cli.md#effort-intelligence-and-models).
+`--model <id>` picks the Intelligence model (and implies Intelligence) while
+model selection is on; it is currently off, see
+[cli.md](cli.md#effort-intelligence-and-models).
 
 For sign-off, run `copper-pilot validate --json`, read
 `.copperpilot/validate/latest/next_actions.json`, fix with `--mode agent -y`
@@ -180,6 +181,12 @@ Further session updates:
   message carrying the server's copy, because ACP has no system-message type.
 
 ### Effort and model as ACP config options
+
+> Model selection is currently off (`ENABLE_MODEL_SELECTOR = False`): only the
+> `mode` and `effort` options and the `/effort` and `/usage` commands are
+> offered, a `model` config change is rejected as an unknown option, and
+> Intelligence runs on Gemini 4 Argon. The rest of this section, the `/model`
+> command above, and the MCP `models` tool apply when it is on.
 
 `session/new` and `session/load` return three select options: `mode`
 (category `mode`), `effort` (category `thought_level`), and `model` (category

@@ -22,11 +22,19 @@ from copper_pilot_cli.copper_protocol import CopperEffort, normalize_effort
 
 logger = logging.getLogger(__name__)
 
+# Lets users see and pick the Intelligence model in the TUI, headless CLI,
+# MCP, and ACP. While False no surface names a model or offers a choice, and
+# every Intelligence turn asks for DEFAULT_INTELLIGENCE_MODEL.
+ENABLE_MODEL_SELECTOR = False
+
 CHAT_MODELS_PATH = "/api/copperpilot/chat/models"
 CATALOG_TIMEOUT_SECONDS = 5.0
 DEFAULT_INTELLIGENCE_MODEL = "gemini-4-argon"
 BALANCED_MODEL = "gemini-3.8-flash"
 MODEL_FALLBACK_EVENT_KIND = "model_fallback"
+MODEL_FALLBACK_GENERIC_NOTICE = (
+    "The Intelligence model is unavailable right now. Switched this chat to a backup model."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,10 +131,21 @@ def normalize_model_id(value: Any) -> str:
     return str(value).strip().lower()
 
 
+def model_selector_enabled() -> bool:
+    """Whether users may see and pick the Intelligence model."""
+    return ENABLE_MODEL_SELECTOR
+
+
 def request_model(effort: Any, model_id: Any) -> str | None:
-    """Model id to send in ``chat_start``; Balanced never sends one."""
+    """Model id to send in ``chat_start``; Balanced never sends one.
+
+    While the selector is off every Intelligence turn asks for the default
+    model, including threads saved with another one.
+    """
     if normalize_effort(effort) is not CopperEffort.INTELLIGENCE:
         return None
+    if not model_selector_enabled():
+        return DEFAULT_INTELLIGENCE_MODEL
     return normalize_model_id(model_id) or None
 
 
@@ -273,6 +292,8 @@ def is_model_fallback_event(value: Any) -> bool:
 
 def model_fallback_notice(value: dict[str, Any], catalog: ChatModelCatalog | None = None) -> str:
     """Transcript copy for a fallback event (server message, else a safe default)."""
+    if not model_selector_enabled():
+        return MODEL_FALLBACK_GENERIC_NOTICE
     message = str(value.get("message") or "").strip()
     if message:
         return message

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import inspect
 import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -20,6 +22,7 @@ from copper_pilot_cli.copper_models import (
     is_model_fallback_event,
     load_chat_model_catalog,
     model_fallback_notice,
+    model_selector_enabled,
     normalize_model_id,
 )
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
@@ -49,6 +52,12 @@ INSTRUCTIONS = (
     "answer interactive clarifications; continue the thread in the terminal TUI. "
     "`validate` runs the read-only stage-gated review graph and returns "
     "next_actions to fix with `run`."
+)
+# INSTRUCTIONS without the model sentence, used while the model selector is off.
+INSTRUCTIONS_WITHOUT_MODELS = INSTRUCTIONS.replace(
+    "Passing `model` (an id from the `models` tool) selects Intelligence on that model; "
+    "Balanced always runs on the server default model. ",
+    "",
 )
 
 LOGIN_MESSAGE = "Login required; run `copper-pilot auth login` interactively."
@@ -121,6 +130,10 @@ def _digest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if status is not None:
                     subagents[status.id] = status
                 continue
+            if is_model_fallback_event(data) and not model_selector_enabled():
+                item["data"] = {"kind": data["kind"], "message": model_fallback_notice(data)}
+                digest.append(item)
+                continue
             item["data"] = {
                 key: data[key]
                 for key in (
@@ -189,7 +202,7 @@ async def collect_turn(
     credential = current_credential()
     if credential is None:
         return _login_error()
-    model = normalize_model_id(model) or None
+    model = (normalize_model_id(model) or None) if model_selector_enabled() else None
     if model is not None:
         effort = CopperEffort.INTELLIGENCE
     context = discover_workspace(workspace)
@@ -268,20 +281,20 @@ async def collect_turn(
     failed, error = _turn_failed(events)
     if progress is not None:
         await progress("CopperPilot turn complete")
-    catalog = cached_chat_model_catalog()
-    requested_model = catalog.effective_model(agent.effort, getattr(agent, "model", None))
-    return {
+    result: dict[str, Any] = {
         "ok": not failed,
         "text": assistant,
         "thread_id": thread_id,
         "mode": mode.value,
         "effort": agent.effort.value,
-        "model": requested_model,
-        "answered_model": answered_model or requested_model,
-        "success": not failed,
-        "error": error,
-        "events": _digest(events),
     }
+    if model_selector_enabled():
+        catalog = cached_chat_model_catalog()
+        requested_model = catalog.effective_model(agent.effort, getattr(agent, "model", None))
+        result["model"] = requested_model
+        result["answered_model"] = answered_model or requested_model
+    result.update({"success": not failed, "error": error, "events": _digest(events)})
+    return result
 
 
 def handle_status(workspace: str | None = None) -> dict[str, Any]:
@@ -558,21 +571,49 @@ async def _handle_named_turn(
     )
 
 
+def _model_tool(fn: Callable[..., Awaitable[dict[str, Any]]]) -> Any:
+    """Drop the ``model`` argument from a tool's schema while the selector is off."""
+    if model_selector_enabled():
+        return fn
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await fn(*args, **kwargs)
+
+    # Docstring paragraphs that start with "model" describe the hidden argument.
+    paragraphs = inspect.cleandoc(fn.__doc__ or "").split("\n\n")
+    wrapper.__doc__ = "\n\n".join(item for item in paragraphs if not item.startswith("model "))
+    signature = inspect.signature(fn, eval_str=True)
+    wrapper.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]
+        parameters=[item for item in signature.parameters.values() if item.name != "model"]
+    )
+    del wrapper.__annotations__["model"]
+    return wrapper
+
+
 def create_server() -> FastMCP:
-    """Build the stdio MCP server with the eight conductor tools."""
-    mcp = FastMCP("copper-pilot", instructions=INSTRUCTIONS, log_level="WARNING")
+    """Build the stdio MCP server with the conductor tools.
+
+    ``models`` and the ``model`` argument are only exposed while the model
+    selector is on.
+    """
+    instructions = INSTRUCTIONS if model_selector_enabled() else INSTRUCTIONS_WITHOUT_MODELS
+    mcp = FastMCP("copper-pilot", instructions=instructions, log_level="WARNING")
 
     @mcp.tool()
     def status(workspace: str | None = None) -> dict[str, Any]:
         """Report CopperPilot login status and discovered schematic/PCB paths."""
         return handle_status(workspace)
 
-    @mcp.tool()
-    async def models() -> dict[str, Any]:
-        """List Intelligence model ids for the `model` argument. No hosted turn."""
-        return await handle_models()
+    if model_selector_enabled():
+
+        @mcp.tool()
+        async def models() -> dict[str, Any]:
+            """List Intelligence model ids for the `model` argument. No hosted turn."""
+            return await handle_models()
 
     @mcp.tool()
+    @_model_tool
     async def ask(
         message: str,
         workspace: str | None = None,
@@ -596,6 +637,7 @@ def create_server() -> FastMCP:
         )
 
     @mcp.tool()
+    @_model_tool
     async def plan(
         message: str,
         workspace: str | None = None,
@@ -615,6 +657,7 @@ def create_server() -> FastMCP:
         )
 
     @mcp.tool()
+    @_model_tool
     async def run(
         message: str,
         workspace: str | None = None,
@@ -636,6 +679,7 @@ def create_server() -> FastMCP:
         )
 
     @mcp.tool()
+    @_model_tool
     async def resume(
         thread_id: str,
         message: str,
@@ -650,7 +694,10 @@ def create_server() -> FastMCP:
 
         mode defaults to agent (mutating). Pass mode="ask" to keep continuing
         a read-only conversation without escalating to write access. effort
-        and model default to what the thread last used.
+        defaults to what the thread last used.
+
+        model is an Intelligence model id (see `models`); it defaults to what
+        the thread last used.
         """
         return await handle_resume(
             thread_id=thread_id,

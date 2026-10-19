@@ -50,6 +50,7 @@ def test_headless_flags_are_retained() -> None:
     assert args.effort == "intelligence"
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_model_flag_selects_intelligence() -> None:
     from copper_pilot_cli.copper_main import resolve_effort_and_model
 
@@ -67,6 +68,16 @@ def test_model_flag_selects_intelligence() -> None:
     with pytest.raises(ValueError, match="--model requires Intelligence"):
         resolve_effort_and_model(args)
     assert "--model" in parser().format_help()
+
+
+def test_model_flag_is_absent_while_the_selector_is_off() -> None:
+    from copper_pilot_cli.copper_main import resolve_effort_and_model
+
+    assert "--model" not in parser().format_help()
+    with pytest.raises(SystemExit):
+        parser().parse_args(["--model", "claude-opus-5-5"])
+    args = parser().parse_args(["--effort", "intelligence"])
+    assert resolve_effort_and_model(args) == (CopperEffort.INTELLIGENCE, None)
 
 
 def test_auth_defaults_to_status() -> None:
