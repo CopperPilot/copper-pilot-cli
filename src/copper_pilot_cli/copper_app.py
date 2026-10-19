@@ -40,6 +40,13 @@ from copper_pilot_cli.copper_features import (
 )
 from copper_pilot_cli.copper_graph import RETRY_EVENT, CopperGraphRuntime
 from copper_pilot_cli.copper_hooks import HookRunner
+from copper_pilot_cli.copper_models import (
+    ChatModelCatalog,
+    cached_chat_model_catalog,
+    is_model_fallback_event,
+    model_fallback_notice,
+    normalize_model_id,
+)
 from copper_pilot_cli.copper_preferences import (
     acknowledge_auto_notice,
     acknowledge_yolo,
@@ -205,6 +212,8 @@ class CopperPilotApp(App[None]):
         *,
         mode: CopperMode = CopperMode.AGENT,
         effort: CopperEffort = CopperEffort.BALANCED,
+        model: str | None = None,
+        catalog: ChatModelCatalog | None = None,
         initial_message: str | None = None,
     ) -> None:
         super().__init__()
@@ -214,6 +223,8 @@ class CopperPilotApp(App[None]):
         self.thread_id = thread_id
         self.copper_mode = mode
         self.copper_effort = effort
+        self.copper_model: str | None = normalize_model_id(model) or None
+        self.catalog = catalog or cached_chat_model_catalog()
         self.initial_message = initial_message
         self._turn_task: asyncio.Task[None] | None = None
         self._cancel_requested = False
@@ -357,8 +368,10 @@ class CopperPilotApp(App[None]):
         except ValueError:
             self.copper_mode = CopperMode.AGENT
         self.copper_effort = normalize_effort(values.get("copper_effort", CopperEffort.BALANCED))
+        self.copper_model = normalize_model_id(values.get("copper_model")) or None
         self.runtime.agent.mode = self.copper_mode
         self.runtime.agent.effort = self.copper_effort
+        self.runtime.agent.model = self.copper_model
         events = values.get("copper_events", [])
         for event in events if isinstance(events, list) else []:
             if not isinstance(event, dict):
@@ -382,6 +395,7 @@ class CopperPilotApp(App[None]):
             "help",
             "hooks",
             "effort",
+            "model",
             "mode",
             "resume",
             "threads",
@@ -492,6 +506,49 @@ class CopperPilotApp(App[None]):
         bar.set_approval_mode(self.broker.mode.value)
         bar.set_status(detail)
 
+    def _effective_model(self) -> str:
+        """Model id the next turn will run on (Balanced is pinned server-side)."""
+        return self.catalog.effective_model(self.copper_effort, self.copper_model)
+
+    async def _choose_model(self, argument: str = "") -> None:
+        """``/model [id]``: pick an Intelligence model; choosing one selects Intelligence."""
+        if argument:
+            model = self.catalog.get(argument)
+            if model is None:
+                await self._mount(
+                    ErrorMessage(
+                        f"Unknown model {argument!r}. Known ids: {', '.join(self.catalog.ids)}."
+                    )
+                )
+                return
+            choice: str | None = model.id
+        else:
+            current = self._effective_model()
+            choice = await self._wait_for_modal(
+                ChoiceScreen(
+                    "CopperPilot model (Intelligence)",
+                    [
+                        (
+                            item.id,
+                            f"{item.label}{' (current)' if item.id == current else ''}",
+                        )
+                        for item in self.catalog.models
+                    ],
+                )
+            )
+        if not choice:
+            return
+        self.copper_model = choice
+        self.runtime.agent.model = choice
+        if self.copper_effort is not CopperEffort.INTELLIGENCE:
+            self.copper_effort = CopperEffort.INTELLIGENCE
+            self.runtime.agent.effort = CopperEffort.INTELLIGENCE
+            self.notify(
+                f"Effort set to Intelligence for {self.catalog.label(choice)} (paid plan).",
+                markup=False,
+            )
+        self._update_status()
+
     async def _start_loading(self) -> None:
         await self._stop_loading()
         self._loading = LoadingWidget()
@@ -599,6 +656,7 @@ class CopperPilotApp(App[None]):
                     "messages": [HumanMessage(content=value)],
                     "copper_mode": self.copper_mode.value,
                     "copper_effort": self.copper_effort.value,
+                    "copper_model": self.copper_model or "",
                 },
                 self._config(),
             ):
@@ -796,6 +854,12 @@ class CopperPilotApp(App[None]):
                 await work_run.add_unit(self._plan_switch_tool)
                 self._plan_switch_tool.set_success()
             return
+        if is_model_fallback_event(data):
+            # Mirror the desktop client's system message: say which model answered.
+            notice = model_fallback_notice(data, self.catalog)
+            self.notify(notice, severity="warning", markup=False)
+            await self._mount(AssistantMessage(f"*{notice}*"))
+            return
         label = data.get("message") or data.get("status") or data.get("type")
         if label:
             self._update_status(str(label)[:120].replace("\n", " "))
@@ -807,7 +871,8 @@ class CopperPilotApp(App[None]):
         elif command == "/help":
             await self._mount(
                 AssistantMessage(
-                    "Commands: `/mode`, `/effort`, `/resume`, `/approval`, `/context`, `/copy`, "
+                    "Commands: `/mode`, `/effort`, `/model`, `/resume`, `/approval`, `/context`, "
+                    "`/copy`, "
                     "`/cwd`, `/build`, `/hooks`, `/auth`, `/tools`, `/tokens [json]`, "
                     "`/theme`, `/update`, `/version`, `/feedback`, `/clear`, `/quit`"
                 )
@@ -830,6 +895,7 @@ class CopperPilotApp(App[None]):
                             f"- Thread: `{self.thread_id}`",
                             f"- CopperPilot mode: `{self.copper_mode.value}`",
                             f"- Effort: `{self.copper_effort.value}`",
+                            f"- Model: `{self._effective_model()}`",
                             f"- Approval: `{self.broker.mode.value}`",
                             f"- Schematic: `{context.schematic_path or 'none'}`",
                             f"- PCB: `{context.pcb_path or 'none'}`",
@@ -853,12 +919,14 @@ class CopperPilotApp(App[None]):
                 self.workspace = workspace
                 self.thread_id = generate_thread_id()
                 self.copper_effort = CopperEffort.BALANCED
+                self.copper_model = None
                 self.broker.set_workspace(workspace)
                 self.hooks = HookRunner(workspace, self.broker)
                 self.runtime.agent.workspace = workspace
                 self.runtime.agent.context = discover_workspace(workspace)
                 self.runtime.agent.conversation_id = self.thread_id
                 self.runtime.agent.effort = self.copper_effort
+                self.runtime.agent.model = None
                 self.query_one(ChatInput).set_cwd(workspace)
                 self.query_one(StatusBar).set_workspace(workspace)
                 remember_workspace(self.runtime.agent.context)
@@ -887,6 +955,8 @@ class CopperPilotApp(App[None]):
                 self.copper_effort = CopperEffort(choice)
                 self.runtime.agent.effort = self.copper_effort
                 self._update_status()
+        elif command == "/model":
+            await self._choose_model(argument.strip())
         elif command == "/build":
             if not argument:
                 await self._mount(ErrorMessage("Usage: /build .copperpilot/plans/<name>.plan.md"))

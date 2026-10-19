@@ -16,7 +16,7 @@ from urllib.parse import urlparse, urlunparse
 
 import certifi
 from markdownify import markdownify
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
@@ -232,6 +232,9 @@ class ChatRequest(BaseModel):
     initial_file_tree: str | None = None
     mode: CopperMode = CopperMode.AGENT
     effort: CopperEffort = CopperEffort.BALANCED
+    # Intelligence model id (see copper_models). Omitted for Balanced turns,
+    # which the server pins to its default model regardless.
+    model: str | None = None
     agentic_mode: bool = False
     schematic_path: str | None = None
     pcb_path: str | None = None
@@ -247,6 +250,21 @@ class ChatRequest(BaseModel):
     @classmethod
     def normalize_effort_field(cls, value: Any) -> CopperEffort:
         return normalize_effort(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def normalize_model_field(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def drop_model_for_balanced(self) -> ChatRequest:
+        """Only Intelligence turns carry a model, matching the desktop client."""
+        if self.effort is not CopperEffort.INTELLIGENCE and self.model is not None:
+            self.model = None
+        return self
 
 
 class ToolRequest(BaseModel):

@@ -73,6 +73,7 @@ class CopperState(TypedDict, total=False):
     messages: Annotated[list[Any], add_messages]
     copper_mode: str
     copper_effort: str
+    copper_model: str
     copper_events: Annotated[list[dict[str, Any]], operator.add]
 
 
@@ -455,6 +456,7 @@ class _TurnRun:
             "messages": self.additions,
             "copper_mode": self.agent.mode.value,
             "copper_effort": self.agent.effort.value,
+            "copper_model": getattr(self.agent, "model", None) or "",
             "copper_events": self.recorded_events,
         }
 
@@ -511,6 +513,8 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
         agent.effort = normalize_effort(
             state.get("copper_effort", getattr(agent, "effort", CopperEffort.BALANCED))
         )
+        if "copper_model" in state:
+            agent.model = str(state.get("copper_model") or "").strip().lower() or None
         agent.cancel_requested = False
         original = list(state["messages"])
         query = original[-1].content if original else ""

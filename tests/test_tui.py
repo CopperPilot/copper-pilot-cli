@@ -367,6 +367,60 @@ async def test_effort_command_is_thread_state_and_updates_agent(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_model_command_picks_a_model_and_selects_intelligence(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        area = app.query_one(TextArea)
+        area.text = "/model"
+        area.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceScreen)
+        options = app.screen.query_one(OptionList)
+        assert options.has_focus
+        assert options.option_count == 6
+        # Gemini models lead the list; GPT-6.1 Sol is the last entry.
+        await pilot.press("down", "down", "down", "down", "down", "enter")
+        await pilot.pause()
+        assert app.copper_model == "gpt-6.1-sol"
+        assert app.copper_effort is CopperEffort.INTELLIGENCE
+        assert app.runtime.agent.model == "gpt-6.1-sol"
+        assert app.runtime.agent.effort is CopperEffort.INTELLIGENCE
+        assert app.query_one(TextArea).has_focus
+
+        # Direct ids skip the modal; unknown ids are rejected without changing state.
+        area = app.query_one(TextArea)
+        area.text = "/model Claude-Sonnet-5-5"
+        area.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.copper_model == "claude-sonnet-5-5"
+        area.text = "/model turbo"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.copper_model == "claude-sonnet-5-5"
+        assert "Unknown model 'turbo'" in str(list(app.query(ErrorMessage))[-1].render())
+
+
+@pytest.mark.asyncio
+async def test_model_fallback_event_posts_a_notice(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)):
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {
+                    "kind": "model_fallback",
+                    "from_model": "claude-opus-5-5",
+                    "to_model": "gemini-4-argon",
+                    "message": "Claude Opus 5.5 is unavailable right now. Switched to Argon.",
+                },
+            }
+        )
+        assert "Switched to Argon" in list(app.query(AssistantMessage))[-1].content
+
+
+@pytest.mark.asyncio
 async def test_subagent_status_reuses_task_row_and_ignores_keepalive(tmp_path) -> None:
     app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
     async with app.run_test(size=(100, 30)) as pilot:

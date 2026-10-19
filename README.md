@@ -57,14 +57,17 @@ copper-pilot --resume
 copper-pilot threads list
 copper-pilot -n -m "Review this board" --json
 copper-pilot --mode plan --effort intelligence -m "Survey and plan this board"
+copper-pilot --model gpt-6.1-sol -m "Review the USB-C front end"
 ```
 
 Both `copper-pilot` and `copper-pilot-cli` run the same program.
 `copper-pilot --help` lists flags; [docs/cli.md](docs/cli.md) is the full
 command reference.
 
-Balanced effort is the default. Paid-plan users can select Intelligence with
-`--effort intelligence` or interactive `/effort`. Intelligence uses
+Balanced effort is the default and always runs on the Balanced model. Paid-plan
+users can select Intelligence with `--effort intelligence` or interactive
+`/effort`, and pick its model (Gemini 4 Argon by default) with `--model <id>`
+or `/model`; choosing a model selects Intelligence. Intelligence uses
 server-owned survey subagents and shows their lifecycle through the existing
 Deep Agents task rows; Intelligence Plan turns survey before writing a plan.
 
@@ -129,6 +132,7 @@ PLAN = CopperMode.PLAN
 copper_pilot = CopperPilotAgent(
     workspace="esp32",
     effort=CopperEffort.INTELLIGENCE,
+    model="claude-opus-5-5",  # optional; Intelligence defaults to Gemini 4 Argon
 )
 
 run(copper_pilot, "Build me an ESP32 dev board.", PLAN)

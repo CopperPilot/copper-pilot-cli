@@ -81,6 +81,14 @@ from copper_pilot_cli.copper_features import (
     path_first_attachment,
 )
 from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_models import (
+    ChatModelCatalog,
+    cached_chat_model_catalog,
+    is_model_fallback_event,
+    load_chat_model_catalog,
+    model_fallback_notice,
+    normalize_model_id,
+)
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import (
     CopperEffort,
@@ -125,7 +133,9 @@ QUESTION_TIMEOUT_MESSAGE = (
 )
 MODE_CONFIG_ID = "mode"
 EFFORT_CONFIG_ID = "effort"
+MODEL_CONFIG_ID = "model"
 EFFORT_COMMAND = "effort"
+MODEL_COMMAND = "model"
 USAGE_COMMAND = "usage"
 # JSON-RPC error code for a turn refused by a usage limit. There is no ACP
 # standard; -32003 matches xAI's Grok ACP agent, which T3 Code already reads
@@ -140,6 +150,7 @@ ATTACHMENT_DIR = Path(".copperpilot") / "attachments"
 _MAX_TOOL_OUTPUT_CHARS = 4_000
 _IMAGE_SUFFIX = re.compile(r"^[a-z0-9]{1,10}$")
 _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_MODEL_COMMAND = re.compile(r"^/model(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _LIMITS_TIMEOUT_SECONDS = 5.0
 _USAGE_COMMAND = re.compile(r"^/usage\s*$", re.IGNORECASE)
 _USER_REQUEST = re.compile(r"<user_request>\s*(.*?)\s*</user_request>", re.DOTALL)
@@ -165,8 +176,11 @@ _MODE_LABELS: dict[CopperMode, tuple[str, str]] = {
     CopperMode.AGENT: ("Agent", "Apply schematic and PCB changes in the workspace."),
 }
 _EFFORT_LABELS: dict[CopperEffort, tuple[str, str]] = {
-    CopperEffort.BALANCED: ("Balanced", "Default effort."),
-    CopperEffort.INTELLIGENCE: ("Intelligence", "Deep survey; requires a paid plan."),
+    CopperEffort.BALANCED: ("Balanced", "Default effort; always runs on the Balanced model."),
+    CopperEffort.INTELLIGENCE: (
+        "Intelligence",
+        "Deep survey on the selected model; requires a paid plan.",
+    ),
 }
 _TOOL_KINDS: dict[str, str] = {
     "read_file": "read",
@@ -195,6 +209,7 @@ class AcpSession:
     mode: CopperMode
     effort: CopperEffort
     broker: LocalToolBroker
+    model: str | None = None
     turn: asyncio.Task[Any] | None = None
     runtime: Any = None
     cancelled: bool = False
@@ -228,8 +243,20 @@ def mode_state(mode: CopperMode) -> SessionModeState:
     )
 
 
-def config_options(mode: CopperMode, effort: CopperEffort) -> list[SessionConfigOptionSelect]:
-    """Expose mode and effort as ACP config selectors."""
+def config_options(
+    mode: CopperMode,
+    effort: CopperEffort,
+    model: str | None = None,
+    catalog: ChatModelCatalog | None = None,
+) -> list[SessionConfigOptionSelect]:
+    """Expose mode, effort, and model as ACP config selectors.
+
+    The ``model`` option uses the ``model`` category, so clients such as T3
+    Code feed it to their own model picker. Its current value is always the
+    model the next turn will run on: the Balanced model while effort is
+    Balanced, otherwise the selected Intelligence model.
+    """
+    source = catalog or cached_chat_model_catalog()
     return [
         SessionConfigOptionSelect(
             id=MODE_CONFIG_ID,
@@ -253,6 +280,20 @@ def config_options(mode: CopperMode, effort: CopperEffort) -> list[SessionConfig
             options=[
                 SessionConfigSelectOption(value=item.value, name=name, description=description)
                 for item, (name, description) in _EFFORT_LABELS.items()
+            ],
+        ),
+        SessionConfigOptionSelect(
+            id=MODEL_CONFIG_ID,
+            name="Model",
+            description="Intelligence model; choosing one selects Intelligence (paid plan)",
+            category="model",
+            type="select",
+            current_value=source.effective_model(effort, model),
+            options=[
+                SessionConfigSelectOption(
+                    value=item.id, name=item.label, description=source.describe(item)
+                )
+                for item in source.models
             ],
         ),
     ]
@@ -410,6 +451,14 @@ def available_commands() -> list[AvailableCommand]:
             input=UnstructuredCommandInput(hint="balanced | intelligence"),
         ),
         AvailableCommand(
+            name=MODEL_COMMAND,
+            description=(
+                "Pick the Intelligence model by id (selects Intelligence); "
+                "`/model` alone lists the ids."
+            ),
+            input=UnstructuredCommandInput(hint="model id"),
+        ),
+        AvailableCommand(
             name=USAGE_COMMAND,
             description="Show the CopperPilot usage window, weekly balance, and reset times.",
         ),
@@ -429,6 +478,14 @@ def user_request_text(message: str) -> str:
 def effort_command(message: str) -> tuple[bool, str | None]:
     """Return ``(is_effort_command, argument)`` for a prompt."""
     match = _EFFORT_COMMAND.match(user_request_text(message).strip())
+    if match is None:
+        return False, None
+    return True, match.group(1)
+
+
+def model_command(message: str) -> tuple[bool, str | None]:
+    """Return ``(is_model_command, argument)`` for a prompt."""
+    match = _MODEL_COMMAND.match(user_request_text(message).strip())
     if match is None:
         return False, None
     return True, match.group(1)
@@ -582,6 +639,27 @@ class CopperAcpAgent:
         self.sessions: dict[str, AcpSession] = {}
         self._conn: Client | None = None
 
+    @property
+    def catalog(self) -> ChatModelCatalog:
+        """Server model catalog when loaded, else the bundled list."""
+        return cached_chat_model_catalog()
+
+    def _config_options(self, session: AcpSession) -> list[SessionConfigOptionSelect]:
+        return config_options(session.mode, session.effort, session.model, self.catalog)
+
+    def _set_model(self, session: AcpSession, value: str) -> ChatModelCatalog:
+        """Apply a model choice; any model but the Balanced one selects Intelligence."""
+        catalog = self.catalog
+        model = catalog.get(value)
+        if model is None:
+            raise RequestError.invalid_params(
+                {"details": f"Unknown model {value!r}. Known ids: {', '.join(catalog.ids)}."}
+            )
+        session.model = model.id
+        if session.effort is not CopperEffort.INTELLIGENCE and model.id != catalog.balanced_model:
+            session.effort = CopperEffort.INTELLIGENCE
+        return catalog
+
     # ------------------------------------------------------------------ wiring
 
     def on_connect(self, conn: Client) -> None:
@@ -627,6 +705,7 @@ class CopperAcpAgent:
         *,
         mode: CopperMode | None = None,
         effort: CopperEffort | None = None,
+        model: str | None = None,
     ) -> AcpSession:
         context = discover_workspace(workspace)
         remember_workspace(context)
@@ -635,6 +714,7 @@ class CopperAcpAgent:
             workspace=workspace,
             mode=mode or self.default_mode,
             effort=effort or self.default_effort,
+            model=normalize_model_id(model) or None,
             broker=self._new_broker(workspace),
         )
         session.broker.approve = self._approval_handler(session)
@@ -690,12 +770,13 @@ class CopperAcpAgent:
     ) -> NewSessionResponse:
         del additional_directories, mcp_servers, kwargs
         workspace = self._workspace(cwd)
-        self._require_credential()
+        credential = self._require_credential()
+        await load_chat_model_catalog(credential)
         session = self._register(generate_thread_id(), workspace)
         return NewSessionResponse(
             session_id=session.session_id,
             modes=mode_state(session.mode),
-            config_options=config_options(session.mode, session.effort),
+            config_options=self._config_options(session),
         )
 
     async def load_session(
@@ -709,6 +790,7 @@ class CopperAcpAgent:
         del mcp_servers, additional_directories, kwargs
         workspace = self._workspace(cwd)
         credential = self._require_credential()
+        await load_chat_model_catalog(credential)
         agent = CopperPilotAgent(workspace, credential=credential, conversation_id=session_id)
         async with create_copper_graph(agent) as runtime:
             state = await runtime.aget_state(runtime.config(session_id, workspace))
@@ -718,13 +800,15 @@ class CopperAcpAgent:
             raise RequestError.resource_not_found(session_id)
         mode = _coerce_mode(values.get("copper_mode"), self.default_mode)
         effort = normalize_effort(values.get("copper_effort") or self.default_effort)
-        session = self._register(session_id, workspace, mode=mode, effort=effort)
+        session = self._register(
+            session_id, workspace, mode=mode, effort=effort, model=values.get("copper_model")
+        )
         for update in replay_updates(messages):
             await self.conn.session_update(session_id=session_id, update=update)
         await self._announce_commands(session)
         return LoadSessionResponse(
             modes=mode_state(session.mode),
-            config_options=config_options(session.mode, session.effort),
+            config_options=self._config_options(session),
         )
 
     async def set_session_mode(
@@ -744,11 +828,11 @@ class CopperAcpAgent:
             session.mode = _parse_mode(str(value))
         elif config_id == EFFORT_CONFIG_ID:
             session.effort = _parse_effort(str(value))
+        elif config_id == MODEL_CONFIG_ID:
+            self._set_model(session, str(value))
         else:
             raise RequestError.invalid_params({"details": f"Unknown config option {config_id!r}."})
-        return SetSessionConfigOptionResponse(
-            config_options=config_options(session.mode, session.effort)
-        )
+        return SetSessionConfigOptionResponse(config_options=self._config_options(session))
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         del kwargs
@@ -778,11 +862,16 @@ class CopperAcpAgent:
         if not message and not images:
             raise RequestError.invalid_params({"details": "The prompt has no text or images."})
         await self._announce_commands(session)
-        is_command, argument = effort_command(first_text_block(prompt))
+        first_block = first_text_block(prompt)
+        is_command, argument = effort_command(first_block)
         if is_command:
             await self._apply_effort_command(session, argument)
             return PromptResponse(stop_reason="end_turn")
-        if usage_command(first_text_block(prompt)):
+        is_command, argument = model_command(first_block)
+        if is_command:
+            await self._apply_model_command(session, argument)
+            return PromptResponse(stop_reason="end_turn")
+        if usage_command(first_block):
             await self._answer_usage_command(session, credential)
             return PromptResponse(stop_reason="end_turn")
         attachments = save_attachments(images, session.workspace)
@@ -889,6 +978,7 @@ class CopperAcpAgent:
             conversation_id=session.session_id,
             mode=session.mode,
             effort=session.effort,
+            model=session.model,
             runtime_context=encode_runtime_context(attachments=attachments),
             tool_broker=session.broker,
         )
@@ -900,6 +990,7 @@ class CopperAcpAgent:
                 "messages": [HumanMessage(content=message)],
                 "copper_mode": session.mode.value,
                 "copper_effort": session.effort.value,
+                "copper_model": session.model or "",
             }
             async for item in runtime.astream(values, config):
                 _namespace, stream_mode, data = item
@@ -939,28 +1030,74 @@ class CopperAcpAgent:
             session_id=session.session_id, update=update_available_commands(available_commands())
         )
 
+    def _model_summary(self, session: AcpSession) -> str:
+        catalog = self.catalog
+        effective = catalog.effective_model(session.effort, session.model)
+        return f"{catalog.label(effective)} (`{effective}`)"
+
+    async def _publish_config(self, session: AcpSession) -> None:
+        await self.conn.session_update(
+            session_id=session.session_id,
+            update=ConfigOptionUpdate(
+                session_update="config_option_update",
+                config_options=self._config_options(session),
+            ),
+        )
+
     async def _apply_effort_command(self, session: AcpSession, argument: str | None) -> None:
         """Answer ``/effort [balanced|intelligence]`` without a hosted turn."""
         session_id = session.session_id
         if argument is None:
             label = _EFFORT_LABELS[session.effort][0]
-            text = f"Effort is {label}. Use `/effort balanced` or `/effort intelligence`."
+            text = (
+                f"Effort is {label}; model {self._model_summary(session)}. "
+                "Use `/effort balanced` or `/effort intelligence`."
+            )
         else:
             try:
                 session.effort = CopperEffort(argument.lower())
             except ValueError:
                 text = f"Unknown effort {argument!r}; use `balanced` or `intelligence`."
             else:
-                await self.conn.session_update(
-                    session_id=session_id,
-                    update=ConfigOptionUpdate(
-                        session_update="config_option_update",
-                        config_options=config_options(session.mode, session.effort),
-                    ),
+                await self._publish_config(session)
+                text = (
+                    f"Effort set to {_EFFORT_LABELS[session.effort][0]}; "
+                    f"model {self._model_summary(session)}."
                 )
-                text = f"Effort set to {_EFFORT_LABELS[session.effort][0]}."
         await self.conn.session_update(
             session_id=session_id, update=update_agent_message_text(text)
+        )
+
+    async def _apply_model_command(self, session: AcpSession, argument: str | None) -> None:
+        """Answer ``/model [id]`` without a hosted turn."""
+        catalog = self.catalog
+        listing = "\n".join(
+            f"- `{item.id}` — {item.label}"
+            + (" (Intelligence default)" if item.id == catalog.default_intelligence_model else "")
+            + (" (Balanced model)" if item.id == catalog.balanced_model else "")
+            for item in catalog.models
+        )
+        if argument is None:
+            text = (
+                f"Model is {self._model_summary(session)} on "
+                f"{_EFFORT_LABELS[session.effort][0]}. Use `/model <id>` to pick an "
+                f"Intelligence model (paid plan):\n{listing}"
+            )
+        else:
+            was_intelligence = session.effort is CopperEffort.INTELLIGENCE
+            try:
+                self._set_model(session, argument)
+            except RequestError:
+                text = f"Unknown model {argument!r}. Known ids:\n{listing}"
+            else:
+                await self._publish_config(session)
+                text = f"Model set to {self._model_summary(session)}."
+                if session.effort is CopperEffort.INTELLIGENCE and not was_intelligence:
+                    text += " Effort set to Intelligence (paid plan)."
+                elif session.effort is not CopperEffort.INTELLIGENCE:
+                    text += " Effort stays Balanced."
+        await self.conn.session_update(
+            session_id=session.session_id, update=update_agent_message_text(text)
         )
 
     async def _answer_usage_command(
@@ -1030,6 +1167,13 @@ class CopperAcpAgent:
             elif payload.get("kind") == "plan_mode_switch":
                 await send(
                     session_id=session_id, update=update_agent_thought_text("Switched to Plan mode")
+                )
+            elif is_model_fallback_event(payload):
+                # No ACP system-message type exists; surface the server copy in the
+                # transcript so the user knows which model answered.
+                notice = model_fallback_notice(payload, self.catalog)
+                await send(
+                    session_id=session_id, update=update_agent_message_text(f"\n\n*{notice}*\n\n")
                 )
         elif kind == EventKind.USAGE.value and isinstance(payload, dict):
             update = usage_update(payload)
