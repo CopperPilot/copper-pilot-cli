@@ -289,6 +289,8 @@ class LocalToolBroker:
         self.always_allow_dangerous_shell_commands = always_allow_dangerous_shell_commands
         self._results: dict[str, Any] = {}
         self._inflight: dict[str, asyncio.Task[Any]] = {}
+        # Batched tool calls run concurrently; prompts to the user must not.
+        self._prompt_lock = asyncio.Lock()
         self.background = BackgroundProcessManager()
         self.foreground_seconds = DEFAULT_FOREGROUND_SECONDS
         self._middleware: FilesystemMiddleware[Any, Any] | None = None
@@ -386,15 +388,16 @@ class LocalToolBroker:
                     return
             elif routine_action(canonical_name, request.arguments, self.workspace):
                 return
-        approved = await self.approve(
-            ApprovalRequest(
-                tool_call_id=request.tool_call_id,
-                tool_name=request.tool_name,
-                arguments=request.arguments,
-                reason="Local side effect",
-                canonical_name=canonical_name,
+        async with self._prompt_lock:
+            approved = await self.approve(
+                ApprovalRequest(
+                    tool_call_id=request.tool_call_id,
+                    tool_name=request.tool_name,
+                    arguments=request.arguments,
+                    reason="Local side effect",
+                    canonical_name=canonical_name,
+                )
             )
-        )
         if not approved:
             raise ToolRejected(f"{request.tool_name} was rejected.")
 
@@ -483,7 +486,8 @@ class LocalToolBroker:
 
     async def _execute_once(self, request: ToolRequest) -> Any:
         if request.tool_name == "ask_user_question":
-            return await self.ask_user(request.arguments)
+            async with self._prompt_lock:
+                return await self.ask_user(request.arguments)
 
         canonical_name = canonical_tool_name(request.tool_name)
         arguments, external = self._normalize_arguments(request, canonical_name)
