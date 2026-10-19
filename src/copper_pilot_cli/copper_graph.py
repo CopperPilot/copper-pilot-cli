@@ -29,6 +29,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli.copper_protocol import (
     CopperEffort,
@@ -360,10 +361,14 @@ class _TurnRun:
                 "type": info.type,
                 "retryable": info.retryable,
             }
-            for key in ("code", "status", "block_reason", "can_purchase_overage"):
+            for key in ("code", "status", "block_reason", "can_purchase_overage", "resets_at"):
                 value = getattr(exc, key, None)
                 if value is not None:
                     data[key] = value
+            if isinstance(exc, InvalidStatus):
+                # A refused handshake keeps its HTTP status, so a 402 can still
+                # be recognized as a usage limit downstream.
+                data["status"] = exc.response.status_code
             event = {"type": "copper.error", "data": data, "title": None}
         self.emit(event)
 

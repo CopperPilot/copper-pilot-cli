@@ -19,6 +19,7 @@ from copper_pilot_cli.copper_protocol import (
     bound_context,
     make_chat_start,
     sanitize_status,
+    usage_reset_time,
     websocket_url,
 )
 
@@ -367,14 +368,15 @@ async def test_final_envelope_preserves_usage_and_turn_correlation(monkeypatch) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "block_reason", "can_purchase_overage", "retryable"),
+    ("status", "block_reason", "can_purchase_overage", "retryable", "resets_at"),
     [
-        (402, "weekly", True, False),
-        (429, "busy", False, True),
+        (402, "weekly", True, False, "2026-10-21T02:56:47Z"),
+        (402, "window", False, False, "2026-10-19T02:16:02.121000Z"),
+        (429, "busy", False, True, None),
     ],
 )
 async def test_usage_error_preserves_structured_metadata(
-    monkeypatch, status, block_reason, can_purchase_overage, retryable
+    monkeypatch, status, block_reason, can_purchase_overage, retryable, resets_at
 ) -> None:
     class Socket:
         async def __aenter__(self):
@@ -397,6 +399,11 @@ async def test_usage_error_preserves_structured_metadata(
                     "block_reason": block_reason,
                     "can_purchase_overage": can_purchase_overage,
                     "retryable": retryable,
+                    "detail": {
+                        "block_reason": block_reason,
+                        "window_ends_at": "2026-10-19T02:16:02.121000Z",
+                        "week_ends_at": "2026-10-21T02:56:47Z",
+                    },
                 }
             )
 
@@ -413,10 +420,27 @@ async def test_usage_error_preserves_structured_metadata(
         "block_reason": block_reason,
         "can_purchase_overage": can_purchase_overage,
         "retryable": retryable,
+        **({"resets_at": resets_at} if resets_at else {}),
     }
     with pytest.raises(ProtocolError) as caught:
         await anext(stream)
+    assert caught.value.resets_at == resets_at
     assert caught.value.status == status
     assert caught.value.block_reason == block_reason
     assert caught.value.can_purchase_overage is can_purchase_overage
     assert caught.value.retryable is retryable
+
+
+@pytest.mark.parametrize(
+    ("frame", "expected"),
+    [
+        ({"block_reason": "window", "detail": {"window_ends_at": " W "}}, "W"),
+        ({"detail": {"block_reason": "weekly", "week_ends_at": "K"}}, "K"),
+        ({"block_reason": "cost_cap", "detail": {"window_ends_at": "W"}}, None),
+        ({"block_reason": "window", "detail": "Usage limit"}, None),
+        ({"block_reason": "window"}, None),
+        ({"block_reason": "window", "detail": {"window_ends_at": 5}}, None),
+    ],
+)
+def test_usage_reset_time_reads_the_spent_limit(frame, expected) -> None:
+    assert usage_reset_time(frame) == expected

@@ -45,6 +45,7 @@ class ProtocolError(RuntimeError):
         block_reason: str | None = None,
         can_purchase_overage: bool | None = None,
         retryable: bool | None = None,
+        resets_at: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -52,6 +53,7 @@ class ProtocolError(RuntimeError):
         self.block_reason = block_reason
         self.can_purchase_overage = can_purchase_overage
         self.retryable = retryable
+        self.resets_at = resets_at
 
     def as_event_data(self) -> dict[str, Any]:
         """Return a JSON-safe error payload for headless and MCP consumers."""
@@ -62,6 +64,7 @@ class ProtocolError(RuntimeError):
             "block_reason",
             "can_purchase_overage",
             "retryable",
+            "resets_at",
         ):
             value = getattr(self, key)
             if value is not None:
@@ -418,6 +421,21 @@ def sanitize_status(value: str) -> str:
     return _truncate_utf8(text, 16 * 1024)
 
 
+def usage_reset_time(frame: dict[str, Any]) -> str | None:
+    """Return when a usage block lifts, from an error frame's ``detail``.
+
+    A 402/429 usage block carries the member-safe limits view in ``detail``:
+    ``window_ends_at`` for a spent window and ``week_ends_at`` for a spent week.
+    """
+    detail = frame.get("detail")
+    if not isinstance(detail, dict):
+        return None
+    reason = frame.get("block_reason") or detail.get("block_reason")
+    key = {"window": "window_ends_at", "weekly": "week_ends_at"}.get(str(reason))
+    value = detail.get(key) if key else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def error_message(value: Any) -> str:
     """Read a user-facing message from old string or structured error data."""
     if isinstance(value, dict):
@@ -576,6 +594,7 @@ class HostedChatClient:
                                 if isinstance(frame.get("retryable"), bool)
                                 else None
                             ),
+                            resets_at=usage_reset_time(frame),
                         )
                         yield CopperEvent(EventKind.ERROR, error.as_event_data())
                         raise error
