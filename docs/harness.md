@@ -186,7 +186,7 @@ Further session updates:
 `model`). The `model` option lists the Intelligence catalog (fetched from the
 server once per process, else bundled) and its current value is always the
 model the next turn will run on: the Balanced model (Gemini 3.8 Flash) while
-effort is Balanced, otherwise the selected Intelligence model (Claude Opus 5.5
+effort is Balanced, otherwise the selected Intelligence model (Gemini 4 Argon
 until changed). The two options stay consistent on every
 `session/set_config_option`:
 
@@ -195,7 +195,7 @@ until changed). The two options stay consistent on every
 | `model` = any Intelligence model while Balanced | Effort becomes Intelligence (paid plan); the response carries both values |
 | `model` = the Balanced model while Balanced | Stays Balanced; nothing paid is requested |
 | `effort` = `balanced` | The model option shows the Balanced model; the Intelligence choice is remembered |
-| `effort` = `intelligence` | The remembered model (default Claude Opus 5.5) is shown again |
+| `effort` = `intelligence` | The remembered model (default Gemini 4 Argon) is shown again |
 | unknown model id | `invalid_params` listing the known ids |
 
 Free accounts get the server's 402 "Upgrade to a paid plan to use

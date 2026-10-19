@@ -68,13 +68,14 @@ def _reset_catalog():
 
 def test_bundled_catalog_mirrors_the_desktop_client() -> None:
     assert FALLBACK_CATALOG.ids == (
+        "gemini-4-argon",
+        "gemini-3.8-flash",
         "claude-opus-5-5",
         "claude-sonnet-5-5",
         "gpt-6-astra",
         "gpt-6.1-sol",
-        "gemini-4-argon",
-        "gemini-3.8-flash",
     )
+    assert DEFAULT_INTELLIGENCE_MODEL == "gemini-4-argon"
     assert FALLBACK_CATALOG.default_intelligence_model == DEFAULT_INTELLIGENCE_MODEL
     assert FALLBACK_CATALOG.balanced_model == BALANCED_MODEL
     assert FALLBACK_CATALOG.from_server is False
@@ -99,10 +100,12 @@ def test_normalize_and_effective_model() -> None:
 
 def test_describe_lists_vendor_price_and_role() -> None:
     catalog = FALLBACK_CATALOG
+    argon = catalog.get("gemini-4-argon")
     opus = catalog.get("claude-opus-5-5")
     flash = catalog.get("gemini-3.8-flash")
-    assert opus is not None and flash is not None
-    assert catalog.describe(opus) == "Anthropic · $4 in / $20 out per Mtok · Intelligence default"
+    assert argon is not None and opus is not None and flash is not None
+    assert catalog.describe(argon) == "Google · $2 in / $10 out per Mtok · Intelligence default"
+    assert catalog.describe(opus) == "Anthropic · $4 in / $20 out per Mtok"
     assert catalog.describe(flash) == "Google · $1.5 in / $7.5 out per Mtok · Balanced model"
 
 

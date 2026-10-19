@@ -379,7 +379,8 @@ async def test_model_command_picks_a_model_and_selects_intelligence(tmp_path) ->
         options = app.screen.query_one(OptionList)
         assert options.has_focus
         assert options.option_count == 6
-        await pilot.press("down", "down", "down", "enter")
+        # Gemini models lead the list; GPT-6.1 Sol is the last entry.
+        await pilot.press("down", "down", "down", "down", "down", "enter")
         await pilot.pause()
         assert app.copper_model == "gpt-6.1-sol"
         assert app.copper_effort is CopperEffort.INTELLIGENCE

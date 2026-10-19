@@ -290,7 +290,7 @@ def test_config_options_expose_mode_effort_and_model() -> None:
     # Intelligence without an explicit choice runs on the default model.
     assert model.current_value == DEFAULT_INTELLIGENCE_MODEL
     assert [item.value for item in model.options] == list(FALLBACK_CATALOG.ids)
-    assert model.options[0].name == "Claude Opus 5.5"
+    assert model.options[0].name == "Google Gemini 4 Argon"
     assert "Intelligence default" in (model.options[0].description or "")
 
 
@@ -1405,7 +1405,7 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert options[EFFORT_CONFIG_ID].current_value == "intelligence"
     assert options[MODEL_CONFIG_ID].current_value == DEFAULT_INTELLIGENCE_MODEL
     assert conn.updates[2][1].content.text == (
-        "Effort set to Intelligence; model Claude Opus 5.5 (`claude-opus-5-5`)."
+        "Effort set to Intelligence; model Google Gemini 4 Argon (`gemini-4-argon`)."
     )
 
     conn.updates.clear()
@@ -1414,7 +1414,7 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     )
     assert kinds(conn, commands=True) == ["agent_message_chunk"]
     assert conn.updates[0][1].content.text.startswith(
-        "Effort is Intelligence; model Claude Opus 5.5 (`claude-opus-5-5`)."
+        "Effort is Intelligence; model Google Gemini 4 Argon (`gemini-4-argon`)."
     )
 
     conn.updates.clear()
@@ -1453,7 +1453,7 @@ async def test_model_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert kinds(conn) == ["agent_message_chunk"]
     listing = conn.updates[-1][1].content.text
     assert listing.startswith("Model is Google Gemini 3.8 Flash (`gemini-3.8-flash`) on Balanced.")
-    assert "- `claude-opus-5-5` — Claude Opus 5.5 (Intelligence default)" in listing
+    assert "- `gemini-4-argon` — Google Gemini 4 Argon (Intelligence default)" in listing
     assert session.effort is CopperEffort.BALANCED
 
     conn.updates.clear()

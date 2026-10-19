@@ -161,16 +161,17 @@ nested chats or execute through the local tool broker.
 
 Balanced always runs on the server's Balanced model (Google Gemini 3.8 Flash);
 there is no model choice on a free account. Intelligence runs on one model
-from the catalog, Claude Opus 5.5 by default:
+from the catalog, Gemini 4 Argon by default (the server's catalog order and
+default win when it is reachable):
 
 | Id | Model |
 |----|-------|
-| `claude-opus-5-5` | Claude Opus 5.5 (Intelligence default) |
+| `gemini-4-argon` | Google Gemini 4 Argon (Intelligence default) |
+| `gemini-3.8-flash` | Google Gemini 3.8 Flash (Balanced model) |
+| `claude-opus-5-5` | Claude Opus 5.5 |
 | `claude-sonnet-5-5` | Claude Sonnet 5.5 |
 | `gpt-6-astra` | OpenAI GPT-6 Astra |
 | `gpt-6.1-sol` | OpenAI GPT-6.1 Sol |
-| `gemini-4-argon` | Google Gemini 4 Argon |
-| `gemini-3.8-flash` | Google Gemini 3.8 Flash (Balanced model) |
 
 The list is fetched from `GET /api/copperpilot/chat/models` once per process
 and falls back to this bundled copy when the deployment does not publish it.

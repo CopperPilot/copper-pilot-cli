@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 CHAT_MODELS_PATH = "/api/copperpilot/chat/models"
 CATALOG_TIMEOUT_SECONDS = 5.0
-DEFAULT_INTELLIGENCE_MODEL = "claude-opus-5-5"
+DEFAULT_INTELLIGENCE_MODEL = "gemini-4-argon"
 BALANCED_MODEL = "gemini-3.8-flash"
 MODEL_FALLBACK_EVENT_KIND = "model_fallback"
 
@@ -41,15 +41,16 @@ class ChatModel:
     output_usd_per_mtok: float = 0.0
 
 
+# Picker order mirrors the desktop client: Gemini first, then Anthropic, then OpenAI.
 BUNDLED_MODELS: tuple[ChatModel, ...] = (
-    ChatModel("claude-opus-5-5", "Claude Opus 5.5", "Opus 5.5", "Anthropic", 4.0, 20.0),
-    ChatModel("claude-sonnet-5-5", "Claude Sonnet 5.5", "Sonnet 5.5", "Anthropic", 2.0, 10.0),
-    ChatModel("gpt-6-astra", "OpenAI GPT-6 Astra", "GPT-6 Astra", "OpenAI", 10.0, 50.0),
-    ChatModel("gpt-6.1-sol", "OpenAI GPT-6.1 Sol", "GPT-6.1 Sol", "OpenAI", 2.0, 10.0),
     ChatModel("gemini-4-argon", "Google Gemini 4 Argon", "Gemini 4 Argon", "Google", 2.0, 10.0),
     ChatModel(
         "gemini-3.8-flash", "Google Gemini 3.8 Flash", "Gemini 3.8 Flash", "Google", 1.5, 7.5
     ),
+    ChatModel("claude-opus-5-5", "Claude Opus 5.5", "Opus 5.5", "Anthropic", 4.0, 20.0),
+    ChatModel("claude-sonnet-5-5", "Claude Sonnet 5.5", "Sonnet 5.5", "Anthropic", 2.0, 10.0),
+    ChatModel("gpt-6-astra", "OpenAI GPT-6 Astra", "GPT-6 Astra", "OpenAI", 10.0, 50.0),
+    ChatModel("gpt-6.1-sol", "OpenAI GPT-6.1 Sol", "GPT-6.1 Sol", "OpenAI", 2.0, 10.0),
 )
 
 
