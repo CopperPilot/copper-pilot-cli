@@ -31,7 +31,7 @@ from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
-from copper_pilot_cli import copper_acp
+from copper_pilot_cli import copper_acp, copper_models
 from copper_pilot_cli.copper_acp import (
     ATTACHMENT_DIR,
     EFFORT_COMMAND,
@@ -82,6 +82,7 @@ from copper_pilot_cli.copper_models import (
     BALANCED_MODEL,
     DEFAULT_INTELLIGENCE_MODEL,
     FALLBACK_CATALOG,
+    MODEL_FALLBACK_GENERIC_NOTICE,
 )
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ErrorInfo, ProtocolError
 from copper_pilot_cli.copper_status_events import SubagentStatus
@@ -300,6 +301,7 @@ def test_mode_state_lists_all_modes() -> None:
     assert [mode.id for mode in state.available_modes] == ["ask", "plan", "agent"]
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_config_options_expose_mode_effort_and_model() -> None:
     options = config_options(CopperMode.ASK, CopperEffort.INTELLIGENCE)
     assert [option.id for option in options] == [MODE_CONFIG_ID, EFFORT_CONFIG_ID, MODEL_CONFIG_ID]
@@ -318,6 +320,7 @@ def test_config_options_expose_mode_effort_and_model() -> None:
     assert "Intelligence default" in (model.options[0].description or "")
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_model_option_tracks_the_model_that_will_answer() -> None:
     balanced = config_options(CopperMode.AGENT, CopperEffort.BALANCED, "claude-opus-5-5")
     assert balanced[2].current_value == BALANCED_MODEL
@@ -601,6 +604,7 @@ async def test_set_session_mode_and_config_options(tmp_path, monkeypatch) -> Non
         await agent.set_config_option(config_id="temperature", session_id=session_id, value="1")
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 async def test_model_option_selects_intelligence_and_effort_pins_balanced(
     tmp_path, monkeypatch
 ) -> None:
@@ -643,6 +647,7 @@ async def test_model_option_selects_intelligence_and_effort_pins_balanced(
     assert FakeAgent.last.effort is CopperEffort.INTELLIGENCE
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 async def test_load_session_replays_history_and_restores_options(tmp_path, monkeypatch) -> None:
     runtime = FakeRuntime(
         state_values={
@@ -682,6 +687,7 @@ async def test_load_session_unknown_thread_is_not_found(tmp_path, monkeypatch) -
 # ------------------------------------------------------------------ prompt
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
     agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
     response = await agent.prompt(
@@ -1279,7 +1285,11 @@ def test_run_acp_runs_the_sdk_agent(monkeypatch) -> None:
 
 
 async def test_stdio_server_round_trip(tmp_path) -> None:
-    """Drive the real `copper-pilot acp` process over JSON-RPC on stdio."""
+    """Drive the real `copper-pilot acp` process over JSON-RPC on stdio.
+
+    The subprocess runs the shipped ENABLE_MODEL_SELECTOR value, so the model
+    option is only expected while the selector is on.
+    """
     home = tmp_path / "home"
     env = {**os.environ, "COPPER_PILOT_CLI_HOME": str(home)}
     (home / ".state").mkdir(parents=True)
@@ -1316,22 +1326,29 @@ async def test_stdio_server_round_trip(tmp_path) -> None:
         created = await rpc(2, "session/new", {"cwd": str(tmp_path), "mcpServers": []})
         session_id = created["result"]["sessionId"]
         assert created["result"]["modes"]["currentModeId"] == "agent"
-        assert [option["id"] for option in created["result"]["configOptions"]] == [
-            "mode",
-            "effort",
-            "model",
-        ]
-        model_option = created["result"]["configOptions"][2]
-        assert model_option["category"] == "model"
-        assert model_option["currentValue"] == BALANCED_MODEL
         picked = await rpc(
             6,
             "session/set_config_option",
             {"sessionId": session_id, "configId": "model", "value": "claude-sonnet-5-5"},
         )
-        by_id = {option["id"]: option for option in picked["result"]["configOptions"]}
-        assert by_id["effort"]["currentValue"] == "intelligence"
-        assert by_id["model"]["currentValue"] == "claude-sonnet-5-5"
+        if copper_models.ENABLE_MODEL_SELECTOR:
+            assert [option["id"] for option in created["result"]["configOptions"]] == [
+                "mode",
+                "effort",
+                "model",
+            ]
+            model_option = created["result"]["configOptions"][2]
+            assert model_option["category"] == "model"
+            assert model_option["currentValue"] == BALANCED_MODEL
+            by_id = {option["id"]: option for option in picked["result"]["configOptions"]}
+            assert by_id["effort"]["currentValue"] == "intelligence"
+            assert by_id["model"]["currentValue"] == "claude-sonnet-5-5"
+        else:
+            assert [option["id"] for option in created["result"]["configOptions"]] == [
+                "mode",
+                "effort",
+            ]
+            assert picked["error"]["code"] == -32602
         mode = await rpc(3, "session/set_mode", {"sessionId": session_id, "modeId": "ask"})
         assert "error" not in mode
         bad = await rpc(4, "session/new", {"cwd": str(tmp_path / "missing"), "mcpServers": []})
@@ -1390,6 +1407,7 @@ def test_effort_command_parsing() -> None:
     assert first_text_block([]) == ""
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_available_commands_advertise_effort_model_and_usage() -> None:
     effort, model, usage = available_commands()
     assert effort.name == EFFORT_COMMAND
@@ -1659,6 +1677,7 @@ async def test_prompt_renders_subagents_as_tool_calls(tmp_path, monkeypatch) -> 
 # ------------------------------------------------------------ slash commands
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
     text = TextContentBlock(type="text", text="/effort intelligence")
@@ -1712,6 +1731,7 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert runtime.values["copper_effort"] == "intelligence"
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 async def test_model_command_runs_locally(tmp_path, monkeypatch) -> None:
     agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
     session = agent.sessions[session_id]
@@ -1756,6 +1776,7 @@ async def test_model_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert runtime.values["copper_model"] == "gpt-6-astra"
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 async def test_model_fallback_event_is_shown_in_the_transcript(tmp_path, monkeypatch) -> None:
     fallback = {
         "kind": "model_fallback",
@@ -2054,3 +2075,60 @@ async def test_prompt_renders_overlapping_batch_tool_calls(tmp_path, monkeypatch
         "failed",
         "completed",
     ]
+
+
+def test_config_options_hide_the_model_while_the_selector_is_off() -> None:
+    options = config_options(CopperMode.ASK, CopperEffort.INTELLIGENCE, "claude-opus-5-5")
+    assert [option.id for option in options] == [MODE_CONFIG_ID, EFFORT_CONFIG_ID]
+    effort = options[1]
+    assert [(item.name, item.description) for item in effort.options] == [
+        ("Balanced", "Default effort."),
+        ("Intelligence", "Deep survey; requires a paid plan."),
+    ]
+
+
+def test_available_commands_omit_model_while_the_selector_is_off() -> None:
+    assert [command.name for command in available_commands()] == [EFFORT_COMMAND, USAGE_COMMAND]
+
+
+async def test_model_config_option_is_rejected_while_the_selector_is_off(
+    tmp_path, monkeypatch
+) -> None:
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    with pytest.raises(RequestError):
+        await agent.set_config_option(
+            config_id=MODEL_CONFIG_ID, session_id=session_id, value="claude-opus-5-5"
+        )
+    assert agent.sessions[session_id].effort is CopperEffort.BALANCED
+
+
+async def test_effort_command_names_no_model_while_the_selector_is_off(
+    tmp_path, monkeypatch
+) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    text = TextContentBlock(type="text", text="/effort intelligence")
+    await agent.prompt(session_id=session_id, prompt=[text])
+    options = {option.id: option for option in conn.updates[1][1].config_options}
+    assert set(options) == {MODE_CONFIG_ID, EFFORT_CONFIG_ID}
+    assert conn.updates[2][1].content.text == "Effort set to Intelligence."
+
+
+async def test_model_fallback_notice_names_no_model_while_the_selector_is_off(
+    tmp_path, monkeypatch
+) -> None:
+    fallback = {
+        "kind": "model_fallback",
+        "from_model": "gemini-4-argon",
+        "to_model": "gemini-3.8-flash",
+        "message": "Google Gemini 4 Argon is unavailable right now.",
+    }
+    runtime = FakeRuntime(
+        [
+            {"type": "copper.status_event", "data": fallback},
+            {"type": "copper.text", "data": "Yes"},
+            {"type": "copper.final", "data": {"success": True}},
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Hi")])
+    assert conn.updates[1][1].content.text == f"\n\n*{MODEL_FALLBACK_GENERIC_NOTICE}*\n\n"

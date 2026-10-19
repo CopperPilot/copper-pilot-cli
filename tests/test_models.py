@@ -109,6 +109,7 @@ def test_describe_lists_vendor_price_and_role() -> None:
     assert catalog.describe(flash) == "Google · $1.5 in / $7.5 out per Mtok · Balanced model"
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_request_model_is_sent_only_for_intelligence() -> None:
     assert request_model("balanced", "claude-opus-5-5") is None
     assert request_model("intelligence", " Claude-Opus-5-5 ") == "claude-opus-5-5"
@@ -208,6 +209,7 @@ async def test_load_catalog_caches_success_and_retries_failure(monkeypatch) -> N
     assert cached_chat_model_catalog() is first
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_model_fallback_event_and_notice() -> None:
     event = {
         "kind": "model_fallback",
@@ -231,3 +233,27 @@ def test_model_fallback_event_and_notice() -> None:
         "Astra is unavailable right now. Switched this chat to Argon."
     )
     json.dumps(event)
+
+
+def test_model_selector_ships_off() -> None:
+    assert copper_models.ENABLE_MODEL_SELECTOR is False
+    assert copper_models.model_selector_enabled() is False
+
+
+def test_request_model_pins_the_default_while_the_selector_is_off() -> None:
+    assert request_model("balanced", "claude-opus-5-5") is None
+    assert request_model("intelligence", "claude-opus-5-5") == DEFAULT_INTELLIGENCE_MODEL
+    assert request_model("intelligence", None) == DEFAULT_INTELLIGENCE_MODEL
+    assert DEFAULT_INTELLIGENCE_MODEL == "gemini-4-argon"
+
+
+def test_model_fallback_notice_names_no_model_while_the_selector_is_off() -> None:
+    event = {
+        "kind": "model_fallback",
+        "from_model": "gemini-4-argon",
+        "to_model": "gemini-3.8-flash",
+        "message": "Google Gemini 4 Argon is unavailable right now.",
+    }
+    notice = model_fallback_notice(event)
+    assert notice == copper_models.MODEL_FALLBACK_GENERIC_NOTICE
+    assert "Gemini" not in notice

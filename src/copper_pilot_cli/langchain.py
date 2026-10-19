@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.runnables import Runnable, RunnableConfig
 
 from copper_pilot_cli.copper_auth import DeviceCredential, load_credential
+from copper_pilot_cli.copper_models import request_model
 from copper_pilot_cli.copper_protocol import (
     ChatMessage,
     ChatRequest,
@@ -127,7 +128,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             conversation_id=self.conversation_id,
             mode=self.mode,
             effort=self.effort,
-            model=self.model,
+            model=request_model(self.effort, self.model),
             agentic_mode=self.mode is CopperMode.AGENT or self.plan_context is not None,
             workflow=self.workflow,
             skill_manifest_id=self.skill_manifest_id,

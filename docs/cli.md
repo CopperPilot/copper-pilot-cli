@@ -182,6 +182,13 @@ before creating or revising a plan. Workers are server-owned, survey-only, and
 appear in the TUI through the existing Deep Agents task rows; they do not open
 nested chats or execute through the local tool broker.
 
+> **Model selection is currently off.** `ENABLE_MODEL_SELECTOR` in
+> `src/copper_pilot_cli/copper_models.py` is `False`: every Intelligence turn
+> runs on Gemini 4 Argon, no surface names a model, and `--model`, `/model`,
+> the MCP `models` tool and `model` argument, and the ACP `model` config option
+> are not offered. A fallback notice reads "Switched this chat to a backup
+> model." The rest of this section describes the behaviour when it is `True`.
+
 Balanced always runs on the server's Balanced model (Google Gemini 3.8 Flash);
 there is no model choice on a free account. Intelligence runs on one model
 from the catalog, Gemini 4 Argon by default (the server's catalog order and

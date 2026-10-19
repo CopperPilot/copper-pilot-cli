@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.runnables import Runnable
 
@@ -34,12 +35,22 @@ def agent(tmp_path) -> CopperPilotAgent:
     return result
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 def test_agent_forwards_model_to_the_request(tmp_path) -> None:
     runnable = agent(tmp_path)
     runnable.effort = CopperEffort.INTELLIGENCE
     runnable.model = "GPT-6-Astra"
     request = runnable._request([HumanMessage(content="Review")])
     assert request.model == "gpt-6-astra"
+    runnable.effort = CopperEffort.BALANCED
+    assert runnable._request([HumanMessage(content="Review")]).model is None
+
+
+def test_agent_pins_the_default_model_while_the_selector_is_off(tmp_path) -> None:
+    runnable = agent(tmp_path)
+    runnable.effort = CopperEffort.INTELLIGENCE
+    runnable.model = "claude-opus-5-5"
+    assert runnable._request([HumanMessage(content="Review")]).model == "gemini-4-argon"
     runnable.effort = CopperEffort.BALANCED
     assert runnable._request([HumanMessage(content="Review")]).model is None
 

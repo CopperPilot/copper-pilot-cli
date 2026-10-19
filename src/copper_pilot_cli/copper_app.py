@@ -45,6 +45,7 @@ from copper_pilot_cli.copper_models import (
     cached_chat_model_catalog,
     is_model_fallback_event,
     model_fallback_notice,
+    model_selector_enabled,
     normalize_model_id,
 )
 from copper_pilot_cli.copper_preferences import (
@@ -395,7 +396,6 @@ class CopperPilotApp(App[None]):
             "help",
             "hooks",
             "effort",
-            "model",
             "mode",
             "resume",
             "threads",
@@ -412,6 +412,8 @@ class CopperPilotApp(App[None]):
             "quit",
             "exit",
         }
+        if model_selector_enabled():
+            command_names.add("model")
         entries = [
             CompletionEntry(
                 name=f"/{name}",
@@ -871,8 +873,9 @@ class CopperPilotApp(App[None]):
         elif command == "/help":
             await self._mount(
                 AssistantMessage(
-                    "Commands: `/mode`, `/effort`, `/model`, `/resume`, `/approval`, `/context`, "
-                    "`/copy`, "
+                    "Commands: `/mode`, `/effort`, "
+                    + ("`/model`, " if model_selector_enabled() else "")
+                    + "`/resume`, `/approval`, `/context`, `/copy`, "
                     "`/cwd`, `/build`, `/hooks`, `/auth`, `/tools`, `/tokens [json]`, "
                     "`/theme`, `/update`, `/version`, `/feedback`, `/clear`, `/quit`"
                 )
@@ -895,7 +898,11 @@ class CopperPilotApp(App[None]):
                             f"- Thread: `{self.thread_id}`",
                             f"- CopperPilot mode: `{self.copper_mode.value}`",
                             f"- Effort: `{self.copper_effort.value}`",
-                            f"- Model: `{self._effective_model()}`",
+                            *(
+                                [f"- Model: `{self._effective_model()}`"]
+                                if model_selector_enabled()
+                                else []
+                            ),
                             f"- Approval: `{self.broker.mode.value}`",
                             f"- Schematic: `{context.schematic_path or 'none'}`",
                             f"- PCB: `{context.pcb_path or 'none'}`",
@@ -955,7 +962,7 @@ class CopperPilotApp(App[None]):
                 self.copper_effort = CopperEffort(choice)
                 self.runtime.agent.effort = self.copper_effort
                 self._update_status()
-        elif command == "/model":
+        elif command == "/model" and model_selector_enabled():
             await self._choose_model(argument.strip())
         elif command == "/build":
             if not argument:

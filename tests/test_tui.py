@@ -366,6 +366,7 @@ async def test_effort_command_is_thread_state_and_updates_agent(tmp_path) -> Non
         assert app.query_one(TextArea).has_focus
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_model_command_picks_a_model_and_selects_intelligence(tmp_path) -> None:
     app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
@@ -402,6 +403,7 @@ async def test_model_command_picks_a_model_and_selects_intelligence(tmp_path) ->
         assert "Unknown model 'turbo'" in str(list(app.query(ErrorMessage))[-1].render())
 
 
+@pytest.mark.usefixtures("model_selector_enabled")
 @pytest.mark.asyncio
 async def test_model_fallback_event_posts_a_notice(tmp_path) -> None:
     app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
@@ -418,6 +420,40 @@ async def test_model_fallback_event_posts_a_notice(tmp_path) -> None:
             }
         )
         assert "Switched to Argon" in list(app.query(AssistantMessage))[-1].content
+
+
+@pytest.mark.asyncio
+async def test_model_command_and_names_are_hidden_while_the_selector_is_off(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        area = app.query_one(TextArea)
+        area.text = "/model claude-opus-5-5"
+        area.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, ChoiceScreen)
+        assert app.copper_model is None
+        assert app.copper_effort is CopperEffort.BALANCED
+        assert "Unknown command" in str(list(app.query(ErrorMessage))[-1].render())
+        area = app.query_one(TextArea)
+        area.text = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "/model" not in list(app.query(AssistantMessage))[-1].content
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {
+                    "kind": "model_fallback",
+                    "from_model": "gemini-4-argon",
+                    "to_model": "gemini-3.8-flash",
+                    "message": "Google Gemini 4 Argon is unavailable right now.",
+                },
+            }
+        )
+        notice = list(app.query(AssistantMessage))[-1].content
+        assert "Gemini" not in notice
+        assert "backup model" in notice
 
 
 @pytest.mark.asyncio

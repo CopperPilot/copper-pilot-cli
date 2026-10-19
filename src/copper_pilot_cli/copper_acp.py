@@ -87,6 +87,7 @@ from copper_pilot_cli.copper_models import (
     is_model_fallback_event,
     load_chat_model_catalog,
     model_fallback_notice,
+    model_selector_enabled,
     normalize_model_id,
 )
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
@@ -182,6 +183,11 @@ _EFFORT_LABELS: dict[CopperEffort, tuple[str, str]] = {
         "Deep survey on the selected model; requires a paid plan.",
     ),
 }
+# Effort copy that names no model, used while the model selector is off.
+_EFFORT_LABELS_WITHOUT_MODELS: dict[CopperEffort, tuple[str, str]] = {
+    CopperEffort.BALANCED: ("Balanced", "Default effort."),
+    CopperEffort.INTELLIGENCE: ("Intelligence", "Deep survey; requires a paid plan."),
+}
 _TOOL_KINDS: dict[str, str] = {
     "read_file": "read",
     "read_binary_file": "read",
@@ -254,10 +260,13 @@ def config_options(
     The ``model`` option uses the ``model`` category, so clients such as T3
     Code feed it to their own model picker. Its current value is always the
     model the next turn will run on: the Balanced model while effort is
-    Balanced, otherwise the selected Intelligence model.
+    Balanced, otherwise the selected Intelligence model. While the model
+    selector is off only mode and effort are exposed.
     """
     source = catalog or cached_chat_model_catalog()
-    return [
+    show_models = model_selector_enabled()
+    effort_labels = _EFFORT_LABELS if show_models else _EFFORT_LABELS_WITHOUT_MODELS
+    options = [
         SessionConfigOptionSelect(
             id=MODE_CONFIG_ID,
             name="Mode",
@@ -279,9 +288,13 @@ def config_options(
             current_value=effort.value,
             options=[
                 SessionConfigSelectOption(value=item.value, name=name, description=description)
-                for item, (name, description) in _EFFORT_LABELS.items()
+                for item, (name, description) in effort_labels.items()
             ],
         ),
+    ]
+    if not show_models:
+        return options
+    options.append(
         SessionConfigOptionSelect(
             id=MODEL_CONFIG_ID,
             name="Model",
@@ -295,8 +308,9 @@ def config_options(
                 )
                 for item in source.models
             ],
-        ),
-    ]
+        )
+    )
+    return options
 
 
 def tool_kind(tool_name: str) -> Any:
@@ -444,25 +458,31 @@ def _tool_result_payload(result: Any) -> tuple[str, bool, Any]:
 
 def available_commands() -> list[AvailableCommand]:
     """Slash commands the server answers locally, without a hosted turn."""
-    return [
+    commands = [
         AvailableCommand(
             name=EFFORT_COMMAND,
             description="Set hosted effort: balanced (default) or intelligence (paid plan).",
             input=UnstructuredCommandInput(hint="balanced | intelligence"),
         ),
-        AvailableCommand(
-            name=MODEL_COMMAND,
-            description=(
-                "Pick the Intelligence model by id (selects Intelligence); "
-                "`/model` alone lists the ids."
-            ),
-            input=UnstructuredCommandInput(hint="model id"),
-        ),
+    ]
+    if model_selector_enabled():
+        commands.append(
+            AvailableCommand(
+                name=MODEL_COMMAND,
+                description=(
+                    "Pick the Intelligence model by id (selects Intelligence); "
+                    "`/model` alone lists the ids."
+                ),
+                input=UnstructuredCommandInput(hint="model id"),
+            )
+        )
+    commands.append(
         AvailableCommand(
             name=USAGE_COMMAND,
             description="Show the CopperPilot usage window, weekly balance, and reset times.",
-        ),
-    ]
+        )
+    )
+    return commands
 
 
 def user_request_text(message: str) -> str:
@@ -771,7 +791,8 @@ class CopperAcpAgent:
         del additional_directories, mcp_servers, kwargs
         workspace = self._workspace(cwd)
         credential = self._require_credential()
-        await load_chat_model_catalog(credential)
+        if model_selector_enabled():
+            await load_chat_model_catalog(credential)
         session = self._register(generate_thread_id(), workspace)
         return NewSessionResponse(
             session_id=session.session_id,
@@ -790,7 +811,8 @@ class CopperAcpAgent:
         del mcp_servers, additional_directories, kwargs
         workspace = self._workspace(cwd)
         credential = self._require_credential()
-        await load_chat_model_catalog(credential)
+        if model_selector_enabled():
+            await load_chat_model_catalog(credential)
         agent = CopperPilotAgent(workspace, credential=credential, conversation_id=session_id)
         async with create_copper_graph(agent) as runtime:
             state = await runtime.aget_state(runtime.config(session_id, workspace))
@@ -828,7 +850,7 @@ class CopperAcpAgent:
             session.mode = _parse_mode(str(value))
         elif config_id == EFFORT_CONFIG_ID:
             session.effort = _parse_effort(str(value))
-        elif config_id == MODEL_CONFIG_ID:
+        elif config_id == MODEL_CONFIG_ID and model_selector_enabled():
             self._set_model(session, str(value))
         else:
             raise RequestError.invalid_params({"details": f"Unknown config option {config_id!r}."})
@@ -868,7 +890,7 @@ class CopperAcpAgent:
             await self._apply_effort_command(session, argument)
             return PromptResponse(stop_reason="end_turn")
         is_command, argument = model_command(first_block)
-        if is_command:
+        if is_command and model_selector_enabled():
             await self._apply_model_command(session, argument)
             return PromptResponse(stop_reason="end_turn")
         if usage_command(first_block):
@@ -1035,6 +1057,13 @@ class CopperAcpAgent:
         effective = catalog.effective_model(session.effort, session.model)
         return f"{catalog.label(effective)} (`{effective}`)"
 
+    def _effort_summary(self, session: AcpSession) -> str:
+        """Effort label, plus the model while the model selector is on."""
+        label = _EFFORT_LABELS[session.effort][0]
+        if not model_selector_enabled():
+            return label
+        return f"{label}; model {self._model_summary(session)}"
+
     async def _publish_config(self, session: AcpSession) -> None:
         await self.conn.session_update(
             session_id=session.session_id,
@@ -1048,9 +1077,8 @@ class CopperAcpAgent:
         """Answer ``/effort [balanced|intelligence]`` without a hosted turn."""
         session_id = session.session_id
         if argument is None:
-            label = _EFFORT_LABELS[session.effort][0]
             text = (
-                f"Effort is {label}; model {self._model_summary(session)}. "
+                f"Effort is {self._effort_summary(session)}. "
                 "Use `/effort balanced` or `/effort intelligence`."
             )
         else:
@@ -1060,10 +1088,7 @@ class CopperAcpAgent:
                 text = f"Unknown effort {argument!r}; use `balanced` or `intelligence`."
             else:
                 await self._publish_config(session)
-                text = (
-                    f"Effort set to {_EFFORT_LABELS[session.effort][0]}; "
-                    f"model {self._model_summary(session)}."
-                )
+                text = f"Effort set to {self._effort_summary(session)}."
         await self.conn.session_update(
             session_id=session_id, update=update_agent_message_text(text)
         )
