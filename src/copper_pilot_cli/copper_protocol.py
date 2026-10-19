@@ -8,7 +8,8 @@ import json
 import logging
 import re
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -21,6 +22,11 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.tool_batch import (
+    PARALLEL_TOOL_REQUESTS_CAPABILITY,
+    parallel_tools_enabled,
+    run_tool_batch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +289,9 @@ class ChatResponse(BaseModel):
     reasoning_update: str | None = None
     reasoning_title: str | None = None
     tool_request: ToolRequest | None = None
+    # A batch of independent requests from one model step; only sent to
+    # clients that advertised ``parallel_tool_requests`` in chat_start.
+    tool_requests: list[ToolRequest] | None = None
     usage: dict[str, Any] | None = None
     success: bool | None = None
     error: str | None = None
@@ -381,11 +390,13 @@ def make_chat_start(request: ChatRequest) -> dict[str, Any]:
                 )
             }
         )
-        frame = {
+        frame: dict[str, Any] = {
             "type": "chat_start",
             "protocol_version": 1,
             "request": payload.model_dump(mode="json", exclude_none=True),
         }
+        if parallel_tools_enabled():
+            frame["capabilities"] = [PARALLEL_TOOL_REQUESTS_CAPABILITY]
         last_size = len(json.dumps(frame, separators=(",", ":")).encode())
         if last_size <= frame_limit:
             return frame
@@ -446,6 +457,28 @@ def error_message(value: Any) -> str:
 ToolHandler = Callable[[ToolRequest], Awaitable[Any]]
 
 
+def tool_error_result(exc: BaseException) -> dict[str, Any]:
+    """The tool_result payload reported when a local tool raises."""
+    return {
+        "error": f"{type(exc).__name__}: {exc}",
+        "rejected": type(exc).__name__ == "ToolRejected",
+    }
+
+
+def tool_result_frame(conversation_id: str, tool_call_id: str, result: Any) -> dict[str, Any]:
+    """Build one tool_result frame, replacing results over the frame limit."""
+    frame = {
+        "type": "tool_result",
+        "conversation_id": conversation_id,
+        "tool_call_id": tool_call_id,
+        "result": result,
+    }
+    encoded = json.dumps(frame, separators=(",", ":")).encode()
+    if len(encoded) > MAX_TOOL_RESULT_BYTES:
+        frame["result"] = {"error": "Tool result exceeded the client frame limit."}
+    return frame
+
+
 class HostedChatClient:
     """One hosted CopperPilot chat stream."""
 
@@ -475,9 +508,12 @@ class HostedChatClient:
         for attempt in range(2):
             observed = False
             try:
-                async for event in self._stream_once(request, tool_handler):
-                    observed = True
-                    yield event
+                # Close the attempt deterministically so a batch's running tools
+                # are cancelled as soon as the consumer stops listening.
+                async with aclosing(self._stream_once(request, tool_handler)) as events:
+                    async for event in events:
+                        observed = True
+                        yield event
                 return
             except (
                 OSError,
@@ -505,7 +541,7 @@ class HostedChatClient:
         self,
         request: ChatRequest,
         tool_handler: ToolHandler,
-    ) -> AsyncIterator[CopperEvent]:
+    ) -> AsyncGenerator[CopperEvent, None]:
         """Stream normalized events and fulfill local tool requests."""
         if self._socket is not None:
             raise ProtocolError("A chat stream is already active.")
@@ -639,21 +675,10 @@ class HostedChatClient:
                         try:
                             result = await tool_handler(response.tool_request)
                         except Exception as exc:
-                            result = {
-                                "error": f"{type(exc).__name__}: {exc}",
-                                "rejected": type(exc).__name__ == "ToolRejected",
-                            }
-                        result_frame = {
-                            "type": "tool_result",
-                            "conversation_id": request.conversation_id,
-                            "tool_call_id": response.tool_request.tool_call_id,
-                            "result": result,
-                        }
-                        encoded = json.dumps(result_frame, separators=(",", ":")).encode()
-                        if len(encoded) > MAX_TOOL_RESULT_BYTES:
-                            result_frame["result"] = {
-                                "error": "Tool result exceeded the client frame limit."
-                            }
+                            result = tool_error_result(exc)
+                        result_frame = tool_result_frame(
+                            request.conversation_id, response.tool_request.tool_call_id, result
+                        )
                         if self._owner != request.conversation_id:
                             raise ProtocolError("Chat socket owner changed during tool execution.")
                         try:
@@ -672,6 +697,48 @@ class HostedChatClient:
                             },
                             **metadata,
                         )
+                    if response.tool_requests:
+                        for tool_request in response.tool_requests:
+                            yield CopperEvent(EventKind.TOOL_REQUEST, tool_request, **metadata)
+                        batch = run_tool_batch(
+                            response.tool_requests,
+                            tool_handler,
+                            workspace=request.workspace_path,
+                        )
+                        try:
+                            async for tool_request, outcome in batch:
+                                result = (
+                                    tool_error_result(outcome)
+                                    if isinstance(outcome, BaseException)
+                                    else outcome
+                                )
+                                result_frame = tool_result_frame(
+                                    request.conversation_id, tool_request.tool_call_id, result
+                                )
+                                if self._owner != request.conversation_id:
+                                    raise ProtocolError(
+                                        "Chat socket owner changed during tool execution."
+                                    )
+                                try:
+                                    await socket.send(
+                                        json.dumps(result_frame, separators=(",", ":"))
+                                    )
+                                except ConnectionClosed as exc:
+                                    closed = exc
+                                    break
+                                yield CopperEvent(
+                                    EventKind.TOOL_RESULT,
+                                    {
+                                        "tool_call_id": tool_request.tool_call_id,
+                                        "tool_name": tool_request.tool_name,
+                                        "result": result_frame["result"],
+                                    },
+                                    **metadata,
+                                )
+                        finally:
+                            await batch.aclose()
+                        if closed is not None:
+                            break
                     if frame_type == "final" or response.is_final:
                         saw_final = True
                         yield CopperEvent(
