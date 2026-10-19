@@ -15,6 +15,7 @@ from copper_pilot_cli.sessions import list_threads
 class FakeAgent:
     mode: CopperMode = CopperMode.AGENT
     effort: CopperEffort = CopperEffort.BALANCED
+    model: str | None = None
 
     async def astream_events_raw(self, _input):
         yield CopperEvent(EventKind.REASONING, "Checking the rails")
@@ -42,6 +43,7 @@ async def test_graph_checkpoints_langchain_messages_and_copper_events(
                     "messages": [HumanMessage(content="Review it")],
                     "copper_mode": "ask",
                     "copper_effort": "intelligence",
+                    "copper_model": "GPT-6.1-Sol",
                 },
                 config,
             )
@@ -51,11 +53,28 @@ async def test_graph_checkpoints_langchain_messages_and_copper_events(
         assert state.values["messages"][-1].content == "Board looks good."
         assert state.values["copper_mode"] == "ask"
         assert state.values["copper_effort"] == "intelligence"
+        assert state.values["copper_model"] == "gpt-6.1-sol"
+        assert runtime.agent.model == "gpt-6.1-sol"
         assert any(item[1] == "custom" for item in streamed)
+        # A follow-up turn without a model keeps the thread's stored choice.
+        async for _ in runtime.astream(
+            {"messages": [HumanMessage(content="And the PCB?")]}, config
+        ):
+            pass
+        state = await runtime.aget_state(config)
+        assert state.values["copper_model"] == "gpt-6.1-sol"
+        # An explicit empty model clears it.
+        async for _ in runtime.astream(
+            {"messages": [HumanMessage(content="Again")], "copper_model": ""}, config
+        ):
+            pass
+        state = await runtime.aget_state(config)
+        assert state.values["copper_model"] == ""
+        assert runtime.agent.model is None
 
     rows = await list_threads(cwd=str(workspace), include_message_count=True)
     assert rows[0]["thread_id"] == "thread-1"
-    assert rows[0]["message_count"] == 2
+    assert rows[0]["message_count"] == 6
 
 
 @pytest.mark.asyncio

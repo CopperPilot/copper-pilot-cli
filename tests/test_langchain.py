@@ -34,6 +34,16 @@ def agent(tmp_path) -> CopperPilotAgent:
     return result
 
 
+def test_agent_forwards_model_to_the_request(tmp_path) -> None:
+    runnable = agent(tmp_path)
+    runnable.effort = CopperEffort.INTELLIGENCE
+    runnable.model = "GPT-6-Astra"
+    request = runnable._request([HumanMessage(content="Review")])
+    assert request.model == "gpt-6-astra"
+    runnable.effort = CopperEffort.BALANCED
+    assert runnable._request([HumanMessage(content="Review")]).model is None
+
+
 def test_agent_is_a_runnable_and_invokes(tmp_path) -> None:
     runnable = agent(tmp_path)
     assert isinstance(runnable, Runnable)

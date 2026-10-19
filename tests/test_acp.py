@@ -37,6 +37,8 @@ from copper_pilot_cli.copper_acp import (
     EFFORT_CONFIG_ID,
     LOGIN_METHOD_ID,
     MODE_CONFIG_ID,
+    MODEL_COMMAND,
+    MODEL_CONFIG_ID,
     OPTION_ALLOW,
     OPTION_ALLOW_SESSION,
     OPTION_REJECT,
@@ -54,6 +56,7 @@ from copper_pilot_cli.copper_acp import (
     image_suffix,
     is_plan_artifact,
     mode_state,
+    model_command,
     plan_entries_from_todo_list,
     prompt_images,
     prompt_text,
@@ -70,6 +73,11 @@ from copper_pilot_cli.copper_acp import (
     with_attachment_paths,
 )
 from copper_pilot_cli.copper_auth import DeviceCredential, save_credential
+from copper_pilot_cli.copper_models import (
+    BALANCED_MODEL,
+    DEFAULT_INTELLIGENCE_MODEL,
+    FALLBACK_CATALOG,
+)
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ProtocolError
 from copper_pilot_cli.copper_status_events import SubagentStatus
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, ToolRejected
@@ -129,6 +137,7 @@ class FakeAgent:
         conversation_id,
         mode=None,
         effort=None,
+        model=None,
         runtime_context=None,
         tool_broker=None,
     ):
@@ -137,6 +146,7 @@ class FakeAgent:
         self.conversation_id = conversation_id
         self.mode = mode
         self.effort = effort
+        self.model = model
         self.runtime_context = runtime_context
         self.tool_broker = tool_broker
         type(self).last = self
@@ -225,9 +235,13 @@ def _patch(
     async def fake_graph(_agent):
         yield fake_runtime
 
+    async def fake_catalog(_credential, *, force=False):
+        return FALLBACK_CATALOG
+
     monkeypatch.setattr(copper_acp, "load_credential", lambda: credential)
     monkeypatch.setattr(copper_acp, "CopperPilotAgent", FakeAgent)
     monkeypatch.setattr(copper_acp, "create_copper_graph", fake_graph)
+    monkeypatch.setattr(copper_acp, "load_chat_model_catalog", fake_catalog)
     return fake_runtime
 
 
@@ -262,13 +276,31 @@ def test_mode_state_lists_all_modes() -> None:
     assert [mode.id for mode in state.available_modes] == ["ask", "plan", "agent"]
 
 
-def test_config_options_expose_mode_and_effort() -> None:
+def test_config_options_expose_mode_effort_and_model() -> None:
     options = config_options(CopperMode.ASK, CopperEffort.INTELLIGENCE)
+    assert [option.id for option in options] == [MODE_CONFIG_ID, EFFORT_CONFIG_ID, MODEL_CONFIG_ID]
     by_id = {option.id: option for option in options}
     assert by_id[MODE_CONFIG_ID].current_value == "ask"
     assert by_id[MODE_CONFIG_ID].category == "mode"
     assert by_id[EFFORT_CONFIG_ID].current_value == "intelligence"
+    assert by_id[EFFORT_CONFIG_ID].category == "thought_level"
     assert [item.value for item in by_id[EFFORT_CONFIG_ID].options] == ["balanced", "intelligence"]
+    model = by_id[MODEL_CONFIG_ID]
+    assert model.category == "model"
+    # Intelligence without an explicit choice runs on the default model.
+    assert model.current_value == DEFAULT_INTELLIGENCE_MODEL
+    assert [item.value for item in model.options] == list(FALLBACK_CATALOG.ids)
+    assert model.options[0].name == "Google Gemini 4 Argon"
+    assert "Intelligence default" in (model.options[0].description or "")
+
+
+def test_model_option_tracks_the_model_that_will_answer() -> None:
+    balanced = config_options(CopperMode.AGENT, CopperEffort.BALANCED, "claude-opus-5-5")
+    assert balanced[2].current_value == BALANCED_MODEL
+    intelligence = config_options(CopperMode.AGENT, CopperEffort.INTELLIGENCE, "gpt-6.1-sol")
+    assert intelligence[2].current_value == "gpt-6.1-sol"
+    unknown = config_options(CopperMode.AGENT, CopperEffort.INTELLIGENCE, "mystery")
+    assert unknown[2].current_value == DEFAULT_INTELLIGENCE_MODEL
 
 
 @pytest.mark.parametrize(
@@ -541,6 +573,50 @@ async def test_set_session_mode_and_config_options(tmp_path, monkeypatch) -> Non
         )
     with pytest.raises(RequestError):
         await agent.set_config_option(config_id="model", session_id=session_id, value="x")
+    with pytest.raises(RequestError):
+        await agent.set_config_option(config_id="temperature", session_id=session_id, value="1")
+
+
+async def test_model_option_selects_intelligence_and_effort_pins_balanced(
+    tmp_path, monkeypatch
+) -> None:
+    agent, _conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    session = agent.sessions[session_id]
+    # Picking a model while Balanced switches to Intelligence, as in the desktop picker.
+    response = await agent.set_config_option(
+        config_id=MODEL_CONFIG_ID, session_id=session_id, value="gpt-6.1-sol"
+    )
+    assert session.model == "gpt-6.1-sol"
+    assert session.effort is CopperEffort.INTELLIGENCE
+    by_id = {option.id: option for option in response.config_options}
+    assert by_id[EFFORT_CONFIG_ID].current_value == "intelligence"
+    assert by_id[MODEL_CONFIG_ID].current_value == "gpt-6.1-sol"
+    # Going back to Balanced keeps the preference but the option shows the Balanced model.
+    response = await agent.set_config_option(
+        config_id=EFFORT_CONFIG_ID, session_id=session_id, value="balanced"
+    )
+    by_id = {option.id: option for option in response.config_options}
+    assert by_id[MODEL_CONFIG_ID].current_value == BALANCED_MODEL
+    assert session.model == "gpt-6.1-sol"
+    # Picking the Balanced model while Balanced does not escalate to a paid turn.
+    await agent.set_config_option(
+        config_id=MODEL_CONFIG_ID, session_id=session_id, value=BALANCED_MODEL
+    )
+    assert session.effort is CopperEffort.BALANCED
+    assert session.model == BALANCED_MODEL
+    # Intelligence again: the remembered model is used.
+    response = await agent.set_config_option(
+        config_id=EFFORT_CONFIG_ID, session_id=session_id, value="intelligence"
+    )
+    assert response.config_options[2].current_value == BALANCED_MODEL
+    await agent.set_config_option(
+        config_id=MODEL_CONFIG_ID, session_id=session_id, value="Claude-Opus-5-5"
+    )
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Go")])
+    assert runtime.values["copper_effort"] == "intelligence"
+    assert runtime.values["copper_model"] == "claude-opus-5-5"
+    assert FakeAgent.last.model == "claude-opus-5-5"
+    assert FakeAgent.last.effort is CopperEffort.INTELLIGENCE
 
 
 async def test_load_session_replays_history_and_restores_options(tmp_path, monkeypatch) -> None:
@@ -549,6 +625,7 @@ async def test_load_session_replays_history_and_restores_options(tmp_path, monke
             "messages": [HumanMessage(content="Hi"), AIMessage(content="Hello")],
             "copper_mode": "plan",
             "copper_effort": "intelligence",
+            "copper_model": "gemini-4-argon",
         }
     )
     _patch(monkeypatch, runtime)
@@ -558,6 +635,8 @@ async def test_load_session_replays_history_and_restores_options(tmp_path, monke
     response = await agent.load_session(cwd=str(tmp_path), session_id="thread-1")
     assert response.modes.current_mode_id == "plan"
     assert response.config_options[1].current_value == "intelligence"
+    assert response.config_options[2].current_value == "gemini-4-argon"
+    assert agent.sessions["thread-1"].model == "gemini-4-argon"
     assert kinds(conn, commands=True) == [
         "user_message_chunk",
         "agent_message_chunk",
@@ -589,6 +668,7 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
         "messages": [HumanMessage(content="Review")],
         "copper_mode": "agent",
         "copper_effort": "balanced",
+        "copper_model": "",
     }
     assert kinds(conn) == [
         "agent_thought_chunk",
@@ -603,7 +683,10 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
     ]
     updates = [update for _sid, update in conn.updates]
     assert updates[0].session_update == "available_commands_update"
-    assert [command.name for command in updates[0].available_commands] == [EFFORT_COMMAND]
+    assert [command.name for command in updates[0].available_commands] == [
+        EFFORT_COMMAND,
+        MODEL_COMMAND,
+    ]
     updates = updates[1:]
     assert updates[4].kind == "read" and updates[4].locations[0].path == "board.kicad_sch"
     assert updates[5].status == "completed"
@@ -965,7 +1048,22 @@ async def test_stdio_server_round_trip(tmp_path) -> None:
         created = await rpc(2, "session/new", {"cwd": str(tmp_path), "mcpServers": []})
         session_id = created["result"]["sessionId"]
         assert created["result"]["modes"]["currentModeId"] == "agent"
-        assert [option["id"] for option in created["result"]["configOptions"]] == ["mode", "effort"]
+        assert [option["id"] for option in created["result"]["configOptions"]] == [
+            "mode",
+            "effort",
+            "model",
+        ]
+        model_option = created["result"]["configOptions"][2]
+        assert model_option["category"] == "model"
+        assert model_option["currentValue"] == BALANCED_MODEL
+        picked = await rpc(
+            6,
+            "session/set_config_option",
+            {"sessionId": session_id, "configId": "model", "value": "claude-sonnet-5-5"},
+        )
+        by_id = {option["id"]: option for option in picked["result"]["configOptions"]}
+        assert by_id["effort"]["currentValue"] == "intelligence"
+        assert by_id["model"]["currentValue"] == "claude-sonnet-5-5"
         mode = await rpc(3, "session/set_mode", {"sessionId": session_id, "modeId": "ask"})
         assert "error" not in mode
         bad = await rpc(4, "session/new", {"cwd": str(tmp_path / "missing"), "mcpServers": []})
@@ -1024,10 +1122,26 @@ def test_effort_command_parsing() -> None:
     assert first_text_block([]) == ""
 
 
-def test_available_commands_advertise_effort() -> None:
-    (command,) = available_commands()
-    assert command.name == EFFORT_COMMAND
-    assert command.input.root.hint == "balanced | intelligence"
+def test_available_commands_advertise_effort_and_model() -> None:
+    effort, model = available_commands()
+    assert effort.name == EFFORT_COMMAND
+    assert effort.input.root.hint == "balanced | intelligence"
+    assert model.name == MODEL_COMMAND
+    assert model.input.root.hint == "model id"
+
+
+def test_model_command_parsing() -> None:
+    assert model_command("/model") == (True, None)
+    assert model_command("  /model gpt-6.1-sol ") == (True, "gpt-6.1-sol")
+    assert model_command("/Model claude-opus-5-5") == (True, "claude-opus-5-5")
+    assert model_command("/model a b") == (False, None)
+    assert model_command("/models") == (False, None)
+    assert model_command("Use /model") == (False, None)
+    wrapped = (
+        "<t3_code_instructions>x</t3_code_instructions>\n"
+        "<user_request>/model gpt-6-astra</user_request>"
+    )
+    assert model_command(wrapped) == (True, "gpt-6-astra")
 
 
 def test_usage_update_maps_prompt_tokens() -> None:
@@ -1289,14 +1403,19 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     ]
     options = {option.id: option for option in conn.updates[1][1].config_options}
     assert options[EFFORT_CONFIG_ID].current_value == "intelligence"
-    assert conn.updates[2][1].content.text == "Effort set to Intelligence."
+    assert options[MODEL_CONFIG_ID].current_value == DEFAULT_INTELLIGENCE_MODEL
+    assert conn.updates[2][1].content.text == (
+        "Effort set to Intelligence; model Google Gemini 4 Argon (`gemini-4-argon`)."
+    )
 
     conn.updates.clear()
     await agent.prompt(
         session_id=session_id, prompt=[TextContentBlock(type="text", text="/effort")]
     )
     assert kinds(conn, commands=True) == ["agent_message_chunk"]
-    assert conn.updates[0][1].content.text.startswith("Effort is Intelligence.")
+    assert conn.updates[0][1].content.text.startswith(
+        "Effort is Intelligence; model Google Gemini 4 Argon (`gemini-4-argon`)."
+    )
 
     conn.updates.clear()
     await agent.prompt(
@@ -1321,6 +1440,81 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert agent.sessions[session_id].effort is CopperEffort.BALANCED
     assert kinds(conn) == ["config_option_update", "agent_message_chunk"]
     assert runtime.values["copper_effort"] == "intelligence"
+
+
+async def test_model_command_runs_locally(tmp_path, monkeypatch) -> None:
+    agent, conn, runtime, session_id = await _connected_agent(tmp_path, monkeypatch)
+    session = agent.sessions[session_id]
+    response = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/model")]
+    )
+    assert response.stop_reason == "end_turn"
+    assert runtime.values is None
+    assert kinds(conn) == ["agent_message_chunk"]
+    listing = conn.updates[-1][1].content.text
+    assert listing.startswith("Model is Google Gemini 3.8 Flash (`gemini-3.8-flash`) on Balanced.")
+    assert "- `gemini-4-argon` — Google Gemini 4 Argon (Intelligence default)" in listing
+    assert session.effort is CopperEffort.BALANCED
+
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id,
+        prompt=[
+            TextContentBlock(type="text", text="/model gpt-6-astra"),
+            TextContentBlock(type="text", text="<runtime_info>T3 Code</runtime_info>"),
+        ],
+    )
+    assert kinds(conn) == ["config_option_update", "agent_message_chunk"]
+    options = {option.id: option for option in conn.updates[0][1].config_options}
+    assert options[MODEL_CONFIG_ID].current_value == "gpt-6-astra"
+    assert options[EFFORT_CONFIG_ID].current_value == "intelligence"
+    assert conn.updates[1][1].content.text == (
+        "Model set to OpenAI GPT-6 Astra (`gpt-6-astra`). Effort set to Intelligence (paid plan)."
+    )
+    assert session.effort is CopperEffort.INTELLIGENCE
+
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/model turbo")]
+    )
+    assert kinds(conn) == ["agent_message_chunk"]
+    assert conn.updates[0][1].content.text.startswith("Unknown model 'turbo'. Known ids:")
+    assert session.model == "gpt-6-astra"
+
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Go")])
+    assert runtime.values["copper_effort"] == "intelligence"
+    assert runtime.values["copper_model"] == "gpt-6-astra"
+
+
+async def test_model_fallback_event_is_shown_in_the_transcript(tmp_path, monkeypatch) -> None:
+    fallback = {
+        "kind": "model_fallback",
+        "from_model": "claude-opus-5-5",
+        "from_label": "Claude Opus 5.5",
+        "to_model": "gemini-4-argon",
+        "to_label": "Google Gemini 4 Argon",
+        "reason": "quota or rate limit exceeded",
+        "message": (
+            "Claude Opus 5.5 is unavailable right now (quota or rate limit exceeded). "
+            "Switched this chat to Google Gemini 4 Argon."
+        ),
+    }
+    runtime = FakeRuntime(
+        [
+            {"type": "copper.status_event", "data": fallback},
+            {"type": "copper.text", "data": "Yes"},
+            {"type": "copper.final", "data": {"success": True, "model": "gemini-4-argon"}},
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.set_config_option(
+        config_id=MODEL_CONFIG_ID, session_id=session_id, value="claude-opus-5-5"
+    )
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Hi")])
+    assert kinds(conn) == ["agent_message_chunk", "agent_message_chunk"]
+    assert conn.updates[1][1].content.text == f"\n\n*{fallback['message']}*\n\n"
+    # The selection is per chat; the server falls back per turn, so it is kept.
+    assert agent.sessions[session_id].model == "claude-opus-5-5"
 
 
 # ---------------------------------------------------------------- elicitation

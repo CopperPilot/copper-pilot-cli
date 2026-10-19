@@ -25,6 +25,13 @@ from copper_pilot_cli.copper_auth import (
     validate_credential,
 )
 from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_models import (
+    BUNDLED_MODELS,
+    is_model_fallback_event,
+    load_chat_model_catalog,
+    model_fallback_notice,
+    normalize_model_id,
+)
 from copper_pilot_cli.copper_preferences import saved_approval_mode, shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind
 from copper_pilot_cli.copper_status_events import (
@@ -111,6 +118,15 @@ def parser() -> argparse.ArgumentParser:
         choices=[item.value for item in CopperEffort],
         default=None,
         help="Hosted chat effort (default: balanced; intelligence requires a paid plan)",
+    )
+    result.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "Intelligence model id; implies --effort intelligence. Known ids: "
+            + ", ".join(model.id for model in BUNDLED_MODELS)
+        ),
     )
     result.add_argument(
         "-y",
@@ -263,6 +279,20 @@ async def _resolve_thread(resume: str | None, workspace: Path) -> str:
     return generate_thread_id()
 
 
+def resolve_effort_and_model(args: argparse.Namespace) -> tuple[CopperEffort | None, str | None]:
+    """Apply the picker rule to flags: choosing a model selects Intelligence.
+
+    Returns ``(effort, model)`` where ``effort`` is None when neither flag was
+    given, so a resumed thread keeps its stored effort.
+    """
+    model = normalize_model_id(args.model) or None
+    if model is None:
+        return (CopperEffort(args.effort) if args.effort else None), None
+    if args.effort == CopperEffort.BALANCED.value:
+        raise ValueError("--model requires Intelligence; drop --effort balanced or the model.")
+    return CopperEffort.INTELLIGENCE, model
+
+
 async def _headless(
     runtime: Any,
     workspace: Path,
@@ -278,8 +308,11 @@ async def _headless(
         "messages": [HumanMessage(content=message)],
         "copper_mode": args.mode,
     }
-    if args.effort is not None:
-        values["copper_effort"] = args.effort
+    effort, model = resolve_effort_and_model(args)
+    if effort is not None:
+        values["copper_effort"] = effort.value
+    if model is not None:
+        values["copper_model"] = model
     async for item in runtime.astream(values, config):
         _namespace, stream_mode, data = item
         if stream_mode != "custom" or not isinstance(data, dict):
@@ -320,6 +353,13 @@ async def _headless(
                 console.print(
                     "\nSwitched to Plan mode",
                     style="dim",
+                    markup=False,
+                    highlight=False,
+                )
+            elif is_model_fallback_event(payload):
+                console.print(
+                    f"\n{model_fallback_notice(payload)}",
+                    style="yellow",
                     markup=False,
                     highlight=False,
                 )
@@ -369,13 +409,15 @@ async def async_main(args: argparse.Namespace) -> int:
         always_allow_dangerous_shell_commands=dangerous_shell,
     )
     thread_id = await _resolve_thread(args.resume, workspace)
-    effort = CopperEffort(args.effort or CopperEffort.BALANCED.value)
+    chosen_effort, model = resolve_effort_and_model(args)
+    effort = chosen_effort or CopperEffort.BALANCED
     agent = CopperPilotAgent(
         workspace,
         credential=credential,
         conversation_id=thread_id,
         mode=CopperMode(args.mode),
         effort=effort,
+        model=model,
         tool_broker=broker,
     )
     if args.non_interactive or (args.message and not sys.stdout.isatty()):
@@ -391,6 +433,8 @@ async def async_main(args: argparse.Namespace) -> int:
             thread_id,
             mode=CopperMode(args.mode),
             effort=effort,
+            model=model,
+            catalog=await load_chat_model_catalog(credential),
             initial_message=args.message,
         )
         await app.run_async()
