@@ -2000,3 +2000,57 @@ async def test_cancel_wins_when_the_socket_closes_first(tmp_path, monkeypatch) -
     response = await task
     assert response.stop_reason == "cancelled"
     assert runtime.cancelled
+
+
+async def test_prompt_renders_overlapping_batch_tool_calls(tmp_path, monkeypatch) -> None:
+    """A parallel batch shows every call in progress, then completes out of order."""
+
+    def request_event(call_id: str) -> dict[str, Any]:
+        return {
+            "type": "copper.tool_request",
+            "data": {
+                "tool_call_id": call_id,
+                "tool_name": "read_file",
+                "arguments": {"file_path": f"{call_id}.kicad_sch"},
+            },
+        }
+
+    def result_event(call_id: str, result: Any) -> dict[str, Any]:
+        return {
+            "type": "copper.tool_result",
+            "data": {"tool_call_id": call_id, "tool_name": "read_file", "result": result},
+        }
+
+    runtime = FakeRuntime(
+        [
+            request_event("a"),
+            request_event("b"),
+            request_event("c"),
+            result_event("c", {"result": "(kicad_sch c)"}),
+            result_event("a", {"error": "missing"}),
+            result_event("b", {"result": "(kicad_sch b)"}),
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    updates = [
+        update
+        for _sid, update in conn.updates
+        if update.session_update in {"tool_call", "tool_call_update"}
+    ]
+    assert [(update.session_update, update.tool_call_id) for update in updates] == [
+        ("tool_call", "a"),
+        ("tool_call", "b"),
+        ("tool_call", "c"),
+        ("tool_call_update", "c"),
+        ("tool_call_update", "a"),
+        ("tool_call_update", "b"),
+    ]
+    assert [update.status for update in updates] == [
+        "in_progress",
+        "in_progress",
+        "in_progress",
+        "completed",
+        "failed",
+        "completed",
+    ]

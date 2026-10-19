@@ -257,19 +257,21 @@ class _TurnRun:
                     self.subagents[status.id] = status
         elif event.kind is EventKind.TOOL_REQUEST:
             tool = event.data
-            self.additions.append(
-                AIMessage(
-                    content="".join(self.text),
-                    tool_calls=[
-                        {
-                            "id": tool.tool_call_id,
-                            "name": tool.tool_name,
-                            "args": tool.arguments,
-                            "type": "tool_call",
-                        }
-                    ],
+            call = {
+                "id": tool.tool_call_id,
+                "name": tool.tool_name,
+                "args": tool.arguments,
+                "type": "tool_call",
+            }
+            previous = self.additions[-1] if self.additions else None
+            if not self.text and isinstance(previous, AIMessage) and previous.tool_calls:
+                # A parallel batch: keep its calls on one assistant message so
+                # every call is followed by its result, whatever the order.
+                self.additions[-1] = AIMessage(
+                    content=previous.content, tool_calls=[*previous.tool_calls, call]
                 )
-            )
+            else:
+                self.additions.append(AIMessage(content="".join(self.text), tool_calls=[call]))
             self.text.clear()
             self.pending_tools[tool.tool_call_id] = tool.tool_name
         elif event.kind is EventKind.TOOL_RESULT:
