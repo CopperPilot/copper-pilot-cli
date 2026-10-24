@@ -611,7 +611,7 @@ class CopperPilotApp(App[None]):
             composer.first().set_busy(False)
         loading.stop()
         if loading.is_mounted:
-            await loading.remove()
+            loading.remove()
 
     async def _close_streams(self) -> None:
         if self._assistant is not None:
