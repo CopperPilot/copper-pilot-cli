@@ -57,6 +57,8 @@ from copper_pilot_cli.copper_preferences import (
     auto_notice_acknowledged,
     save_approval_mode,
     save_shell_auto_allow_settings,
+    save_theme,
+    saved_theme,
     shell_auto_allow_settings,
     yolo_acknowledged,
 )
@@ -257,25 +259,51 @@ class CopperPilotApp(App[None]):
         self.broker.ask_user = self.request_question
 
     def _register_copper_theme(self) -> None:
-        tokens = copper_theme.TOKENS
-        self.register_theme(
-            Theme(
-                name="copper-pilot",
-                primary=tokens["orange-600"].hex,
-                secondary=tokens["orange-500"].hex,
-                accent=tokens["orange-500"].hex,
-                foreground=tokens["text"].hex,
-                background=tokens["bg"].hex,
-                surface=tokens["surface"].hex,
-                panel=tokens["divider"].hex,
-                success=tokens["status-ok"].hex,
-                warning=tokens["status-warn"].hex,
-                error=tokens["status-error"].hex,
-                dark=True,
-                variables=copper_theme.css_variables(),
+        copper_theme.set_active_theme(saved_theme())
+        for name, tokens in copper_theme.PRESETS.items():
+            self.register_theme(
+                Theme(
+                    name=copper_theme.textual_theme_name(name),
+                    primary=tokens["orange-600"].hex,
+                    secondary=tokens["orange-500"].hex,
+                    accent=tokens["orange-500"].hex,
+                    foreground=tokens["text"].hex,
+                    background=tokens["bg"].hex,
+                    surface=tokens["surface"].hex,
+                    panel=tokens["divider"].hex,
+                    success=tokens["status-ok"].hex,
+                    warning=tokens["status-warn"].hex,
+                    error=tokens["status-error"].hex,
+                    dark=copper_theme.is_dark(name),
+                    variables=copper_theme.css_variables(theme=name),
+                )
             )
-        )
-        self.theme = "copper-pilot"
+        self.theme = copper_theme.textual_theme_name()
+
+    def apply_copper_theme(self, name: str) -> None:
+        """Switch preset, save it, and repaint widgets that bake colours into content."""
+        copper_theme.set_active_theme(name)
+        try:
+            save_theme(name)
+        except OSError:
+            self.notify("Theme applied, but it could not be saved.", severity="warning")
+        self.theme = copper_theme.textual_theme_name(name)
+        self.refresh_chrome()
+
+    def refresh_chrome(self) -> None:
+        """Redraw widgets whose colours are computed in Python, not CSS."""
+        for widget in (
+            *self.query(WelcomeBanner),
+            *self.query(StatusBar),
+            *self.query(HelpCard),
+            *self.query(ShortcutsPanel),
+        ):
+            widget._redraw()
+        for composer in self.query(ChatInput):
+            composer._redraw_frame()
+            composer._paint_options()
+        for loading in self.query(LoadingWidget):
+            loading.set_status(loading.status_text)
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return copper_theme.css_variable_defaults()
@@ -1079,17 +1107,42 @@ class CopperPilotApp(App[None]):
                 )
                 await self._mount(AssistantMessage(message))
         elif command == "/theme":
-            await self._mount(
-                AssistantMessage(
-                    "CopperPilot uses the dcode dark theme with copper-colored accents."
-                )
-            )
+            await self._choose_theme(argument.strip().lower())
         elif command == "/version":
             await self._mount(AssistantMessage(f"CopperPilot CLI {__version__}"))
         elif argument:
             await self._mount(ErrorMessage(f"Unknown command: {value}"))
         else:
             await self._mount(ErrorMessage(f"Unknown command: {command}"))
+
+    async def _choose_theme(self, requested: str) -> None:
+        names = copper_theme.theme_names()
+        if requested:
+            if requested not in names:
+                await self._mount(
+                    ErrorMessage(f"Unknown theme: {requested}. Choose one of: {', '.join(names)}")
+                )
+                return
+            choice: str | None = requested
+        else:
+            current = copper_theme.active_theme()
+            choice = await self._wait_for_modal(
+                ChoiceScreen(
+                    "Theme",
+                    [
+                        (
+                            name,
+                            f"{copper_theme.THEME_LABELS[name]}"
+                            f"{' (current)' if name == current else ''}",
+                        )
+                        for name in names
+                    ],
+                )
+            )
+        if not choice:
+            return
+        self.apply_copper_theme(choice)
+        self.notify(f"Theme: {choice}", markup=False)
 
     async def _choose_approval(self) -> None:
         choice = await self._wait_for_modal(

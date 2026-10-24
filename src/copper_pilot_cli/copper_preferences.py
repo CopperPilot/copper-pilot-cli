@@ -75,6 +75,20 @@ def acknowledge_auto_notice() -> None:
     save_preferences(value)
 
 
+def saved_theme() -> str:
+    """The saved ``/theme`` preset, or ``black`` when missing or unknown."""
+    from copper_pilot_cli.copper_theme import DEFAULT_THEME, PRESETS
+
+    value = load_preferences().get("theme")
+    return value if isinstance(value, str) and value in PRESETS else DEFAULT_THEME
+
+
+def save_theme(name: str) -> None:
+    value = load_preferences()
+    value["theme"] = name
+    save_preferences(value)
+
+
 def tips_enabled() -> bool:
     """Tips stay on unless ``config.json`` sets ``tips`` to false."""
     return load_preferences().get("tips") is not False
