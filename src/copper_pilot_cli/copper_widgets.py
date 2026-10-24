@@ -26,7 +26,22 @@ from textual.widget import Widget
 from textual.widgets import Checkbox, Input, Label, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from copper_pilot_cli.copper_chrome import (
+    APPROVAL_OPTIONS,
+    TIPS,
+    approval_heading,
+    approval_hint,
+    help_content,
+    pick_tip_index,
+    rank_slash,
+    rule_content,
+    slash_footer,
+    slash_row_content,
+    tip_content,
+)
 from copper_pilot_cli.copper_config import paths
+from copper_pilot_cli.copper_preferences import last_tip_index, save_last_tip_index, tips_enabled
+from copper_pilot_cli.copper_theme import ascii_mode, color_mode_for_app, glyph
 from copper_pilot_cli.copper_tools import ApprovalRequest, canonical_tool_name
 from copper_pilot_cli.sessions import ThreadInfo, list_threads
 
@@ -74,8 +89,34 @@ class ComposerTextArea(TextArea):
             self.text = ""
             self.post_message(self.Submitted(value))
 
+    def _composer(self) -> ChatInput | None:
+        parent = self.parent
+        while parent is not None:
+            if isinstance(parent, ChatInput):
+                return parent
+            parent = parent.parent
+        return None
+
     async def _on_key(self, event: events.Key) -> None:
-        completion_active = bool(getattr(self.parent, "completion_active", False))
+        composer = self._composer()
+        completion_active = bool(composer and composer.completion_active)
+        if event.key == "question_mark" and not self.text:
+            self.post_message(ChatInput.ToggleShortcuts())
+            event.stop()
+            event.prevent_default()
+            return
+        if event.key == "escape" and not completion_active and self.app.query("#shortcuts-panel"):
+            self.post_message(ChatInput.DismissShortcuts())
+            event.stop()
+            event.prevent_default()
+            return
+        if event.key == "escape" and not completion_active:
+            task = getattr(self.app, "_turn_task", None)
+            if task is not None and not task.done():
+                self.post_message(ChatInput.StopTurn())
+                event.stop()
+                event.prevent_default()
+                return
         if completion_active and event.key in {
             "up",
             "down",
@@ -113,30 +154,75 @@ class ComposerTextArea(TextArea):
 
 
 class ChatInput(Vertical):
-    """Multiline dcode-style composer with slash and `@file` completion."""
+    """Multiline composer. Rules sit above and below the input; a tip sits above those."""
 
     DEFAULT_CSS = """
     ChatInput {
         height: auto;
-        max-height: 16;
-        border: solid $primary;
-        background: $surface;
+        max-height: 22;
+        margin: 0;
+        padding: 0;
+        border: none;
+        background: $bg;
+    }
+    ChatInput .tip-line {
+        height: 1;
+        width: 100%;
+        display: none;
+        background: $bg;
+    }
+    ChatInput.-tips .tip-line {
+        display: block;
+    }
+    ChatInput .input-rule {
+        height: 1;
+        width: 100%;
+        background: $bg;
+    }
+    ChatInput .composer-row {
+        height: auto;
+        width: 100%;
+        padding: 0 1;
+        align: left top;
+    }
+    ChatInput .prompt-caret {
+        width: 2;
+        height: 1;
+        color: $orange-500;
+        text-style: bold;
     }
     ChatInput TextArea {
         height: auto;
-        min-height: 3;
+        min-height: 1;
         max-height: 10;
+        width: 1fr;
         border: none;
+        padding: 0;
         background: transparent;
+    }
+    ChatInput TextArea:focus {
+        border: none;
+    }
+    ChatInput TextArea .text-area--placeholder {
+        color: $muted;
     }
     ChatInput OptionList {
         height: auto;
-        max-height: 7;
+        max-height: 6;
         display: none;
-        border-top: solid $primary;
+        background: $bg;
     }
-    ChatInput.-completing OptionList {
+    ChatInput OptionList > .option-list--option-highlighted {
+        background: $surface;
+    }
+    ChatInput.-completing OptionList,
+    ChatInput.-completing .completion-hint {
         display: block;
+    }
+    ChatInput .completion-hint {
+        display: none;
+        height: 1;
+        color: $muted;
     }
     """
 
@@ -145,6 +231,15 @@ class ChatInput(Vertical):
             super().__init__()
             self.value = value
             self.mode = "normal"
+
+    class ToggleShortcuts(Message):
+        """`?` while the prompt is empty."""
+
+    class DismissShortcuts(Message):
+        """Escape while the shortcuts panel is open."""
+
+    class StopTurn(Message):
+        """Escape while a turn is running."""
 
     def __init__(
         self,
@@ -173,14 +268,112 @@ class ChatInput(Vertical):
         self._selected_index = 0
         self.last_changed_at = 0.0
         self._typing_changed = asyncio.Event()
+        self._tip = ""
+        self._tips_open = False
+        self._tip_index: int | None = None
+        self._tip_saved = False
 
     @property
     def completion_active(self) -> bool:
         return bool(self._matches)
 
     def compose(self) -> ComposeResult:
-        yield ComposerTextArea(self.history, id="chat-input", soft_wrap=True)
+        yield Static("", id="tip-line", classes="tip-line")
+        yield Static("", id="rule-top", classes="input-rule")
+        with Horizontal(classes="composer-row"):
+            yield Static(glyph("agent"), classes="prompt-caret")
+            yield ComposerTextArea(
+                self.history,
+                id="chat-input",
+                soft_wrap=True,
+                placeholder="What are we building today?",
+                highlight_cursor_line=False,
+            )
+        yield Static("", id="rule-bottom", classes="input-rule")
         yield OptionList(id="completions")
+        yield Static(slash_footer(), classes="completion-hint")
+
+    def on_mount(self) -> None:
+        self._sync_icon("agent")
+        if tips_enabled() and TIPS:
+            index = pick_tip_index(last_tip_index(), count=len(TIPS))
+            self._tip = TIPS[index]
+            self._tip_index = index
+            self._tips_open = True
+        self._redraw_frame()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._redraw_frame(event.size.width)
+
+    def hide_tip(self) -> None:
+        """Drop the tip for the rest of this session."""
+        self._tips_open = False
+        if self.is_mounted:
+            self._redraw_frame()
+
+    def set_chrome(self, mode: str, approval: str) -> None:
+        """Set the mode icon for the current chat mode and approval state."""
+        modes = {"agent", "plan", "ask"}
+        approvals = {"manual", "auto", "yolo"}
+        chat_mode = mode if mode in modes else "agent"
+        approval_mode = approval if approval in approvals else "manual"
+        self.remove_class("-mode-agent", "-mode-plan", "-mode-ask")
+        self.remove_class("-approval-manual", "-approval-auto", "-approval-yolo")
+        self.add_class(f"-mode-{chat_mode}", f"-approval-{approval_mode}")
+        self._sync_icon(chat_mode)
+
+    def _sync_icon(self, mode: str) -> None:
+        name = mode if mode in {"plan", "ask", "agent"} else "agent"
+        icon = self.query(".prompt-caret")
+        if icon:
+            icon.first().update(glyph(name))
+
+    def set_busy(self, busy: bool) -> None:
+        self.set_class(busy, "-busy")
+        if self.is_mounted:
+            self._redraw_rules()
+
+    def _redraw_frame(self, width: int | None = None) -> None:
+        if not self.is_mounted or not self.query("#tip-line"):
+            return
+        if width is None:
+            width = self.size.width
+        # Width 0 means layout has not run. Do not assume 80 and consume a tip.
+        if not width:
+            return
+        show = self._tips_open and width >= 60 and bool(self._tip)
+        if show:
+            self._remember_tip()
+        self.set_class(show, "-tips")
+        mode = color_mode_for_app(self.app) if self.app else None
+        self.query_one("#tip-line", Static).update(
+            tip_content(width, self._tip if show else "", mode=mode, ascii=ascii_mode())
+        )
+        self._redraw_rules(width)
+
+    def _redraw_rules(self, width: int | None = None) -> None:
+        if not self.is_mounted or not self.query(".input-rule"):
+            return
+        if width is None:
+            width = self.size.width
+        if not width:
+            return
+        mode = color_mode_for_app(self.app) if self.app else None
+        busy = self.has_class("-busy")
+        use_ascii = ascii_mode()
+        for rule in self.query(".input-rule"):
+            rule_width = rule.size.width or width
+            rule.update(rule_content(rule_width, busy=busy, mode=mode, ascii=use_ascii))
+
+    def _remember_tip(self) -> None:
+        """Store the tip index only once it is actually on screen."""
+        if self._tip_saved or self._tip_index is None:
+            return
+        try:
+            save_last_tip_index(self._tip_index)
+        except OSError:
+            return
+        self._tip_saved = True
 
     def focus(self, scroll_visible: bool = True) -> ChatInput:
         text_area = self.query(TextArea)
@@ -224,30 +417,48 @@ class ChatInput(Vertical):
     def _refresh_completions(self) -> None:
         token = self._current_token()
         if token.startswith("/"):
-            query = token.lower()
             self._completion_kind = "slash"
-            self._matches = [
-                item
-                for item in self.commands
-                if query in item.name.lower() or query in item.description.lower()
-            ][:50]
+            ranked = rank_slash(token, [(item.name, item.description) for item in self.commands])
+            by_name = {item.name: item for item in self.commands}
+            self._matches = [by_name[name] for name, _description in ranked if name in by_name]
         elif token.startswith("@"):
             self._completion_kind = "file"
-            self._matches = self._file_entries(token)
+            self._matches = self._file_entries(token)[:6]
         else:
             self._completion_kind = None
             self._matches = []
         self._selected_index = 0
+        self._paint_options()
+
+    def _paint_options(self) -> None:
         options = self.query_one(OptionList)
+        width = max(24, options.size.width or self.size.width or 60)
+        mode = color_mode_for_app(self.app) if self.app else None
         options.clear_options()
-        options.add_options(
-            Option(
-                literal_text(f"{item.display_name or item.name}  {item.description}"),
-                id=str(index),
-            )
-            for index, item in enumerate(self._matches)
-        )
-        options.highlighted = 0 if self._matches else None
+        prompts = []
+        for index, item in enumerate(self._matches):
+            if self._completion_kind == "slash":
+                prompts.append(
+                    Option(
+                        slash_row_content(
+                            item.name,
+                            item.description,
+                            width,
+                            selected=index == self._selected_index,
+                            mode=mode,
+                        ),
+                        id=str(index),
+                    )
+                )
+            else:
+                prompts.append(
+                    Option(
+                        literal_text(f"{item.display_name or item.name}  {item.description}"),
+                        id=str(index),
+                    )
+                )
+        options.add_options(prompts)
+        options.highlighted = self._selected_index if self._matches else None
         self.set_class(bool(self._matches), "-completing")
 
     @on(TextArea.Changed)
@@ -302,7 +513,7 @@ class ChatInput(Vertical):
         if event.key in {"up", "down"}:
             delta = -1 if event.key == "up" else 1
             self._selected_index = (self._selected_index + delta) % len(self._matches)
-            self.query_one(OptionList).highlighted = self._selected_index
+            self._paint_options()
         elif event.key == "escape":
             self._dismiss_completion()
         elif event.key == "enter":
@@ -349,15 +560,15 @@ class UserMessage(Static):
     DEFAULT_CSS = """
     UserMessage {
         height: auto;
-        padding: 1;
+        padding: 0 1;
         margin-bottom: 1;
-        background: $primary 12%;
-        border-left: wide $primary;
     }
     """
 
     def __init__(self, content: str) -> None:
-        super().__init__(Content(content))
+        super().__init__(
+            Content.assemble((f"{glyph('user')} ", "bold $orange-500"), Content(content))
+        )
 
 
 class AssistantMessage(Vertical):
@@ -675,7 +886,7 @@ class ToolCallMessage(Vertical):
         padding: 0 1 0 0;
         margin-bottom: 1;
         background: transparent;
-        border-left: wide $tool;
+        border-left: tall $tool;
     }
     ToolCallMessage .tool-name {
         color: $tool;
@@ -696,20 +907,16 @@ class ToolCallMessage(Vertical):
         margin-left: 3;
     }
     ToolCallMessage.-status-success {
-        border-left: wide $success;
-        background: $success 8%;
+        border-left: tall $success;
     }
     ToolCallMessage.-status-error {
-        border-left: wide $error;
-        background: $error 10%;
+        border-left: tall $error;
     }
     ToolCallMessage.-status-rejected {
-        border-left: wide $warning;
-        background: $warning 8%;
+        border-left: tall $warning;
     }
     ToolCallMessage.-status-cancelled {
-        border-left: wide $warning;
-        background: $warning 8%;
+        border-left: tall $warning;
     }
     """
 
@@ -984,7 +1191,9 @@ class ApprovalMenu(Container):
         Binding("up", "move_up", "Up", show=False),
         Binding("k", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
+        Binding("right", "move_down", "Right", show=False),
         Binding("j", "move_down", "Down", show=False),
+        Binding("left", "move_up", "Left", show=False),
         Binding("enter", "select", "Select", show=False),
         Binding("1", "select_position(0)", "Approve", show=False),
         Binding("2", "select_position(1)", "Auto", show=False),
@@ -999,17 +1208,23 @@ class ApprovalMenu(Container):
     ApprovalMenu {
         height: auto;
         margin: 1 0;
-        padding: 0 1;
+        padding: 1 1;
         background: $surface;
-        border: solid $warning;
+        border: none;
     }
-    ApprovalMenu .approval-title { height: auto; color: $warning; text-style: bold; }
-    ApprovalMenu .approval-preview { height: auto; max-height: 10; color: $text-muted; }
-    ApprovalMenu .approval-option { height: 1; padding: 0 1; }
-    ApprovalMenu .approval-option-selected { background: $primary; text-style: bold; }
-    ApprovalMenu .approval-help { height: auto; color: $text-muted; text-style: italic; }
+    ApprovalMenu .approval-title { height: auto; color: $heading; text-style: bold; }
+    ApprovalMenu .approval-detail { height: auto; color: $muted; }
+    ApprovalMenu .approval-preview { height: auto; max-height: 8; color: $text-soft; }
+    ApprovalMenu .approval-options { height: 1; width: 100%; }
+    ApprovalMenu .approval-option { height: 1; width: auto; padding: 0 1; color: $text; }
+    ApprovalMenu .approval-option-selected {
+        background: $orange-600;
+        color: $on-fill;
+        text-style: bold;
+    }
+    ApprovalMenu .approval-help { height: auto; color: $muted; }
     ApprovalMenu .approval-reason-input {
-        display: none; height: 3; margin-top: 1; border: solid $warning;
+        display: none; height: 3; margin-top: 1; border: round $divider;
     }
     """
 
@@ -1019,21 +1234,21 @@ class ApprovalMenu(Container):
         self.workspace = workspace
         self._selected = 0
         self._options: list[tuple[str, str]] = [
-            ("Approve (y)", "approve"),
-            ("Enable Auto (a)", "auto"),
-            ("Reject (n)", "reject"),
+            (APPROVAL_OPTIONS[0], "approve"),
+            (APPROVAL_OPTIONS[1], "auto"),
+            (APPROVAL_OPTIONS[2], "reject"),
         ]
         self._option_widgets: list[Static] = []
         self._reason_active = False
         self._future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            literal_text(
-                f">>> {canonical_tool_name(self.request.tool_name)} Requires Approval <<<"
-            ),
-            classes="approval-title",
-        )
+        tool_name = canonical_tool_name(self.request.tool_name)
+        path = _tool_path(self.request.arguments) or None
+        yield Static(self._heading(approval_heading(tool_name, path)), classes="approval-title")
+        detail = self._detail(tool_name, path)
+        if detail:
+            yield Static(literal_text(detail), classes="approval-detail")
         warning = _unicode_warning(self.request.arguments)
         if warning:
             yield Static(literal_text(warning), classes="approval-warning")
@@ -1041,10 +1256,11 @@ class ApprovalMenu(Container):
             yield Static(
                 literal_text(_approval_preview(self.request, self.workspace), limit=32 * 1024)
             )
-        for index, (_label, _decision) in enumerate(self._options):
-            widget = Static("", id=f"approval-option-{index}", classes="approval-option")
-            self._option_widgets.append(widget)
-            yield widget
+        with Horizontal(classes="approval-options"):
+            for index, (_label, _decision) in enumerate(self._options):
+                widget = Static("", id=f"approval-option-{index}", classes="approval-option")
+                self._option_widgets.append(widget)
+                yield widget
         yield Input(
             placeholder="Reason (Enter to submit, Esc to cancel)",
             classes="approval-reason-input",
@@ -1063,14 +1279,28 @@ class ApprovalMenu(Container):
         for index, ((label, _decision), widget) in enumerate(
             zip(self._options, self._option_widgets, strict=True)
         ):
-            widget.update(f"{'›' if index == self._selected else ' '} {index + 1}. {label}")
+            widget.update(f" {label} ")
             widget.set_class(index == self._selected, "approval-option-selected")
         help_text = (
-            "Enter submit • Esc cancel • leave blank to reject"
+            "Enter submit · Esc cancel · leave blank to deny"
             if self._reason_active
-            else "↑/↓ or j/k navigate • Enter select • y/a/n quick keys • Tab reject with feedback"
+            else approval_hint()
         )
         self.query_one(".approval-help", Static).update(help_text)
+
+    def _detail(self, tool_name: str, path: str | None) -> str:
+        if tool_name == "execute":
+            return str(self.request.arguments.get("command") or "")
+        return path or ""
+
+    def _heading(self, title: str) -> Content:
+        from copper_pilot_cli.copper_theme import ColorMode, style_for
+
+        mode = color_mode_for_app(self.app) if self.app else ColorMode.TRUECOLOR
+        label = style_for("heading", mode)
+        if label:
+            return Content.assemble((title, f"bold {label}"))
+        return Content(title)
 
     def action_move_up(self) -> None:
         if not self._reason_active:
@@ -1151,6 +1381,34 @@ class ApprovalMenu(Container):
     def on_blur(self) -> None:
         if not self._reason_active:
             self.call_after_refresh(self.focus)
+
+
+class ShortcutsPanel(Static):
+    """Key list shown when `?` is pressed in an empty prompt."""
+
+    DEFAULT_CSS = """
+    ShortcutsPanel {
+        height: auto;
+        margin: 0 1;
+        padding: 1 2;
+        border: round $border;
+        background: $input-bg;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("", id="shortcuts-panel")
+
+    def on_mount(self) -> None:
+        self._redraw()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._redraw(event.size.width)
+
+    def _redraw(self, width: int | None = None) -> None:
+        content_width = max(20, (width or self.size.width or 80) - 4)
+        mode = color_mode_for_app(self.app) if self.app else None
+        self.update(help_content(content_width, mode=mode, ascii=ascii_mode()))
 
 
 class ErrorMessage(Static):

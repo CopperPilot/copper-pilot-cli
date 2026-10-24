@@ -1,0 +1,12 @@
+CopperPilot
+hardware design agent
+
+copper-pilot-cli · main
+
+
+quick start
+/help
+@file
+shift+tab
+ctrl+e
+---

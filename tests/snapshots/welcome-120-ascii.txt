@@ -1,0 +1,24 @@
+CopperPilot
+hardware design agent
+
+copper-pilot-cli · main
+
+
+quick start
+/help       see every command
+@file       mention a schematic, layout or datasheet
+shift+tab   switch mode: plan, ask, agent
+ctrl+e      switch effort: balanced, intelligent
+---
+0:11:bold #FAFAF9
+12:33:#A8A29E
+35:58:#A8A29E
+61:72:#A8A29E
+73:85:#F97316
+85:102:#F4F4F0
+103:115:#F97316
+115:155:#F4F4F0
+156:168:#F97316
+168:197:#F4F4F0
+198:210:#F97316
+210:246:#F4F4F0

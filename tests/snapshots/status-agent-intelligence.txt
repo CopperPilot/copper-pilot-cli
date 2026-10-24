@@ -1,0 +1,9 @@
+↻ agent  shift+tab    ∴ intelligent  ctrl+e                                                                        /help
+---
+0:1:#F97316
+2:7:#F4F4F0
+9:18:#A8A29E
+22:23:#F97316
+24:35:#F4F4F0
+37:43:#A8A29E
+115:120:#F97316

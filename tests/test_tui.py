@@ -14,6 +14,7 @@ import copper_pilot_cli.copper_widgets as copper_widgets_module
 from copper_pilot_cli.copper_app import ChoiceScreen, CopperPilotApp, QuestionScreen
 from copper_pilot_cli.copper_presentation import (
     ChatScroll,
+    HelpCard,
     LoadingWidget,
     StatusBar,
     TurnPhase,
@@ -93,11 +94,58 @@ async def test_tui_mounts_branded_composer_and_status(tmp_path) -> None:
         assert app.theme == "copper-pilot"
         assert app.current_theme.dark is True
         assert app.current_theme.primary.lower() == "#ea580c"
-        status = app.query_one(StatusBar)
-        assert "manual" in str(status.query_one(".status-approval").render()).lower()
+        status = str(app.query_one(StatusBar).render())
+        assert "agent" in status
+        assert "shift+tab" in status
+        assert "balanced" in status
+        assert "ctrl+e" in status
+        assert "/help" in status
+        welcome = str(app.query_one(WelcomeBanner).render())
+        assert "CopperPilot" in welcome
+        assert "hardware design agent" in welcome
+        assert "quick start" in welcome
+        assert "/help" in welcome
+        assert "╭" not in welcome
+        assert str(composer.query_one("#tip-line").render()).startswith("tip  ")
+        assert composer.query_one("#rule-top").render().plain == "─" * 120
+        assert app.query_one(TextArea).placeholder == "What are we building today?"
+        assert "↻" in str(composer.query_one(".prompt-caret").render())
+        assert composer.has_class("-mode-agent")
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert app.copper_mode is CopperMode.PLAN
+        assert composer.has_class("-mode-plan")
+        assert "plan" in str(app.query_one(StatusBar).render())
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert app.copper_effort is CopperEffort.INTELLIGENCE
+        assert "intelligent" in str(app.query_one(StatusBar).render())
         assert list(app.query(WelcomeBanner))
-        assert not list(status.query(".status-context"))
+        assert "ctx" not in status
         assert any(entry.name == "/mode" for entry in composer.commands)
+
+
+@pytest.mark.asyncio
+async def test_composer_border_follows_plan_mode_and_yolo(tmp_path) -> None:
+    app = CopperPilotApp(
+        FakeRuntime(),
+        LocalToolBroker(tmp_path, mode=ApprovalMode.MANUAL),
+        tmp_path,
+        "thread",
+        mode=CopperMode.PLAN,
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        composer = app.query_one(ChatInput)
+        assert composer.has_class("-mode-plan")
+        assert "plan" in str(app.query_one(StatusBar).render())
+        assert "✎" in str(composer.query_one(".prompt-caret").render())
+        app.broker.mode = ApprovalMode.YOLO
+        app._update_status()
+        await pilot.pause()
+        assert composer.has_class("-mode-plan")
+        assert composer.has_class("-approval-yolo")
+        assert "plan" in str(app.query_one(StatusBar).render())
 
 
 @pytest.mark.asyncio
@@ -439,7 +487,7 @@ async def test_model_command_and_names_are_hidden_while_the_selector_is_off(tmp_
         area.text = "/help"
         await pilot.press("enter")
         await pilot.pause()
-        assert "/model" not in list(app.query(AssistantMessage))[-1].content
+        assert "/model" not in str(app.query_one(HelpCard).render())
         await app._custom_event(
             {
                 "type": "copper.status_event",
