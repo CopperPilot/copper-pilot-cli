@@ -672,7 +672,12 @@ async def test_cancel_settles_active_tool_and_removes_loading(tmp_path) -> None:
         await app._submit("long task")
         await _wait_until(
             pilot,
-            lambda: app._loading is not None and app._loading.is_mounted,
+            lambda: (
+                app._loading is not None
+                and app._loading.is_mounted
+                and "read-1" in app._tools
+                and app._tools["read-1"].status == "running"
+            ),
         )
         await app.action_cancel_or_quit()
         await _wait_until(pilot, lambda: app._turn_task is None)
