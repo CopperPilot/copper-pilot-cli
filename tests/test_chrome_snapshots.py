@@ -43,7 +43,7 @@ from copper_pilot_cli.copper_presentation import (
     _git_branch,
 )
 from copper_pilot_cli.copper_protocol import CopperMode
-from copper_pilot_cli.copper_theme import ColorMode
+from copper_pilot_cli.copper_theme import TOKENS, ColorMode
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, LocalToolBroker
 from copper_pilot_cli.copper_widgets import ApprovalMenu, ChatInput
 
@@ -212,8 +212,8 @@ def test_idle_input_and_tip_snapshots(width: int, label: str, mode: ColorMode, a
         assert not rule.spans
         assert not busy.spans
     elif width:
-        assert any("#57534E" in str(span.style) for span in rule.spans)
-        assert any("#44403C" in str(span.style) for span in busy.spans)
+        assert any(TOKENS["rule"].hex in str(span.style) for span in rule.spans)
+        assert any(TOKENS["divider"].hex in str(span.style) for span in busy.spans)
 
 
 @pytest.mark.parametrize("chat_mode", ("plan", "ask", "agent"))
@@ -342,7 +342,7 @@ async def test_idle_screen_at_widths(tmp_path, columns: int, no_color: bool, mon
             assert not composer.has_class("-tips")
         if not no_color:
             top = composer.query_one("#rule-top").render()
-            assert any("#57534E" in str(span.style) for span in top.spans)
+            assert any(TOKENS["rule"].hex in str(span.style) for span in top.spans)
         if no_color or columns < 60:
             assert "⣀" not in welcome
         else:
