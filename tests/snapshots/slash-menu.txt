@@ -1,0 +1,7 @@
+/approval       Switch approval mode
+/auth           Log in or out
+/build          Build a saved plan
+/clear          Clear the transcript
+/context        Show workspace and thread
+/copy           Copy the last response
+↑↓ choose · enter run · esc close

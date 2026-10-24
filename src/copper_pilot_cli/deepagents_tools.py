@@ -11,13 +11,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from deepagents.backends import LocalShellBackend
-from deepagents.middleware.filesystem import FilesystemMiddleware
-from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import BaseTool
 
 from copper_pilot_cli.copper_background import (
     DEFAULT_FOREGROUND_SECONDS,
@@ -25,6 +21,13 @@ from copper_pilot_cli.copper_background import (
     run_shell,
 )
 from copper_pilot_cli.copper_protocol import ToolRequest
+
+if TYPE_CHECKING:
+    # Deep Agents pulls in anthropic and langchain agents (~0.6s). Load it on the first tool call.
+    from deepagents.backends import LocalShellBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from langchain.tools import ToolRuntime
+    from langchain_core.tools import BaseTool
 
 
 class ApprovalMode(StrEnum):
@@ -294,12 +297,28 @@ class LocalToolBroker:
         self.background = BackgroundProcessManager()
         self.foreground_seconds = DEFAULT_FOREGROUND_SECONDS
         self._middleware: FilesystemMiddleware[Any, Any] | None = None
-        self._backend: LocalShellBackend | None = None
-        self._tools: dict[str, BaseTool] = {}
-        self._configure_native_tools()
+        self._native_backend: LocalShellBackend | None = None
+        self._native_tools: dict[str, BaseTool] | None = None
+
+    @property
+    def _tools(self) -> dict[str, BaseTool]:
+        if self._native_tools is None:
+            self._configure_native_tools()
+        assert self._native_tools is not None
+        return self._native_tools
+
+    @property
+    def _backend(self) -> LocalShellBackend:
+        if self._native_backend is None:
+            self._configure_native_tools()
+        assert self._native_backend is not None
+        return self._native_backend
 
     def _configure_native_tools(self) -> None:
-        self._backend = LocalShellBackend(
+        from deepagents.backends import LocalShellBackend
+        from deepagents.middleware.filesystem import FilesystemMiddleware
+
+        self._native_backend = LocalShellBackend(
             root_dir=self.workspace,
             virtual_mode=True,
             timeout=120,
@@ -307,18 +326,20 @@ class LocalToolBroker:
             inherit_env=True,
         )
         self._middleware = FilesystemMiddleware(
-            backend=self._backend,
+            backend=self._native_backend,
             tools="all",
             max_execute_timeout=3600,
             grep_max_count=1000,
         )
-        self._tools = {tool.name: tool for tool in self._middleware.tools}
+        self._native_tools = {tool.name: tool for tool in self._middleware.tools}
 
     def set_workspace(self, workspace: Path) -> None:
         """Rebind native tools to a newly selected workspace."""
 
         self.workspace = workspace.resolve()
-        self._configure_native_tools()
+        self._middleware = None
+        self._native_backend = None
+        self._native_tools = None
 
     def set_shell_auto_allow(self, *, normal: bool, dangerous: bool) -> None:
         self.always_allow_shell_commands = normal
@@ -442,6 +463,8 @@ class LocalToolBroker:
         return arguments, external
 
     def _runtime(self, request: ToolRequest) -> ToolRuntime[Any, dict[str, Any]]:
+        from langchain.tools import ToolRuntime
+
         return ToolRuntime(
             state={},
             context=None,

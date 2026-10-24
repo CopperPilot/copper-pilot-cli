@@ -14,7 +14,9 @@ from typing import Any
 import pyperclip
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from textual import on
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.events import MouseUp
@@ -29,6 +31,7 @@ from copper_pilot_cli._version import __version__
 from copper_pilot_cli.clipboard import copy_selection_to_clipboard
 from copper_pilot_cli.copper_api import format_token_limits, token_limits, usage_error_message
 from copper_pilot_cli.copper_auth import DeviceLogin, clear_credential
+from copper_pilot_cli.copper_chrome import next_effort, next_mode, slash_catalog
 from copper_pilot_cli.copper_features import (
     LocalSkill,
     encode_runtime_context,
@@ -54,11 +57,14 @@ from copper_pilot_cli.copper_preferences import (
     auto_notice_acknowledged,
     save_approval_mode,
     save_shell_auto_allow_settings,
+    save_theme,
+    saved_theme,
     shell_auto_allow_settings,
     yolo_acknowledged,
 )
 from copper_pilot_cli.copper_presentation import (
     ChatScroll,
+    HelpCard,
     LoadingWidget,
     StatusBar,
     TurnEvent,
@@ -91,6 +97,7 @@ from copper_pilot_cli.copper_widgets import (
     CompletionEntry,
     ErrorMessage,
     ReasoningMessage,
+    ShortcutsPanel,
     ThreadSelectorScreen,
     ToolCallMessage,
     ToolGroupSummary,
@@ -185,7 +192,8 @@ class CopperPilotApp(App[None]):
         ("ctrl+c", "cancel_or_quit", "Cancel"),
         ("ctrl+v", "paste_or_attach", "Paste"),
         ("ctrl+r", "resume_thread", "Resume"),
-        ("shift+tab", "cycle_approval", "Approval"),
+        Binding("shift+tab", "cycle_mode", "Mode", show=False, priority=True),
+        Binding("ctrl+e", "cycle_effort", "Effort", show=False, priority=True),
         ("ctrl+q", "quit", "Quit"),
     ]
     CSS = """
@@ -251,32 +259,65 @@ class CopperPilotApp(App[None]):
         self.broker.ask_user = self.request_question
 
     def _register_copper_theme(self) -> None:
-        self.register_theme(
-            Theme(
-                name="copper-pilot",
-                primary="#EA580C",
-                secondary="#FB923C",
-                accent="#F97316",
-                foreground="#C0CAF5",
-                background="#11121D",
-                surface="#1A1B2E",
-                panel="#25283B",
-                success="#9ECE6A",
-                warning="#F97316",
-                error="#F7768E",
-                dark=True,
+        copper_theme.set_active_theme(saved_theme())
+        for name, tokens in copper_theme.PRESETS.items():
+            self.register_theme(
+                Theme(
+                    name=copper_theme.textual_theme_name(name),
+                    primary=tokens["orange-600"].hex,
+                    secondary=tokens["orange-500"].hex,
+                    accent=tokens["orange-500"].hex,
+                    foreground=tokens["text"].hex,
+                    background=tokens["bg"].hex,
+                    surface=tokens["surface"].hex,
+                    panel=tokens["divider"].hex,
+                    success=tokens["status-ok"].hex,
+                    warning=tokens["status-warn"].hex,
+                    error=tokens["status-error"].hex,
+                    dark=copper_theme.is_dark(name),
+                    variables=copper_theme.css_variables(theme=name),
+                )
             )
-        )
-        self.theme = "copper-pilot"
+        self.theme = copper_theme.textual_theme_name()
+
+    def apply_copper_theme(self, name: str) -> None:
+        """Switch preset, save it, and repaint widgets that bake colours into content."""
+        copper_theme.set_active_theme(name)
+        try:
+            save_theme(name)
+        except OSError:
+            self.notify("Theme applied, but it could not be saved.", severity="warning")
+        self.theme = copper_theme.textual_theme_name(name)
+        self.refresh_chrome()
+
+    def refresh_chrome(self) -> None:
+        """Redraw widgets whose colours are computed in Python, not CSS."""
+        for widget in (
+            *self.query(WelcomeBanner),
+            *self.query(StatusBar),
+            *self.query(HelpCard),
+            *self.query(ShortcutsPanel),
+        ):
+            widget._redraw()
+        for composer in self.query(ChatInput):
+            composer._redraw_frame()
+            composer._paint_options()
+        for loading in self.query(LoadingWidget):
+            loading.set_status(loading.status_text)
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return copper_theme.css_variable_defaults()
 
     def compose(self) -> ComposeResult:
         with ChatScroll(id="transcript"):
-            yield WelcomeBanner(self.workspace)
+            yield WelcomeBanner(self.workspace, model=self.copper_effort.value)
         yield ChatInput(cwd=self.workspace)
-        yield StatusBar(self.workspace, self.broker.mode.value)
+        yield StatusBar(
+            self.workspace,
+            self.broker.mode.value,
+            mode=self.copper_mode.value,
+            effort=self.copper_effort.value,
+        )
 
     async def on_mount(self) -> None:
         await self._hydrate()
@@ -389,38 +430,11 @@ class CopperPilotApp(App[None]):
     def _load_skills(self) -> None:
         skills, diagnostics = scan_local_skills(self.workspace)
         self._skills = {skill.id: skill for skill in skills}
-        command_names = {
-            "context",
-            "copy",
-            "feedback",
-            "help",
-            "hooks",
-            "effort",
-            "mode",
-            "resume",
-            "threads",
-            "approval",
-            "clear",
-            "cwd",
-            "auth",
-            "tools",
-            "tokens",
-            "theme",
-            "update",
-            "version",
-            "build",
-            "quit",
-            "exit",
-        }
-        if model_selector_enabled():
-            command_names.add("model")
+        catalog = slash_catalog(include_model=model_selector_enabled())
+        command_names = {name.removeprefix("/") for name, _description in catalog}
         entries = [
-            CompletionEntry(
-                name=f"/{name}",
-                description=f"Command · {name}",
-                display_name=f"/{name}  [command]",
-            )
-            for name in sorted(command_names)
+            CompletionEntry(name=name, description=description, display_name=name)
+            for name, description in catalog
         ]
         entries.extend(skill.command_entry() for skill in skills if skill.id not in command_names)
         self.query_one(ChatInput).update_slash_commands(entries)
@@ -476,7 +490,7 @@ class CopperPilotApp(App[None]):
     async def _reset_transcript(self) -> None:
         transcript = self.query_one("#transcript", ChatScroll)
         await transcript.remove_children()
-        await transcript.mount(WelcomeBanner(self.workspace))
+        await transcript.mount(WelcomeBanner(self.workspace, model=self.copper_effort.value))
         self._assistant = None
         self._reasoning = None
         self._tools.clear()
@@ -506,7 +520,19 @@ class CopperPilotApp(App[None]):
     def _update_status(self, detail: str = "") -> None:
         bar = self.query_one(StatusBar)
         bar.set_approval_mode(self.broker.mode.value)
-        bar.set_status(detail)
+        bar.set_session(mode=self.copper_mode.value, effort=self.copper_effort.value)
+        limit = self._turn_state.context_limit
+        tokens = self._turn_state.context_tokens
+        if isinstance(tokens, int) and isinstance(limit, int) and limit > 0:
+            bar.set_context_percent(min(100, round(100 * tokens / limit)))
+        else:
+            bar.set_context_percent(None)
+        self.query_one(ChatInput).set_chrome(self.copper_mode.value, self.broker.mode.value)
+        banner = self.query(WelcomeBanner)
+        if banner:
+            banner.first().set_model(self.copper_effort.value)
+        if detail and self._loading is not None:
+            self._loading.set_status(detail)
 
     def _effective_model(self) -> str:
         """Model id the next turn will run on (Balanced is pinned server-side)."""
@@ -554,15 +580,38 @@ class CopperPilotApp(App[None]):
     async def _start_loading(self) -> None:
         await self._stop_loading()
         self._loading = LoadingWidget()
+        self.query_one(ChatInput).set_busy(True)
         await self._mount(self._loading)
+
+    @on(ChatInput.ToggleShortcuts)
+    def toggle_shortcuts(self) -> None:
+        existing = self.query("#shortcuts-panel")
+        if existing:
+            existing.first().remove()
+            return
+        self.mount(ShortcutsPanel(), before=self.query_one(ChatInput))
+
+    @on(ChatInput.DismissShortcuts)
+    def dismiss_shortcuts(self) -> None:
+        existing = self.query("#shortcuts-panel")
+        if existing:
+            existing.first().remove()
+
+    @on(ChatInput.StopTurn)
+    async def stop_turn(self) -> None:
+        if self._turn_task and not self._turn_task.done():
+            await self.action_cancel_or_quit()
 
     async def _stop_loading(self) -> None:
         if self._loading is None:
             return
         loading, self._loading = self._loading, None
+        composer = self.query(ChatInput)
+        if composer:
+            composer.first().set_busy(False)
         loading.stop()
         if loading.is_mounted:
-            await loading.remove()
+            loading.remove()
 
     async def _close_streams(self) -> None:
         if self._assistant is not None:
@@ -600,6 +649,9 @@ class CopperPilotApp(App[None]):
         value = submitted_value.strip()
         if not value:
             return
+        composer = self.query(ChatInput)
+        if composer:
+            composer.first().hide_tip()
         token, _, remainder = value.partition(" ")
         skill = self._skills.get(token.removeprefix("/").lower())
         if skill is not None:
@@ -636,6 +688,12 @@ class CopperPilotApp(App[None]):
         if self._turn_task and not self._turn_task.done():
             self.notify("A turn is already running.", severity="warning", markup=False)
             return
+        banner = self.query(WelcomeBanner)
+        if banner:
+            banner.first().hide_quick_start()
+        composer = self.query(ChatInput)
+        if composer:
+            composer.first().hide_tip()
         self._finalize_work_run()
         self.query_one("#transcript", ChatScroll).anchor()
         await self._mount(UserMessage(value))
@@ -871,15 +929,7 @@ class CopperPilotApp(App[None]):
         if command in {"/quit", "/exit"}:
             self.exit()
         elif command == "/help":
-            await self._mount(
-                AssistantMessage(
-                    "Commands: `/mode`, `/effort`, "
-                    + ("`/model`, " if model_selector_enabled() else "")
-                    + "`/resume`, `/approval`, `/context`, `/copy`, "
-                    "`/cwd`, `/build`, `/hooks`, `/auth`, `/tools`, `/tokens [json]`, "
-                    "`/theme`, `/update`, `/version`, `/feedback`, `/clear`, `/quit`"
-                )
-            )
+            await self._mount(HelpCard(include_model=model_selector_enabled()))
         elif command == "/clear":
             await self._reset_transcript()
         elif command == "/copy":
@@ -950,6 +1000,7 @@ class CopperPilotApp(App[None]):
             if choice:
                 self.copper_mode = CopperMode(choice)
                 self.runtime.agent.mode = self.copper_mode
+                self.query_one(StatusBar).flash("mode")
                 self._update_status()
         elif command == "/effort":
             choice = await self._wait_for_modal(
@@ -961,6 +1012,7 @@ class CopperPilotApp(App[None]):
             if choice:
                 self.copper_effort = CopperEffort(choice)
                 self.runtime.agent.effort = self.copper_effort
+                self.query_one(StatusBar).flash("effort")
                 self._update_status()
         elif command == "/model" and model_selector_enabled():
             await self._choose_model(argument.strip())
@@ -1055,17 +1107,42 @@ class CopperPilotApp(App[None]):
                 )
                 await self._mount(AssistantMessage(message))
         elif command == "/theme":
-            await self._mount(
-                AssistantMessage(
-                    "CopperPilot uses the dcode dark theme with copper-colored accents."
-                )
-            )
+            await self._choose_theme(argument.strip().lower())
         elif command == "/version":
             await self._mount(AssistantMessage(f"CopperPilot CLI {__version__}"))
         elif argument:
             await self._mount(ErrorMessage(f"Unknown command: {value}"))
         else:
             await self._mount(ErrorMessage(f"Unknown command: {command}"))
+
+    async def _choose_theme(self, requested: str) -> None:
+        names = copper_theme.theme_names()
+        if requested:
+            if requested not in names:
+                await self._mount(
+                    ErrorMessage(f"Unknown theme: {requested}. Choose one of: {', '.join(names)}")
+                )
+                return
+            choice: str | None = requested
+        else:
+            current = copper_theme.active_theme()
+            choice = await self._wait_for_modal(
+                ChoiceScreen(
+                    "Theme",
+                    [
+                        (
+                            name,
+                            f"{copper_theme.THEME_LABELS[name]}"
+                            f"{' (current)' if name == current else ''}",
+                        )
+                        for name in names
+                    ],
+                )
+            )
+        if not choice:
+            return
+        self.apply_copper_theme(choice)
+        self.notify(f"Theme: {choice}", markup=False)
 
     async def _choose_approval(self) -> None:
         choice = await self._wait_for_modal(
@@ -1133,6 +1210,43 @@ class CopperPilotApp(App[None]):
             save_approval_mode(mode)
         self._update_status()
         return mode
+
+    def _text_inside_approval(self) -> bool:
+        """True when the approval reason field is focused, so its own keys should run."""
+        focused = self.focused
+        if not isinstance(focused, (Input, TextArea)):
+            return False
+        parent = focused.parent
+        while parent is not None:
+            if isinstance(parent, ApprovalMenu):
+                return True
+            parent = parent.parent
+        return False
+
+    async def action_cycle_mode(self) -> None:
+        # Modals still use shift+tab to move focus. SkipAction lets that binding run.
+        if isinstance(self.screen, ModalScreen):
+            raise SkipAction()
+        if self._text_inside_approval():
+            raise SkipAction()
+        if list(self.query(ApprovalMenu)):
+            return
+        self.copper_mode = CopperMode(next_mode(self.copper_mode.value))
+        self.runtime.agent.mode = self.copper_mode
+        self.query_one(StatusBar).flash("mode")
+        self._update_status()
+
+    async def action_cycle_effort(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            raise SkipAction()
+        if self._text_inside_approval():
+            raise SkipAction()
+        if list(self.query(ApprovalMenu)):
+            return
+        self.copper_effort = CopperEffort(next_effort(self.copper_effort.value))
+        self.runtime.agent.effort = self.copper_effort
+        self.query_one(StatusBar).flash("effort")
+        self._update_status()
 
     async def action_cycle_approval(self) -> None:
         if isinstance(self.screen, ModalScreen):

@@ -75,6 +75,40 @@ def acknowledge_auto_notice() -> None:
     save_preferences(value)
 
 
+def saved_theme() -> str:
+    """The saved ``/theme`` preset, or ``black`` when missing or unknown."""
+    from copper_pilot_cli.copper_theme import DEFAULT_THEME, PRESETS
+
+    value = load_preferences().get("theme")
+    return value if isinstance(value, str) and value in PRESETS else DEFAULT_THEME
+
+
+def save_theme(name: str) -> None:
+    value = load_preferences()
+    value["theme"] = name
+    save_preferences(value)
+
+
+def tips_enabled() -> bool:
+    """Tips stay on unless ``config.json`` sets ``tips`` to false."""
+    return load_preferences().get("tips") is not False
+
+
+def last_tip_index() -> int | None:
+    """Index of the tip shown last session, if one was stored."""
+    value = load_preferences().get("last_tip_index")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def save_last_tip_index(index: int) -> None:
+    """Remember which tip was shown so the next session can skip it."""
+    value = load_preferences()
+    value["last_tip_index"] = index
+    save_preferences(value)
+
+
 def yolo_acknowledged() -> bool:
     return load_preferences().get("yolo_ack_version") == YOLO_ACK_VERSION
 

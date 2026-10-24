@@ -1,0 +1,5 @@
+Run command?
+kicad-cli version
+yes  auto-accept edits  no
+←→ choose · enter confirm · esc no
+Apply edit to board.kicad_sch?

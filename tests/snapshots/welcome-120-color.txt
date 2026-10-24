@@ -1,0 +1,32 @@
+ ⣀⡠⠤⠒⠊⠉⠒⠢⠤⣀⡀    
+⡏⠒⠢⠤⣀⡀ ⣀⡠⠤⠒⠊⡇   CopperPilot
+⡇    ⠈⡏     ⡇   hardware design agent
+⡇     ⡇     ⡇   
+⣇     ⡇    ⢀⡇   copper-pilot-cli · main
+ ⠉⠑⠒⠤⢄⣇⠤⠔⠒⠉⠁    
+
+
+quick start
+/help       see every command
+@file       mention a schematic, layout or datasheet
+shift+tab   switch mode: plan, ask, agent
+ctrl+e      switch effort: balanced, intelligent
+---
+0:13:#EA580C
+17:30:#EA580C
+33:44:bold #FAFAFA
+45:58:#EA580C
+61:82:#A3A3A3
+83:96:#EA580C
+100:113:#EA580C
+116:139:#A3A3A3
+140:153:#EA580C
+159:170:#A3A3A3
+171:183:#F97316
+183:200:#F5F5F5
+201:213:#F97316
+213:253:#F5F5F5
+254:266:#F97316
+266:295:#F5F5F5
+296:308:#F97316
+308:344:#F5F5F5
