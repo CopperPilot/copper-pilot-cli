@@ -381,7 +381,9 @@ class ChatInput(Vertical):
         name = mode if mode in {"plan", "ask", "agent"} else "agent"
         icon = self.query(".prompt-caret")
         if icon:
-            icon.first().update(glyph(name))
+            first = icon.first()
+            if isinstance(first, Static):
+                first.update(glyph(name))
 
     def set_busy(self, busy: bool) -> None:
         self.set_class(busy, "-busy")
@@ -417,6 +419,8 @@ class ChatInput(Vertical):
         busy = self.has_class("-busy")
         use_ascii = ascii_mode()
         for rule in self.query(".input-rule"):
+            if not isinstance(rule, Static):
+                continue
             rule_width = rule.size.width or width
             rule.update(rule_content(rule_width, busy=busy, mode=mode, ascii=use_ascii))
 

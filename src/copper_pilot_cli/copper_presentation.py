@@ -307,7 +307,9 @@ class LoadingWidget(Widget):
     def _refresh_line(self, elapsed: int) -> None:
         line = self.query(".loading-line")
         if line:
-            line.first().update(self._line(elapsed))
+            first = line.first()
+            if isinstance(first, Static):
+                first.update(self._line(elapsed))
 
     def _tick(self) -> None:
         if self.paused_at is not None:
