@@ -677,7 +677,7 @@ async def test_cancel_settles_active_tool_and_removes_loading(tmp_path) -> None:
         await app.action_cancel_or_quit()
         await _wait_until(pilot, lambda: app._turn_task is None)
         assert app._tools["read-1"].status == "error"
-        assert not list(app.query(LoadingWidget))
+        await _wait_until(pilot, lambda: not list(app.query(LoadingWidget)))
 
 
 @pytest.mark.asyncio
