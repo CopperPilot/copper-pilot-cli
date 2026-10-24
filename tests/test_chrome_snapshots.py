@@ -43,7 +43,7 @@ from copper_pilot_cli.copper_presentation import (
     _git_branch,
 )
 from copper_pilot_cli.copper_protocol import CopperMode
-from copper_pilot_cli.copper_theme import TOKENS, ColorMode
+from copper_pilot_cli.copper_theme import TOKENS, ColorMode, ascii_mode
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, LocalToolBroker
 from copper_pilot_cli.copper_widgets import ApprovalMenu, ChatInput
 
@@ -239,6 +239,17 @@ def test_status_mode_and_effort_snapshots(chat_mode: str, effort: str) -> None:
     )
     assert chat_mode not in narrow
     assert "shift+tab" not in narrow
+
+
+def test_ascii_mode_follows_an_explicit_request_or_a_non_utf8_locale(monkeypatch) -> None:
+    monkeypatch.delenv("COPPERPILOT_ASCII", raising=False)
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    assert ascii_mode() is False
+    monkeypatch.setenv("COPPERPILOT_ASCII", "1")
+    assert ascii_mode() is True
+    monkeypatch.delenv("COPPERPILOT_ASCII", raising=False)
+    monkeypatch.setenv("LC_ALL", "C")
+    assert ascii_mode() is True
 
 
 def test_slash_working_and_approval_snapshots() -> None:

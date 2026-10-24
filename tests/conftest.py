@@ -21,6 +21,12 @@ def default_theme(
     """
     if request.node.get_closest_marker("live") is None:
         monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path_factory.mktemp("cli-home")))
+    # Windows CI has no UTF-8 locale, so the app would draw the ASCII fallback.
+    # The suite asserts the Unicode chrome. A test opts into ASCII with COPPERPILOT_ASCII.
+    monkeypatch.delenv("COPPERPILOT_ASCII", raising=False)
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setenv("LC_CTYPE", "C.UTF-8")
+    monkeypatch.setenv("LANG", "C.UTF-8")
     copper_theme.set_active_theme(copper_theme.DEFAULT_THEME)
     yield
     copper_theme.set_active_theme(copper_theme.DEFAULT_THEME)
