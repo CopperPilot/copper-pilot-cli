@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import stat
 from collections.abc import Sequence
@@ -28,6 +29,7 @@ from textual.widgets.option_list import Option
 
 from copper_pilot_cli.copper_chrome import (
     APPROVAL_OPTIONS,
+    SLASH_LIMIT,
     TIPS,
     approval_heading,
     approval_hint,
@@ -46,6 +48,43 @@ from copper_pilot_cli.copper_tools import ApprovalRequest, canonical_tool_name
 from copper_pilot_cli.sessions import ThreadInfo, list_threads
 
 MAX_WIDGET_TEXT = 64 * 1024
+FILE_INDEX_LIMIT = 20_000
+FILE_INDEX_TTL = 2.0
+FILE_COMPLETION_DEBOUNCE = 0.05
+IGNORED_DIRS = frozenset(
+    {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache"}
+)
+
+
+def build_file_index(root: Path, limit: int = FILE_INDEX_LIMIT) -> list[str]:
+    """Relative POSIX paths under ``root``. Ignored folders are pruned, never entered."""
+    found: list[str] = []
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(name for name in dirs if name not in IGNORED_DIRS)
+        base = Path(current).relative_to(root)
+        for name in sorted(files):
+            found.append((base / name).as_posix())
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def stream_append_safe(rendered: str) -> bool:
+    """Whether Textual can append ``rendered`` without erasing the previous block.
+
+    ``Markdown.append`` rewrites the last block. That is correct while a paragraph is
+    still open, and wrong once a block has closed: the next fragment replaces it, so a
+    finished paragraph or code fence disappears. A trailing newline means the block is
+    closed. An odd fence, or a fence marker on the last line, means the same.
+    """
+    if not rendered or rendered.endswith("\n"):
+        return False
+    if rendered.count("```") % 2 == 1 or rendered.count("~~~") % 2 == 1:
+        return False
+    last = rendered.rsplit("\n", 1)[-1].strip()
+    return not (last.startswith("```") or last.startswith("~~~"))
+
+
 _TERMINAL_ESCAPE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
@@ -99,6 +138,15 @@ class ComposerTextArea(TextArea):
 
     async def _on_key(self, event: events.Key) -> None:
         composer = self._composer()
+        if composer is not None and event.key in {
+            "up",
+            "down",
+            "tab",
+            "enter",
+            "space",
+            "escape",
+        }:
+            composer.flush_pending_completion()
         completion_active = bool(composer and composer.completion_active)
         if event.key == "question_mark" and not self.text:
             self.post_message(ChatInput.ToggleShortcuts())
@@ -272,6 +320,12 @@ class ChatInput(Vertical):
         self._tips_open = False
         self._tip_index: int | None = None
         self._tip_saved = False
+        self._file_index: list[str] | None = None
+        self._file_index_root: Path | None = None
+        self._file_index_built_at: float | None = None
+        self._file_index_inflight = False
+        self._file_index_generation = 0
+        self._file_refresh_timer: Timer | None = None
 
     @property
     def completion_active(self) -> bool:
@@ -295,6 +349,7 @@ class ChatInput(Vertical):
 
     def on_mount(self) -> None:
         self._sync_icon("agent")
+        self._start_file_index()
         if tips_enabled() and TIPS:
             index = pick_tip_index(last_tip_index(), count=len(TIPS))
             self._tip = TIPS[index]
@@ -393,40 +448,93 @@ class ChatInput(Vertical):
 
     def set_cwd(self, cwd: str | Path) -> None:
         self.cwd = Path(cwd).resolve()
+        self._file_index = None
+        self._file_index_built_at = None
+        if self.is_mounted:
+            self._start_file_index(force=True)
 
     def _current_token(self) -> str:
         text = self.query_one(TextArea).text
-        return re.split(r"\s", text)[-1] if text else ""
+        if not text or text[-1].isspace():
+            return ""
+        return re.split(r"\s", text)[-1]
+
+    def _file_index_current(self) -> bool:
+        built = self._file_index_built_at
+        return (
+            self._file_index is not None
+            and self._file_index_root == self.cwd
+            and built is not None
+            and monotonic() - built < FILE_INDEX_TTL
+        )
+
+    def _start_file_index(self, *, force: bool = False) -> None:
+        """Index the project off the event loop. ``@`` filters the result in memory.
+
+        A fresh index is reused. Once it is older than ``FILE_INDEX_TTL``, the next ``@``
+        rebuilds it without dropping the list the user is already looking at.
+        """
+        root = self.cwd
+        if not force and self._file_index_inflight and self._file_index_root == root:
+            return
+        if not force and self._file_index_current():
+            return
+        self._file_index_generation += 1
+        generation = self._file_index_generation
+        self._file_index_root = root
+        self._file_index_inflight = True
+
+        async def build() -> None:
+            try:
+                index = await asyncio.to_thread(build_file_index, root)
+            except OSError:
+                index = None
+            if generation != self._file_index_generation or not self.is_mounted:
+                return
+            self._file_index_inflight = False
+            if index is None:
+                return
+            self._file_index = index
+            self._file_index_built_at = monotonic()
+            if self._current_token().startswith("@"):
+                self._refresh_completions()
+
+        self.run_worker(build(), group="file-index", exclusive=True, exit_on_error=False)
 
     def _file_entries(self, token: str) -> list[CompletionEntry]:
+        index = self._file_index
+        if index is None:
+            return []
         query = token.removeprefix("@").lower()
-        entries: list[CompletionEntry] = []
-        for path in self.cwd.rglob("*"):
-            if len(entries) >= 100:
-                break
-            if not path.is_file() or any(
-                part in {".git", "node_modules", "__pycache__", ".venv"}
-                for part in path.relative_to(self.cwd).parts
-            ):
-                continue
-            relative = path.relative_to(self.cwd).as_posix()
-            if query in relative.lower():
-                entries.append(CompletionEntry(f"@{relative}", "File", f"@{relative}  [file]"))
-        return sorted(entries, key=lambda item: (len(item.name), item.name.lower()))
+        found = [relative for relative in index if query in relative.lower()]
+        found.sort(key=lambda relative: (len(relative), relative.lower()))
+        return [
+            CompletionEntry(f"@{relative}", "File", f"@{relative}  [file]")
+            for relative in found[:SLASH_LIMIT]
+        ]
 
     def _refresh_completions(self) -> None:
         token = self._current_token()
         if token.startswith("/"):
-            self._completion_kind = "slash"
+            kind: str | None = "slash"
             ranked = rank_slash(token, [(item.name, item.description) for item in self.commands])
             by_name = {item.name: item for item in self.commands}
-            self._matches = [by_name[name] for name, _description in ranked if name in by_name]
+            matches = [by_name[name] for name, _description in ranked if name in by_name]
         elif token.startswith("@"):
-            self._completion_kind = "file"
-            self._matches = self._file_entries(token)[:6]
+            kind = "file"
+            matches = self._file_entries(token)
         else:
-            self._completion_kind = None
-            self._matches = []
+            kind = None
+            matches = []
+        if not matches and not self._matches:
+            self._completion_kind = kind
+            return
+        if kind == self._completion_kind and [item.name for item in matches] == [
+            item.name for item in self._matches
+        ]:
+            return
+        self._completion_kind = kind
+        self._matches = matches
         self._selected_index = 0
         self._paint_options()
 
@@ -465,6 +573,28 @@ class ChatInput(Vertical):
     def changed(self) -> None:
         self.last_changed_at = monotonic()
         self._typing_changed.set()
+        if self._file_refresh_timer is not None:
+            self._file_refresh_timer.stop()
+            self._file_refresh_timer = None
+        if self._current_token().startswith("@"):
+            self._start_file_index()
+            if self._file_index is not None:
+                self._file_refresh_timer = self.set_timer(
+                    FILE_COMPLETION_DEBOUNCE, self._debounced_file_refresh
+                )
+                return
+        self._refresh_completions()
+
+    def flush_pending_completion(self) -> None:
+        """Filter ``@`` before a key accepts or moves the match list."""
+        if self._file_refresh_timer is None:
+            return
+        self._file_refresh_timer.stop()
+        self._file_refresh_timer = None
+        self._refresh_completions()
+
+    def _debounced_file_refresh(self) -> None:
+        self._file_refresh_timer = None
         self._refresh_completions()
 
     async def wait_until_typing_idle(self, idle_for: float = 0.6, max_wait: float = 5.0) -> None:
@@ -582,6 +712,7 @@ class AssistantMessage(Vertical):
         self.content = bounded_widget_text(content)
         self._rendered_content = self.content
         self._flush_timer: Timer | None = None
+        self._flush_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         yield Markdown(self.content)
@@ -593,9 +724,17 @@ class AssistantMessage(Vertical):
 
     async def _flush(self) -> None:
         self._flush_timer = None
-        if self.content != self._rendered_content and self.is_mounted:
-            self._rendered_content = self.content
-            await self.query_one(Markdown).update(self.content)
+        async with self._flush_lock:
+            if self.content == self._rendered_content or not self.is_mounted:
+                return
+            rendered = self._rendered_content
+            target = self.content
+            markdown = self.query_one(Markdown)
+            if rendered and target.startswith(rendered) and stream_append_safe(rendered):
+                await markdown.append(target[len(rendered) :])
+            else:
+                await markdown.update(target)
+            self._rendered_content = target
 
     async def stop_stream(self) -> None:
         if self._flush_timer is not None:
