@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import tempfile
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -60,3 +63,41 @@ def paths() -> AppPaths:
         logs=state / "logs",
         recent_projects=state / "recent-projects.json",
     )
+
+
+def atomic_write_text(destination: Path, text: str, *, mode: int | None = None) -> None:
+    """Replace ``destination`` via a temp file unique to this write.
+
+    A shared temp name lets concurrent processes move or clobber each other's
+    half-written file, so every write gets its own name in the same directory.
+    """
+    fd, name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if mode is not None:
+            temporary.chmod(mode)
+        temporary.replace(destination)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
+@contextlib.contextmanager
+def state_lock(destination: Path) -> Generator[None]:
+    """Serialize read-modify-write of a state file across processes (POSIX only)."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    with open(destination.with_name(f".{destination.name}.lock"), "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
