@@ -1399,6 +1399,39 @@ async def test_hosted_turn_runner_uses_agent_mode_and_read_only_broker(
     assert (tmp_path / "board" / "board.kicad_sch").read_text(encoding="utf-8") != "bad"
 
 
+class FailedFinalClient(FakeClient):
+    """The hosted turn ends with the generic failed final."""
+
+    async def stream(self, request, tool_handler):
+        self.requests.append(request)
+        yield CopperEvent(
+            EventKind.FINAL,
+            {"success": False, "error": "CopperPilot ran into an error."},
+            turn_id="turn-7",
+        )
+
+
+@pytest.mark.asyncio
+async def test_hosted_failure_records_the_hosted_turn_id(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
+    make_project(tmp_path)
+    turn = HostedTurnRunner(CREDENTIAL, client_factory=lambda: FailedFinalClient(""))
+    runner = Runner(
+        tmp_path,
+        load_config(tmp_path),
+        RunOptions(only=["sch.ratings"]),
+        turn=turn,
+        kicad_finder=lambda: FakeKicad(),
+        credential_loader=lambda: CREDENTIAL,
+        snapshot_root=tmp_path.parent / "snapshots",
+    )
+    outcome = await runner.run()
+    result = by_id(outcome.results)["sch.ratings"]
+    assert result.status is Status.ERROR
+    assert result.error == "CopperPilot ran into an error. (hosted turn turn-7)"
+
+
 # ------------------------------------------------------------------- CLI
 
 

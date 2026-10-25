@@ -205,9 +205,12 @@ class HostedTurnRunner:
                         )
                     elif kind == EventKind.FINAL.value and isinstance(payload, dict):
                         if payload.get("success") is False or payload.get("error"):
-                            result.error = result.error or {
-                                "message": str(payload.get("error") or "hosted turn failed")
-                            }
+                            message = str(payload.get("error") or "hosted turn failed")
+                            # The hosted copy is generic; the turn id lets the
+                            # service owners find the server-side cause.
+                            if data.get("turn_id"):
+                                message = f"{message} (hosted turn {data['turn_id']})"
+                            result.error = result.error or {"message": message}
             except BaseException:
                 await runtime.acancel()
                 raise
