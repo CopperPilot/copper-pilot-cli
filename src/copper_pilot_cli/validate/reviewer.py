@@ -460,7 +460,7 @@ def ground_findings(findings: list[Finding], index: DesignIndex | None) -> list[
                 problems.append("design index unavailable")
         else:
             missing_refs = [ref for ref in loc.refs if ref.upper() not in index.refs]
-            missing_nets = [net for net in loc.nets if net.upper() not in index.net_names]
+            missing_nets = [net for net in loc.nets if not index.has_net(net)]
             if missing_refs:
                 problems.append(f"unknown refs {', '.join(missing_refs)}")
             if missing_nets:

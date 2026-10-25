@@ -761,6 +761,45 @@ async def test_ungrounded_finding_never_fails_a_check(tmp_path) -> None:
     assert outcome.next_actions["actions"] == []
 
 
+# KiCad names local and hierarchical label nets with their sheet path.
+HIERARCHICAL_NETLIST = (
+    NETLIST.replace('name="+3V3"', 'name="/power/+3V3"')
+    .replace('name="GND"', 'name="/GND"')
+    .replace('name="SDA"', 'name="/RAIL_IO_3"')
+)
+
+
+@pytest.mark.asyncio
+async def test_findings_citing_bare_label_names_stay_grounded_on_hierarchical_nets(
+    tmp_path,
+) -> None:
+    make_project(tmp_path)
+    turn = FakeTurn(
+        {
+            "arch.review": reply(
+                [
+                    finding("P0", "Regulator contention", refs=["U1"], nets=["RAIL_IO_3", "GND"]),
+                    finding("P1", "Rail on sub-sheet", refs=["C1"], nets=["+3V3"]),
+                    finding("P1", "Full path cited", refs=["C1"], nets=["/power/+3V3"]),
+                    finding("P2", "Leading slash only", refs=["U1"], nets=["/RAIL_IO_3"]),
+                    finding("P2", "Invented net", refs=["U1"], nets=["IO_3"]),
+                ]
+            )
+        }
+    )
+    kicad = FakeKicad(netlist=HIERARCHICAL_NETLIST)
+    runner = runner_for(tmp_path, options=RunOptions(until="S1"), kicad=kicad, turn=turn)
+    outcome = await runner.run()
+    result = by_id(outcome.results)["arch.review"]
+    grounded = {item.title: item.grounded for item in result.findings}
+    assert grounded["Regulator contention"] is True
+    assert grounded["Rail on sub-sheet"] is True
+    assert grounded["Full path cited"] is True
+    assert grounded["Leading slash only"] is True
+    assert grounded["[UNGROUNDED: unknown nets IO_3] Invented net"] is False
+    assert result.status is Status.FAIL
+
+
 @pytest.mark.asyncio
 async def test_grounded_p0_fails_and_feeds_next_actions(tmp_path) -> None:
     make_project(tmp_path)
