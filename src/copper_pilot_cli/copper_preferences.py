@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from copper_pilot_cli.copper_config import paths
+from copper_pilot_cli.copper_config import atomic_write_text, paths
 from copper_pilot_cli.copper_tools import ApprovalMode
 
 YOLO_ACK_VERSION = 1
@@ -30,10 +30,7 @@ def save_preferences(value: dict[str, Any]) -> None:
     destination = _path()
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.parent.chmod(stat.S_IRWXU)
-    temporary = destination.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
-    temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    temporary.replace(destination)
+    atomic_write_text(destination, json.dumps(value, indent=2), mode=stat.S_IRUSR | stat.S_IWUSR)
 
 
 def saved_approval_mode() -> ApprovalMode:

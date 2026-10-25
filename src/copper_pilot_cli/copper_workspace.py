@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from copper_pilot_cli.copper_config import paths
+from copper_pilot_cli.copper_config import atomic_write_text, paths, state_lock
+
+logger = logging.getLogger(__name__)
 
 IGNORED_NAMES = {
     ".git",
@@ -117,22 +120,28 @@ def build_initial_file_tree(root: Path, limit: int = 2_000) -> str:
 
 
 def remember_workspace(context: WorkspaceContext, limit: int = 20) -> None:
-    """Persist most-recently-used folders atomically."""
+    """Persist most-recently-used folders atomically.
+
+    Best-effort bookkeeping: a failure here is logged, never raised, so it
+    cannot fail the session that triggered it.
+    """
     destination = paths().recent_projects
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict[str, object]] = []
     try:
-        loaded = json.loads(destination.read_text())
-        if isinstance(loaded, list):
-            existing = [row for row in loaded if isinstance(row, dict)]
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        pass
-    root = str(context.root)
-    rows = [{"root": root, **asdict(context)}]
-    rows.extend(row for row in existing if row.get("root") != root)
-    temporary = destination.with_suffix(".tmp")
-    temporary.write_text(json.dumps(rows[:limit], default=str, indent=2))
-    temporary.replace(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with state_lock(destination):
+            existing: list[dict[str, object]] = []
+            try:
+                loaded = json.loads(destination.read_text())
+                if isinstance(loaded, list):
+                    existing = [row for row in loaded if isinstance(row, dict)]
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                pass
+            root = str(context.root)
+            rows = [{"root": root, **asdict(context)}]
+            rows.extend(row for row in existing if row.get("root") != root)
+            atomic_write_text(destination, json.dumps(rows[:limit], default=str, indent=2))
+    except OSError:
+        logger.warning("Could not update recent projects at %s", destination, exc_info=True)
 
 
 def recent_workspaces() -> list[Path]:
