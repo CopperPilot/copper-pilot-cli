@@ -169,6 +169,40 @@ async def test_hosted_stream_times_out_after_first_event(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_response_text_is_not_cut_at_the_status_limit(monkeypatch) -> None:
+    # A validate review arrived as one ~40 KB response frame and was cut at
+    # 16 KB mid-JSON, so the findings never parsed.
+    findings = ",".join(f'{{"title": "finding {i}", "detail": "{"x" * 400}"}}' for i in range(90))
+    text = f'Review done.\n```json\n{{"findings": [{findings}], "summary": "s"}}\n```'
+    assert len(text.encode()) > 32 * 1024
+    frames = [
+        json.dumps({"type": "event", "chat_response": {"status_update": "s" * 40_000}}),
+        json.dumps({"type": "final", "chat_response": {"response": text, "success": True}}),
+    ]
+
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, _value):
+            return None
+
+        async def recv(self):
+            return frames.pop(0)
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: Socket())
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+    events = [event async for event in client.stream(request(), lambda _request: None)]
+    (answer,) = [event.data for event in events if event.kind is EventKind.TEXT]
+    assert answer == text
+    (status,) = [event.data for event in events if event.kind is EventKind.STATUS]
+    assert status.endswith("[truncated]") and len(status.encode()) < 17 * 1024
+
+
+@pytest.mark.asyncio
 async def test_hosted_stream_enforces_aggregate_byte_budget(monkeypatch) -> None:
     class Socket:
         async def __aenter__(self):

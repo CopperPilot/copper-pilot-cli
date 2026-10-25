@@ -38,6 +38,10 @@ MAX_CONTEXT_MESSAGE_BYTES = 64 * 1024
 MAX_CONTEXT_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_CONTEXT_ENTRIES = 2_000
 MAX_STREAM_BYTES = 64 * 1024 * 1024
+MAX_STATUS_BYTES = 16 * 1024
+# The answer itself can be long (a validate review's findings JSON easily
+# passes 16 KB) and the hosted side may send it as one frame.
+MAX_RESPONSE_TEXT_BYTES = 1024 * 1024
 IDLE_FRAME_TIMEOUT_ENV = "COPPER_PILOT_IDLE_TIMEOUT_SECONDS"
 DEFAULT_IDLE_FRAME_TIMEOUT = 10 * 60.0
 
@@ -427,7 +431,7 @@ def websocket_url(base_url: str, *, agentic: bool = True) -> str:
     return urlunparse((scheme, parsed.netloc, path, "", "", ""))
 
 
-def sanitize_status(value: str) -> str:
+def sanitize_status(value: str, limit: int = MAX_STATUS_BYTES) -> str:
     """Convert hosted status HTML to bounded terminal-safe plain markdown."""
     safe = re.sub(
         r"<(?:script|style)\b[^>]*>[\s\S]*?</(?:script|style)>",
@@ -442,7 +446,7 @@ def sanitize_status(value: str) -> str:
     )
     text = _TERMINAL_ESCAPE.sub("", text)
     text = "".join(character for character in text if character in "\n\t" or ord(character) >= 32)
-    return _truncate_utf8(text, 16 * 1024)
+    return _truncate_utf8(text, limit)
 
 
 def usage_reset_time(frame: dict[str, Any]) -> str | None:
@@ -664,7 +668,9 @@ class HostedChatClient:
                     }
                     if response.response:
                         yield CopperEvent(
-                            EventKind.TEXT, sanitize_status(response.response), **metadata
+                            EventKind.TEXT,
+                            sanitize_status(response.response, MAX_RESPONSE_TEXT_BYTES),
+                            **metadata,
                         )
                     if response.reasoning_update:
                         yield CopperEvent(
