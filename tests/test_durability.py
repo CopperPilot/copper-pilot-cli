@@ -34,6 +34,7 @@ from copper_pilot_cli.copper_graph import (
     retry_label,
 )
 from copper_pilot_cli.copper_protocol import (
+    IDLE_FRAME_TIMEOUT_ENV,
     ChatRequest,
     CopperEffort,
     CopperEvent,
@@ -43,6 +44,7 @@ from copper_pilot_cli.copper_protocol import (
     ProtocolError,
     ToolRequest,
     classify_error,
+    idle_frame_timeout,
 )
 from copper_pilot_cli.copper_status_events import COPPER_CONTEXT_KEY
 from copper_pilot_cli.copper_tools import ApprovalMode, LocalToolBroker
@@ -158,7 +160,6 @@ async def test_drop_between_frames_reports_close_code(monkeypatch) -> None:
     )
     monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: socket)
     client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
-    assert client.idle_frame_timeout is None
     events = []
     with pytest.raises(ProtocolError) as caught:
         async for event in client.stream(request(), lambda _request: None):
@@ -199,6 +200,50 @@ async def test_drop_while_sending_tool_result_reports_close_code(monkeypatch) ->
         async for event in client.stream(request(), handler):
             kinds.append(event.kind)
     assert kinds == [EventKind.TOOL_REQUEST]
+
+
+class _StallingSocket(_Socket):
+    """Sends its frames, then keeps the socket open and never sends again."""
+
+    async def recv(self):
+        if self.frames:
+            return await super().recv()
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_stalled_upstream_surfaces_as_an_error_instead_of_hanging(monkeypatch) -> None:
+    # rea-hardware saw turns where the hosted side stopped sending for 30+ min
+    # while the socket (and its keepalive) stayed up; the prompt never returned.
+    monkeypatch.setenv(IDLE_FRAME_TIMEOUT_ENV, "0.05")
+    socket = _StallingSocket(
+        [json.dumps({"type": "event", "chat_response": {"status_update": "Working"}})]
+    )
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: socket)
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+
+    async def drain() -> None:
+        async for _event in client.stream(request(), lambda _request: None):
+            pass
+
+    with pytest.raises(ProtocolError) as caught:
+        await asyncio.wait_for(drain(), timeout=5)
+    assert caught.value.code == "CHAT_IDLE_TIMEOUT"
+    assert caught.value.retryable is True
+    assert "no data for 0.05 s" in str(caught.value)
+    assert classify_error(caught.value).type == "timeout"
+
+
+def test_idle_frame_timeout_is_finite_by_default_and_configurable(monkeypatch) -> None:
+    monkeypatch.delenv(IDLE_FRAME_TIMEOUT_ENV, raising=False)
+    default = idle_frame_timeout()
+    assert default is not None and 0 < default <= 30 * 60
+    monkeypatch.setenv(IDLE_FRAME_TIMEOUT_ENV, "120")
+    assert idle_frame_timeout() == 120
+    monkeypatch.setenv(IDLE_FRAME_TIMEOUT_ENV, "0")
+    assert idle_frame_timeout() is None
+    monkeypatch.setenv(IDLE_FRAME_TIMEOUT_ENV, "soon")
+    assert idle_frame_timeout() == default
 
 
 @pytest.mark.asyncio
@@ -669,6 +714,73 @@ async def test_background_process_killed_before_the_final_frame_does_not_resume(
     assert messages[-1].content == "Started it."
     assert messages[-1].additional_kwargs[COPPER_CONTEXT_KEY] == CANCELLED_CONTEXT
     assert manager.processes() == []
+
+
+@pytest.mark.asyncio
+async def test_failed_final_is_not_held_back_by_a_running_background_process(
+    monkeypatch, tmp_path
+) -> None:
+    # rea-hardware: a filesystem-wide glob went to the background, the hosted
+    # turn then ended with "CopperPilot ran into an error.", and the CLI waited
+    # on the glob with no further updates until the caller's 30 min timeout.
+    manager = BackgroundProcessManager()
+    started = await run_shell(
+        py("import time; time.sleep(60)"),
+        tmp_path,
+        manager=manager,
+        foreground_seconds=0.05,
+    )
+    assert started["background"] is True
+    failed = {"success": False, "error": "CopperPilot ran into an error."}
+    agent = ScriptedAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Searching."), CopperEvent(EventKind.FINAL, failed)],
+            [CopperEvent(EventKind.TEXT, "should not run"), CopperEvent(EventKind.FINAL, {})],
+        ],
+        tool_broker=SimpleNamespace(background=manager),
+    )
+    events, messages = await asyncio.wait_for(run_graph(agent, monkeypatch, tmp_path), 10)
+
+    assert len(agent.inputs) == 1
+    assert not [e for e in events if e.get("title") == "background_processes_waiting"]
+    finals = [e for e in events if e["type"] == "copper.final"]
+    assert finals[-1]["data"]["error"] == "CopperPilot ran into an error."
+    assert messages[-1].content == "Searching."
+    assert not manager.has_running()
+
+
+@pytest.mark.asyncio
+async def test_failed_continuation_final_ends_the_turn(monkeypatch, tmp_path) -> None:
+    manager = BackgroundProcessManager()
+    await run_shell(
+        py("import time; time.sleep(0.2)"), tmp_path, manager=manager, foreground_seconds=0.05
+    )
+    failed = {"success": False, "error": "CopperPilot ran into an error."}
+
+    class Agent(ScriptedAgent):
+        async def astream_events_raw(self, value):
+            if len(self.inputs) == 1:
+                # The continuation backgrounds another long command, then fails.
+                await run_shell(
+                    py("import time; time.sleep(60)"),
+                    tmp_path,
+                    manager=manager,
+                    foreground_seconds=0.05,
+                )
+            async for event in super().astream_events_raw(value):
+                yield event
+
+    agent = Agent(
+        [
+            [CopperEvent(EventKind.TEXT, "Started."), CopperEvent(EventKind.FINAL, {})],
+            [CopperEvent(EventKind.FINAL, failed)],
+            [CopperEvent(EventKind.TEXT, "should not run"), CopperEvent(EventKind.FINAL, {})],
+        ],
+        tool_broker=SimpleNamespace(background=manager),
+    )
+    await asyncio.wait_for(run_graph(agent, monkeypatch, tmp_path), 10)
+    assert len(agent.inputs) == 2
+    assert not manager.has_running()
 
 
 # -------------------------------------------------------------- background

@@ -1252,7 +1252,11 @@ class CopperAcpAgent:
             await send(session_id=session_id, update=update_agent_thought_text(f"{label}\n"))
         elif kind == EventKind.FINAL.value and isinstance(payload, dict):
             if payload.get("success") is False or payload.get("error"):
-                return str(payload.get("error") or "hosted failure")
+                message = str(payload.get("error") or "hosted failure")
+                # The hosted copy is generic; the turn id lets the service
+                # owners find the server-side cause.
+                turn_id = event.get("turn_id")
+                return f"{message} (hosted turn {turn_id})" if turn_id else message
         return None
 
     # -------------------------------------------------------- broker handlers

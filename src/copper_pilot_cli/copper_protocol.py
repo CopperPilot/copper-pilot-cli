@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import ssl
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -37,6 +38,18 @@ MAX_CONTEXT_MESSAGE_BYTES = 64 * 1024
 MAX_CONTEXT_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_CONTEXT_ENTRIES = 2_000
 MAX_STREAM_BYTES = 64 * 1024 * 1024
+IDLE_FRAME_TIMEOUT_ENV = "COPPER_PILOT_IDLE_TIMEOUT_SECONDS"
+DEFAULT_IDLE_FRAME_TIMEOUT = 10 * 60.0
+
+
+def idle_frame_timeout() -> float | None:
+    """Seconds a streaming turn may stay silent; ``None`` (env ``0``) waits forever."""
+    raw = os.getenv(IDLE_FRAME_TIMEOUT_ENV, "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_IDLE_FRAME_TIMEOUT
+    except ValueError:
+        value = DEFAULT_IDLE_FRAME_TIMEOUT
+    return value if value > 0 else None
 
 
 class ProtocolError(RuntimeError):
@@ -489,10 +502,11 @@ class HostedChatClient:
         self._socket: Any = None
         self._owner: str | None = None
         self.first_frame_timeout = 60.0
-        # The desktop client never times out between frames once a turn is
-        # streaming: long hosted reasoning or subagent runs can stay silent for
-        # many minutes while websocket keepalive still detects dead peers.
-        self.idle_frame_timeout: float | None = None
+        # Long hosted reasoning or subagent runs can stay silent for minutes,
+        # and websocket keepalive only detects a dead peer. A server that keeps
+        # the socket open but stops sending would otherwise hang the turn
+        # forever, so a generous idle bound turns that stall into an error.
+        self.idle_frame_timeout: float | None = idle_frame_timeout()
         self.frame_budget = 10_000
 
     async def cancel(self) -> None:
@@ -582,7 +596,10 @@ class HostedChatClient:
                         raw = await asyncio.wait_for(socket.recv(), timeout)
                     except TimeoutError as exc:
                         phase = "first frame" if frame_count == 0 else "next frame"
-                        message = f"Timed out waiting for the hosted chat {phase}."
+                        message = (
+                            f"Timed out waiting for the hosted chat {phase} "
+                            f"(no data for {timeout:g} s)."
+                        )
                         raise ProtocolError(
                             message,
                             code="CHAT_FIRST_FRAME_TIMEOUT"
@@ -741,6 +758,15 @@ class HostedChatClient:
                             break
                     if frame_type == "final" or response.is_final:
                         saw_final = True
+                        if response.success is False or response.error:
+                            logger.warning(
+                                "Hosted turn ended unsuccessfully (turn_id=%s, error=%r, "
+                                "frame keys=%s, extra fields=%s)",
+                                response.turn_id,
+                                response.error,
+                                sorted(frame),
+                                sorted(response.model_extra or {}),
+                            )
                         yield CopperEvent(
                             EventKind.FINAL,
                             {
