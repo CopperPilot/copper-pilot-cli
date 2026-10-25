@@ -7,6 +7,218 @@ Changelog
 
 Fix
 ~~~
+- Do not block turn cancellation on loading-widget removal. [Cursor,
+  Naveen_Copperpilot]
+
+  Textual defers widget pruning to its message loop. Awaiting that removal during a cancelled turn could leave the turn task pending on Windows, so the cancellation cleanup test timed out.
+- Require Pillow 13 so the security audit passes. [Cursor,
+  Naveen_Copperpilot]
+
+  Pillow 12.3.0 is the newest release the old pin allowed, and pip-audit fails the CI job on four advisories fixed in 13.0.0.
+- Tell the type checker these widgets are Static. [Cursor,
+  Naveen_Copperpilot]
+
+  query() is typed as a generic widget, so ty rejected update() on the working line, the mode icon, and the input rules. CI stopped there before the tests ran.
+- Retry a reconnect the server refuses with HTTP 503. [AdityaNG, Claude
+  Fable 5.1]
+
+  Every "server rejected WebSocket connection: HTTP 503" failure seen from
+  T3 Code follows the same sequence: the hosted pod restarts mid-stream
+  (no close frame), the stitched resume reconnects 5 s later while the
+  backend is still coming back, and the load balancer answers the upgrade
+  with 503. websockets raises InvalidStatus for that, which classify_error
+  did not know, so the turn was typed "unknown", non-retryable, and the
+  remaining attempt was never used.
+
+  - classify InvalidStatus by HTTP status (5xx/429 retry; auth and other
+    4xx fail fast) and InvalidHandshake without a status as a connection
+    drop
+  - include InvalidHandshake in the transport's pre-first-event retry
+  - stretch the turn budget to four attempts (5/10/20/30 s) so it outlasts
+    a typical pod restart
+  - regression tests for the drop-then-503 sequence and the transport retry
+
+Other
+~~~~~
+- Merge pull request #31 from naveen-
+  forkd/feat/cli_chat_chrome_2026_10_24. [Aditya]
+
+  Redraw the CLI chat screen, add themes, and make typing faster
+- Test: wait until a tool is active before cancelling. [Cursor,
+  Naveen_Copperpilot]
+- Test: wait for the loading widget to leave after cancel. [Cursor,
+  Naveen_Copperpilot]
+
+  Textual drops the widget on a later prune tick, so an immediate check still sees it on Windows.
+- Test: run the suite in a UTF-8 locale. [Cursor, Naveen_Copperpilot]
+
+  Windows CI has no UTF-8 locale, so the app drew the ASCII fallback and the Unicode snapshots failed. The suite now sets a UTF-8 locale, and a test still checks that a C locale or COPPERPILOT_ASCII selects the fallback.
+- Test: cover theme switching and the input hot path.
+  [Naveen_Copperpilot]
+
+  Check the presets, /theme persistence, idle typing, the pruned file index, and streamed Markdown that keeps closed blocks.
+- Perf: keep typing, file completion, and streaming off the hot path.
+  [Naveen_Copperpilot]
+
+  Skip completion repaints when the matches did not change, and apply a pending @ filter before tab or enter. Build the file list in the background, skip ignored folders, and refresh it when it is stale. Append assistant Markdown only while a block is still open, so a finished paragraph or code fence is not replaced.
+- Perf: import deepagents the first time a tool runs.
+  [Naveen_Copperpilot]
+
+  Opening the UI was paying for the tool stack at import. Load it on the first tool call instead.
+- Test: keep the saved theme out of the suite. [Naveen_Copperpilot]
+
+  Point each test at a temporary CLI home and reset the shared palette. Live tests keep the real home so they can still load the device credential.
+- Feat: let /theme switch presets and remember the choice.
+  [Naveen_Copperpilot]
+
+  /theme opens a picker or takes a name, writes it to config.json, and repaints the chrome that bakes colours into text.
+- Feat: make near-black the default and add theme presets.
+  [Naveen_Copperpilot]
+
+  The warm stone background is now one preset. Black is the default, with warm, light, and high-contrast beside it. Snapshot colours read the active tokens, and the locale encoding is cached so glyph checks do not call locale.getencoding on every paint.
+- Feat: redraw the prompt and bind shift+tab and ctrl+e.
+  [Naveen_Copperpilot]
+
+  Rules replace the rounded box, and one tip sits above them until the first message. shift+tab and ctrl+e were taken by focus movement and end-of-line, so those bindings now take priority and cycle mode and effort while the prompt is focused.
+- Feat: replace the boxed header with a flat welcome and one status
+  line. [Naveen_Copperpilot]
+
+  Drop version, full path, and model from the header. Show the wordmark, repo, and quick start, and put mode and effort on the line under the prompt.
+- Feat: add the plain-text layout for the chat chrome.
+  [Naveen_Copperpilot]
+
+  Welcome, status, slash rows, the working line, and tips are content the widgets render. Only commands, modes, and keys the CLI already has are included.
+- Feat: draw the CopperPilot cube as a Braille mark.
+  [Naveen_Copperpilot]
+
+  Six rows of thirteen cells, one orange. The welcome omits it when the terminal is narrow, uncolored, or ASCII.
+- Feat: switch the CLI theme to the warm orange palette.
+  [Naveen_Copperpilot]
+
+  One orange and warm neutrals, with the same layout in truecolor, 256-color, and NO_COLOR. Status green and red stay limited to tool results.
+- Merge pull request #27 from
+  CopperPilot/feat/disable_model_selector_19_oct_2026. [Aditya]
+
+  feat: hide Intelligence model selection behind ENABLE_MODEL_SELECTOR (off)
+- Feat: hide Intelligence model selection behind ENABLE_MODEL_SELECTOR
+  (off) [AdityaNG, Claude Opus 5.5]
+
+  Add ENABLE_MODEL_SELECTOR to copper_models, set to False. While it is off
+  no surface names a model or offers a choice, and every Intelligence turn
+  asks for the default model (Gemini 4 Argon), including threads saved with
+  another model. Balanced still sends no model. No server change.
+
+  - TUI: no /model command or completion, /context and /help omit the model.
+  - Headless: --model is not registered.
+  - MCP: no models tool, the model argument is dropped from the ask/plan/
+    run/resume schemas, and results omit model/answered_model.
+  - ACP: only mode and effort config options, no /model command, a model
+    config change is rejected, and effort copy names no model.
+  - Fallback notices use a generic "switched to a backup model" message.
+
+  Flipping the constant to True restores the previous behaviour; the
+  existing model-selection tests run with it on via a fixture.
+- Merge pull request #28 from
+  CopperPilot/feat/agent_latency_cli_19_oct_2026. [Aditya]
+
+  Run tool_requests batches concurrently (parallel_tool_requests capability)
+- Keep batched tool calls on one assistant message; test ACP overlap.
+  [AdityaNG, Claude Opus 5.5]
+
+  The transcript records a batch's calls on a single AIMessage so every
+  call is followed by its result whatever the completion order. ACP already
+  keys tool_call / tool_call_update by id; a test now covers three
+  overlapping calls completing out of order.
+- Execute tool_requests batches concurrently over the chat socket.
+  [AdityaNG, Claude Opus 5.5]
+
+  chat_start advertises the parallel_tool_requests capability (disable with
+  COPPER_PILOT_PARALLEL_TOOLS=0). A batch frame yields one TOOL_REQUEST per
+  call, runs them with the scheduler and sends each tool_result, matched by
+  tool_call_id, as soon as it completes. Single tool_request frames are
+  unchanged. The hosted attempt is now closed deterministically so a
+  consumer that stops listening cancels running batch members, and the
+  local broker serializes approval and question prompts.
+- Add a scheduler for parallel tool-request batches. [AdityaNG, Claude
+  Opus 5.5]
+
+  Classifies each hosted tool request as READ, MUTATING (keyed by path) or
+  EXCLUSIVE and runs a batch with model-order dependencies: reads overlap
+  (capped at 8), same-path mutations run in order, shell commands that are
+  not provably read-only run alone. Failures are reported per tool and
+  closing the batch cancels unfinished members.
+- Merge pull request #26 from CopperPilot/feat/acp-usage-limit-reset.
+  [Aditya]
+
+  feat(acp): explain usage limits with their reset time
+- Merge remote-tracking branch 'origin/main' into feat/acp-usage-limit-
+  reset. [AdityaNG]
+
+  # Conflicts:
+  #	docs/cli.md
+  #	src/copper_pilot_cli/copper_acp.py
+  #	tests/test_acp.py
+- Merge pull request #25 from CopperPilot/t3/intelligence-mode-model-
+  selection. [Aditya]
+
+  feat: Intelligence model selection across TUI, CLI, MCP, and ACP
+- Feat: default Intelligence to Gemini 4 Argon, Gemini models first.
+  [AdityaNG, Claude Fable 5.1]
+
+  Mirror copper-pilot-client #98: the bundled catalog now lists the Gemini
+  models first and defaults Intelligence to gemini-4-argon. The server's
+  catalog order and default still win whenever it is reachable.
+- Feat: Intelligence model selection across TUI, CLI, MCP, and ACP.
+  [AdityaNG, Claude Fable 5.1]
+
+  Mirror the desktop client's Intelligence model picker (copper-pilot#97):
+  Balanced always runs on the server's Balanced model; Intelligence turns
+  may pick one model from the hosted catalog (Claude Opus 5.5 default).
+
+  - copper_models: catalog fetched once per process from
+    GET /api/copperpilot/chat/models with the bundled list as fallback,
+    plus model_fallback status-event helpers.
+  - ChatRequest.model is sent only on Intelligence turns; the thread
+    checkpoint persists copper_model next to copper_effort.
+  - CLI --model (implies --effort intelligence), TUI /model and /context,
+    and model_fallback notices in the transcript and headless output.
+  - MCP: model argument on ask/plan/run/resume, a models tool, and
+    model/answered_model in results and the digest.
+  - ACP: a model config option (category model) next to effort
+    (thought_level); choosing a model selects Intelligence, Balanced pins
+    the option to the Balanced model, /model slash command, and fallback
+    notices as agent messages.
+- Test(acp): accept a usage reset that falls after midnight. [AdityaNG,
+  Claude Opus 5.5]
+- Feat(acp): explain usage limits with their reset time. [AdityaNG,
+  Claude Opus 5.5]
+
+  A turn refused by the usage window or weekly limit reached ACP clients as a
+  generic -32603 error whose text carried a raw UTC timestamp, or for a refused
+  handshake only "HTTP 402".
+
+  - Keep the reset time from the hosted error frame's detail
+    (window_ends_at / week_ends_at) on ProtocolError and the error event.
+  - ACP fails such a turn with code -32003 and a message naming the spent
+    limit and its local reset time ("It resets at 3:20 AM (in 2h 23m).");
+    data carries class=usage_limit, blockReason and resetAt. Without a reset
+    time in the frame, the token-limits endpoint fills it in; a bare 402 the
+    account view does not confirm (the Intelligence plan gate) is unchanged.
+  - The graph keeps a refused handshake's HTTP status on its error event.
+  - ACP drops the terminal "Attempt N failed" thought that repeated the error.
+  - New ACP /usage command shows the window, weekly balance and reset times.
+  - The TUI renders usage blocks with the same local reset time.
+- Merge pull request #24 from CopperPilot/fix/retry-refused-handshake.
+  [Aditya]
+
+  fix: retry a reconnect the server refuses with HTTP 503
+
+
+0.1.10 (2026-10-18)
+-------------------
+
+Fix
+~~~
 - Skip the killed-background resume test on Windows. [AdityaNG, Cursor]
 
   os.killpg is POSIX-only, and that failure was the Windows CI break.
@@ -17,6 +229,7 @@ Fix
 
 Other
 ~~~~~
+- Release: version 0.1.10 🚀 [AdityaNG]
 - Merge pull request #23 from CopperPilot/feat/acp-image-prompts.
   [Aditya]
 
