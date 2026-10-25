@@ -216,6 +216,8 @@ class _TurnRun:
         self.context_parts: list[str] = []
         self.failure: ErrorInfo | None = None
         self.cancelled = False
+        # The hosted service ended the turn with ``success: false``.
+        self.final_failed = False
 
     # ------------------------------------------------------------ streaming
 
@@ -244,6 +246,8 @@ class _TurnRun:
             self._track(event)
 
     def _track(self, event: CopperEvent) -> None:
+        if event.kind is EventKind.FINAL and isinstance(event.data, dict):
+            self.final_failed = event.data.get("success") is False or bool(event.data.get("error"))
         if event.kind is EventKind.TEXT:
             self.text.append(str(event.data))
         elif event.kind is EventKind.STATUS_EVENT and isinstance(event.data, dict):
@@ -426,6 +430,8 @@ class _TurnRun:
             ]
             if not await self.run_with_retry(continuation, first_messages=messages):
                 return False
+            if self.final_failed:
+                return False
         return True
 
     # ---------------------------------------------------------------- close
@@ -526,10 +532,12 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 query if isinstance(query, str) else json.dumps(query),
                 first_messages=original,
             )
-            if completed:
+            # A failed final ends the turn: waiting on background shells first
+            # would hold the hosted error back for as long as they run.
+            if completed and not run.final_failed:
                 await run.wait_for_background()
         finally:
-            if run.failure is not None or run.cancelled:
+            if run.failure is not None or run.cancelled or run.final_failed:
                 manager = _background_manager(agent)
                 if manager is not None:
                     await manager.kill_all()

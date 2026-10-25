@@ -826,6 +826,24 @@ async def test_prompt_reports_failed_final_event(tmp_path, monkeypatch) -> None:
         await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
 
 
+async def test_failed_final_event_names_the_hosted_turn(tmp_path, monkeypatch) -> None:
+    # The hosted copy is the generic "CopperPilot ran into an error."; the turn
+    # id is what lets the service owners find the server-side cause.
+    runtime = FakeRuntime(
+        [
+            {
+                "type": "copper.final",
+                "data": {"success": False, "error": "CopperPilot ran into an error."},
+                "turn_id": "turn-42",
+            }
+        ]
+    )
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    with pytest.raises(RequestError) as caught:
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+    assert str(caught.value) == "CopperPilot ran into an error. (hosted turn turn-42)"
+
+
 @pytest.mark.parametrize(
     ("error", "code"),
     [
