@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import tempfile
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -90,11 +91,11 @@ def atomic_write_text(destination: Path, text: str, *, mode: int | None = None) 
 @contextlib.contextmanager
 def state_lock(destination: Path) -> Generator[None]:
     """Serialize read-modify-write of a state file across processes (POSIX only)."""
-    try:
-        import fcntl
-    except ImportError:
+    if sys.platform == "win32":
         yield
         return
+    import fcntl
+
     with open(destination.with_name(f".{destination.name}.lock"), "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
