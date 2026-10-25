@@ -283,6 +283,22 @@ class DesignIndex:
     def net_names(self) -> set[str]:
         return {name.upper() for name in self.nets}
 
+    def has_net(self, name: str) -> bool:
+        """Whether ``name`` cites a design net, by full path or hierarchical leaf.
+
+        KiCad names a local or hierarchical label's net with its sheet path
+        (``/RAIL_IO_3``, ``/power/RAIL_IO_3``) while people cite the label
+        (``RAIL_IO_3``). Accept the full name or any ``/``-boundary suffix of it.
+        """
+        cited = name.strip().upper()
+        if not cited:
+            return False
+        for net in self.nets:
+            full = net.upper()
+            if full == cited or full.endswith("/" + cited.lstrip("/")):
+                return True
+        return False
+
     @property
     def layer_names(self) -> set[str]:
         return {name.lower() for name in self.layers}
