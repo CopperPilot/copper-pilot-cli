@@ -7,9 +7,11 @@ checkpointed, never shown in the transcript, and never sent to the main turn.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
+import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -17,18 +19,35 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from copper_pilot_cli.copper_api import usage_error_message
 from copper_pilot_cli.copper_protocol import (
     ChatMessage,
     ChatRequest,
     CopperEffort,
     CopperMode,
+    EventKind,
+    HostedChatClient,
+    ProtocolError,
+    ToolRequest,
 )
 from copper_pilot_cli.langchain import _context
+
+logger = logging.getLogger(__name__)
 
 MAX_SIDE_QUESTIONS = 20
 MAX_REPLAYED_EXCHANGES = 5
 MAX_SNAPSHOT_TOOLS = 30
 MAX_SNAPSHOT_TEXT = 4_000
+MAX_IN_FLIGHT = 3
+MAX_TOOL_DENIALS = 3
+SIDE_QUESTION_TIMEOUT = 120.0
+TOOL_DENIED = "Side questions cannot use tools. Answer from the conversation context only."
+NOTHING_EXECUTED = "_The model asked for a tool; nothing was executed._"
+
+
+class SideQuestionError(RuntimeError):
+    """A side question could not be answered; the message is user-facing."""
+
 
 SideStatus = Literal["pending", "done", "error"]
 
@@ -221,3 +240,52 @@ def build_side_request(
         pcb_path=pcb_path,
         project_data={"workspace_path": str(workspace)},
     )
+
+
+def _hosted_client(credential: Any) -> HostedChatClient:
+    return HostedChatClient(credential.base_url, credential.api_key, credential.fingerprint)
+
+
+async def run_side_question(
+    credential: Any,
+    request: ChatRequest,
+    *,
+    limit_s: float = SIDE_QUESTION_TIMEOUT,
+    client_factory: Callable[[Any], Any] = _hosted_client,
+) -> str:
+    """Stream one side answer on its own socket; every tool request is refused."""
+    if credential is None:
+        raise SideQuestionError("Not authenticated. Use `/auth login` first.")
+    client = client_factory(credential)
+    text: list[str] = []
+    denials = 0
+    stopped = False
+
+    async def deny(tool: ToolRequest) -> dict[str, Any]:
+        nonlocal denials, stopped
+        denials += 1
+        logger.info("Side question refused tool %s", tool.tool_name)
+        if denials >= MAX_TOOL_DENIALS and not stopped:
+            stopped = True
+            await client.cancel()
+        return {"error": TOOL_DENIED, "rejected": True}
+
+    try:
+        async with asyncio.timeout(limit_s):
+            async for event in client.stream(request, deny):
+                if event.kind is EventKind.TEXT:
+                    text.append(str(event.data))
+    except TimeoutError as exc:
+        if not text:
+            raise SideQuestionError(f"No answer within {limit_s:g}s.") from exc
+    except ProtocolError as exc:
+        if not (stopped and text):
+            raise SideQuestionError(usage_error_message(exc.as_event_data())) from exc
+    except (OSError, ConnectionError) as exc:
+        raise SideQuestionError(f"Could not reach CopperPilot: {exc}") from exc
+    answer = "".join(text).strip()
+    if denials:
+        answer = f"{answer}\n\n{NOTHING_EXECUTED}".strip()
+    if not answer:
+        raise SideQuestionError("No answer was returned. Try rephrasing.")
+    return answer
