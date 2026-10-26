@@ -163,6 +163,7 @@ def test_build_side_request_is_tool_less_ask_on_fresh_conversation(tmp_path) -> 
     assert request.initial_file_tree is None
     assert request.schematic_path == "board.kicad_sch"
     assert "what is it doing?" in request.query and "NO tools" in request.query
+    assert "Keep it brief" in request.query
     roles = [(message.role, message.content) for message in request.context]
     assert roles[0] == ("user", "Check the LDO")
     assert roles[1] == ("assistant", "The LDO is fine.")

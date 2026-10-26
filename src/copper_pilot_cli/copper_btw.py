@@ -204,7 +204,8 @@ def wrap_question(question: str) -> str:
         "- This is a one-off reply; there are no follow-up turns.\n"
         "- Answer only from what is already in the conversation and the snapshot.\n"
         '- Never say "Let me check", "I\'ll now", or promise any action.\n'
-        "- If you do not know, say so.\n\n"
+        "- If you do not know, say so.\n"
+        "- Keep it brief: a few sentences or a short list.\n\n"
         f"Question: {question}"
     )
 
