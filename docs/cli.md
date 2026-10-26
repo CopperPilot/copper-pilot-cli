@@ -81,6 +81,8 @@ current status, this turn's tool calls, survey workers, and the reply so far.
   resuming another thread clear it, and it is gone when the CLI exits.
 - If the panel is closed when an answer arrives, a notification says it is
   ready. The panel never takes focus from an approval prompt.
+- The panel shows at most the first 60 lines (8,000 characters) of an answer,
+  so moving between long answers stays fast; `c` copies the full answer.
 
 | Key (panel focused) | Action |
 |---------------------|--------|
