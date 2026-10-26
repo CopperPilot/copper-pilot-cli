@@ -1615,6 +1615,7 @@ class BtwPanel(Container):
         super().__init__(id="btw-panel")
         self.position = 0
         self.total = 0
+        self._body: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", classes="btw-header")
@@ -1671,6 +1672,10 @@ class BtwPanel(Container):
         self._set_body(markdown)
 
     def _set_body(self, markdown: str) -> None:
+        # Markdown re-renders every block on update (about 2 ms per list item).
+        if markdown == self._body:
+            return
+        self._body = markdown
         self.query_one(".btw-answer", Markdown).update(bounded_widget_text(markdown))
         self.query_one(".btw-scroll", VerticalScroll).scroll_home(animate=False)
 

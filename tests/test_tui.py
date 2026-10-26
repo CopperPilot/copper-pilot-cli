@@ -1563,3 +1563,27 @@ async def test_btw_error_stays_in_panel(tmp_path) -> None:
         entry = app._btw.current()
         assert entry.status == "error" and "Not authenticated" in entry.answer
         assert not app.query(ErrorMessage)
+
+
+@pytest.mark.asyncio
+async def test_btw_panel_skips_rendering_an_unchanged_answer(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    app._btw_runner = _side_runner([])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("first?")
+        await app._btw_command("second?")
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        await pilot.pause()
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        answer = panel.query_one(".btw-answer", copper_widgets_module.Markdown)
+        with patch.object(answer, "update", wraps=answer.update) as update:
+            await pilot.press("left")
+            await pilot.press("left")
+            await pilot.press("shift+left")
+            assert update.call_count == 1
+            await app._btw_command("")
+            assert update.call_count == 2
+            await pilot.press("right")
+            await pilot.press("right")
+            await app._btw_command("")
+            assert update.call_count == 2
