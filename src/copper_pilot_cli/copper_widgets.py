@@ -158,6 +158,11 @@ class ComposerTextArea(TextArea):
             event.stop()
             event.prevent_default()
             return
+        if event.key == "escape" and not completion_active and self.app.query("#btw-panel.-open"):
+            self.post_message(ChatInput.DismissBtw())
+            event.stop()
+            event.prevent_default()
+            return
         if event.key == "escape" and not completion_active:
             task = getattr(self.app, "_turn_task", None)
             if task is not None and not task.done():
@@ -285,6 +290,9 @@ class ChatInput(Vertical):
 
     class DismissShortcuts(Message):
         """Escape while the shortcuts panel is open."""
+
+    class DismissBtw(Message):
+        """Escape while the `/btw` panel is open; a second Escape can stop the turn."""
 
     class StopTurn(Message):
         """Escape while a turn is running."""
