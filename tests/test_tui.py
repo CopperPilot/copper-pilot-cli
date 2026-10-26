@@ -1587,3 +1587,38 @@ async def test_btw_panel_skips_rendering_an_unchanged_answer(tmp_path) -> None:
             await pilot.press("right")
             await app._btw_command("")
             assert update.call_count == 2
+
+
+def test_btw_panel_markdown_shortens_long_answers() -> None:
+    shorten = copper_widgets_module.btw_panel_markdown
+    limit = copper_widgets_module.BTW_PANEL_LINES
+    assert shorten("short answer") == "short answer"
+    long_list = "\n".join(f"- item {index}" for index in range(limit * 3))
+    shortened = shorten(long_list)
+    assert f"- item {limit - 1}" in shortened and f"- item {limit}\n" not in shortened
+    assert shortened.endswith("Press c to copy the full answer._")
+    fenced = "```text\n" + "\n".join(f"line {index}" for index in range(limit * 2)) + "\n```"
+    assert shorten(fenced).count("```") == 2
+    huge_line = "x" * (copper_widgets_module.BTW_PANEL_CHARS * 2)
+    assert len(shorten(huge_line)) < copper_widgets_module.BTW_PANEL_CHARS + 100
+
+
+@pytest.mark.asyncio
+async def test_btw_panel_renders_a_short_view_but_copies_everything(tmp_path) -> None:
+    long_answer = "\n".join(f"- point {index}" for index in range(500))
+
+    async def runner(_credential, _request):
+        return long_answer
+
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    app._btw_runner = runner
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("everything?")
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        await pilot.pause()
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        source = panel.query_one(".btw-answer", copper_widgets_module.Markdown).source
+        assert "- point 499" not in source and "Press c to copy" in source
+        with patch.object(copper_app_module.pyperclip, "copy") as copy:
+            await pilot.press("c")
+        copy.assert_called_once_with(long_answer)

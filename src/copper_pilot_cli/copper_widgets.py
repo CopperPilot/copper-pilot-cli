@@ -1562,6 +1562,22 @@ class ShortcutsPanel(Static):
         self.update(help_content(content_width, mode=mode, ascii=ascii_mode()))
 
 
+BTW_PANEL_LINES = 60
+BTW_PANEL_CHARS = 8_000
+
+
+def btw_panel_markdown(text: str) -> str:
+    """Shorten a side answer for the panel; `c` still copies all of it."""
+    lines = text.splitlines()
+    if len(lines) <= BTW_PANEL_LINES and len(text) <= BTW_PANEL_CHARS:
+        return text
+    kept = "\n".join(lines[:BTW_PANEL_LINES])[:BTW_PANEL_CHARS]
+    fences = sum(line.lstrip().startswith(("```", "~~~")) for line in kept.splitlines())
+    if fences % 2:
+        kept += "\n```"
+    return f"{kept}\n\n_Shortened here. Press c to copy the full answer._"
+
+
 class BtwPanel(Container):
     """`/btw` side answers docked above the composer; never part of the transcript."""
 
@@ -1660,7 +1676,7 @@ class BtwPanel(Container):
         elif status == "error":
             body = f"**Could not answer:** {answer}"
         else:
-            body = answer
+            body = btw_panel_markdown(answer)
         self._set_body(body)
 
     def show_local(self, markdown: str) -> None:
