@@ -1554,6 +1554,160 @@ class ShortcutsPanel(Static):
         self.update(help_content(content_width, mode=mode, ascii=ascii_mode()))
 
 
+class BtwPanel(Container):
+    """`/btw` side answers docked above the composer; never part of the transcript."""
+
+    can_focus = True
+    can_focus_children = False
+    DEFAULT_CSS = """
+    BtwPanel {
+        display: none;
+        height: auto;
+        max-height: 45%;
+        margin: 0 1;
+        padding: 0 1;
+        border: round $border;
+        background: $input-bg;
+    }
+    BtwPanel:focus { border: round $primary; }
+    BtwPanel.-open { display: block; }
+    BtwPanel .btw-header { height: 1; color: $muted; }
+    BtwPanel .btw-earlier { height: auto; color: $muted; text-style: dim; }
+    BtwPanel .btw-question { height: auto; color: $heading; text-style: bold; }
+    BtwPanel .btw-scroll { height: auto; max-height: 16; }
+    BtwPanel .btw-answer { height: auto; margin: 0; padding: 0; background: transparent; }
+    """
+
+    class Closed(Message):
+        """Esc, Enter or Space."""
+
+    class Navigate(Message):
+        def __init__(self, delta: int) -> None:
+            super().__init__()
+            self.delta = delta
+
+    class Copy(Message):
+        """`c`: copy the shown answer."""
+
+    class Clear(Message):
+        """`x`: forget earlier side questions."""
+
+    class TypeThrough(Message):
+        """A printable key the panel does not use goes back to the prompt."""
+
+        def __init__(self, character: str) -> None:
+            super().__init__()
+            self.character = character
+
+    _CLOSE_KEYS = frozenset({"escape", "enter", "space"})
+    _OLDER_KEYS = frozenset({"left", "shift+left", "left_square_bracket"})
+    _NEWER_KEYS = frozenset({"right", "shift+right", "right_square_bracket"})
+
+    def __init__(self) -> None:
+        super().__init__(id="btw-panel")
+        self.position = 0
+        self.total = 0
+
+    def compose(self) -> ComposeResult:
+        yield Static("", classes="btw-header")
+        yield Static("", classes="btw-earlier")
+        yield Static("", classes="btw-question")
+        with VerticalScroll(classes="btw-scroll"):
+            yield Markdown("", classes="btw-answer")
+
+    @property
+    def is_open(self) -> bool:
+        return self.has_class("-open")
+
+    def open(self, *, focus: bool) -> None:
+        self.add_class("-open")
+        if focus:
+            self.focus()
+
+    def close(self) -> None:
+        self.remove_class("-open")
+
+    def show_entry(
+        self,
+        *,
+        question: str,
+        answer: str,
+        status: str,
+        position: int,
+        total: int,
+        earlier: Sequence[str] = (),
+    ) -> None:
+        self.position = position
+        self.total = total
+        self._redraw()
+        self.query_one(".btw-earlier", Static).update(
+            literal_text("\n".join(f"· {item[:120]}" for item in earlier))
+        )
+        self.query_one(".btw-earlier", Static).display = bool(earlier)
+        self.query_one(".btw-question", Static).update(literal_text(f"btw: {question}"))
+        self.query_one(".btw-question", Static).display = True
+        if status == "pending":
+            body = "_Thinking…_"
+        elif status == "error":
+            body = f"**Could not answer:** {answer}"
+        else:
+            body = answer
+        self._set_body(body)
+
+    def show_local(self, markdown: str) -> None:
+        self.position = 0
+        self.total = 0
+        self._redraw()
+        self.query_one(".btw-earlier", Static).display = False
+        self.query_one(".btw-question", Static).display = False
+        self._set_body(markdown)
+
+    def _set_body(self, markdown: str) -> None:
+        self.query_one(".btw-answer", Markdown).update(bounded_widget_text(markdown))
+        self.query_one(".btw-scroll", VerticalScroll).scroll_home(animate=False)
+
+    def _redraw(self) -> None:
+        if not self.is_mounted or not self.query(".btw-header"):
+            return
+        arrows = "</>" if ascii_mode() else "←/→"
+        scroll = "up/down" if ascii_mode() else "↑/↓"
+        count = f"  {self.position}/{self.total}" if self.total else ""
+        hint = f"esc close · {arrows} prev/next · {scroll} scroll · c copy · x clear"
+        if not self.total:
+            hint = f"esc close · {scroll} scroll · /btw <question> to ask"
+        self.query_one(".btw-header", Static).update(literal_text(f"btw{count}  {hint}"))
+
+    async def on_key(self, event: events.Key) -> None:
+        key = event.key
+        scroll = self.query_one(".btw-scroll", VerticalScroll)
+        scroll_actions = {
+            "up": scroll.scroll_up,
+            "down": scroll.scroll_down,
+            "pageup": scroll.scroll_page_up,
+            "pagedown": scroll.scroll_page_down,
+            "home": scroll.scroll_home,
+            "end": scroll.scroll_end,
+        }
+        if key in self._CLOSE_KEYS:
+            self.post_message(self.Closed())
+        elif key in self._OLDER_KEYS:
+            self.post_message(self.Navigate(-1))
+        elif key in self._NEWER_KEYS:
+            self.post_message(self.Navigate(1))
+        elif key in scroll_actions:
+            scroll_actions[key](animate=False)
+        elif event.character == "c":
+            self.post_message(self.Copy())
+        elif event.character == "x":
+            self.post_message(self.Clear())
+        elif event.is_printable and event.character:
+            self.post_message(self.TypeThrough(event.character))
+        else:
+            return
+        event.stop()
+        event.prevent_default()
+
+
 class ErrorMessage(Static):
     DEFAULT_CSS = """
     ErrorMessage { height: auto; color: $error; border-left: wide $error; padding: 0 1; }
