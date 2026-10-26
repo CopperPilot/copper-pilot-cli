@@ -203,6 +203,51 @@ async def test_long_response_text_is_not_cut_at_the_status_limit(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_echoed_request_query_does_not_count_toward_the_byte_budget(monkeypatch) -> None:
+    # The hosted service echoes the request query in every chat_response. A
+    # 76 KB validate prompt over ~815 frames of a 43 min review crossed the
+    # 64 MiB budget although the hosted output itself was about 4 MB.
+    query = "q" * 4_000
+    frames = [
+        json.dumps({"type": "event", "chat_response": {"query": query, "status_update": "busy"}})
+        for _ in range(50)
+    ]
+    frames.append(
+        json.dumps(
+            {
+                "type": "final",
+                "chat_response": {
+                    "query": query,
+                    "context": [{"role": "user", "content": query}],
+                    "response": "done",
+                    "success": True,
+                },
+            }
+        )
+    )
+
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, _value):
+            return None
+
+        async def recv(self):
+            return frames.pop(0)
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.MAX_STREAM_BYTES", 64 * 1024)
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: Socket())
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+    events = [event async for event in client.stream(request(), lambda _request: None)]
+    assert events[-1].kind is EventKind.FINAL
+    assert [event.data for event in events if event.kind is EventKind.TEXT] == ["done"]
+
+
+@pytest.mark.asyncio
 async def test_hosted_stream_enforces_aggregate_byte_budget(monkeypatch) -> None:
     class Socket:
         async def __aenter__(self):
