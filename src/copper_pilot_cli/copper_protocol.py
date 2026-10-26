@@ -38,6 +38,18 @@ MAX_CONTEXT_MESSAGE_BYTES = 64 * 1024
 MAX_CONTEXT_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_CONTEXT_ENTRIES = 2_000
 MAX_STREAM_BYTES = 64 * 1024 * 1024
+# Request fields the hosted service echoes back in every chat_response. The
+# client never reads them, and the echoed ``query`` alone (a whole validate
+# prompt) can be most of each frame, so they do not count toward the budget.
+ECHOED_REQUEST_FIELDS = (
+    "query",
+    "context",
+    "document_context",
+    "pcb_data",
+    "pcb_info",
+    "schematic_data",
+    "schematic_info",
+)
 MAX_STATUS_BYTES = 16 * 1024
 # The answer itself can be long (a validate review's findings JSON easily
 # passes 16 KB) and the hosted side may send it as one frame.
@@ -474,6 +486,20 @@ def error_message(value: Any) -> str:
 ToolHandler = Callable[[ToolRequest], Awaitable[Any]]
 
 
+def _counted_frame_bytes(raw: str | bytes, frame: dict[str, Any]) -> int:
+    """Bytes of one frame that count toward the stream budget, minus echoed request fields."""
+    size = len(raw.encode() if isinstance(raw, str) else raw)
+    response = frame.get("chat_response")
+    if isinstance(response, dict):
+        echoed = sum(
+            len(json.dumps(response[key]).encode())
+            for key in ECHOED_REQUEST_FIELDS
+            if key in response
+        )
+        size -= echoed
+    return max(size, 0)
+
+
 def tool_error_result(exc: BaseException) -> dict[str, Any]:
     """The tool_result payload reported when a local tool raises."""
     return {
@@ -615,17 +641,22 @@ class HostedChatClient:
                         closed = exc
                         break
                     frame_count += 1
-                    stream_bytes += len(raw.encode() if isinstance(raw, str) else raw)
                     if frame_count > self.frame_budget:
                         raise ProtocolError("Chat exceeded the client frame budget.")
-                    if stream_bytes > MAX_STREAM_BYTES:
-                        raise ProtocolError("Chat exceeded the client stream byte budget.")
                     try:
                         frame = json.loads(raw)
                     except (json.JSONDecodeError, TypeError) as exc:
                         raise ProtocolError("Hosted chat returned invalid JSON.") from exc
                     if not isinstance(frame, dict):
                         raise ProtocolError("Hosted chat frame must be a JSON object.")
+                    stream_bytes += _counted_frame_bytes(raw, frame)
+                    if stream_bytes > MAX_STREAM_BYTES:
+                        raise ProtocolError(
+                            "Chat exceeded the client stream byte budget "
+                            f"({stream_bytes // (1024 * 1024)} MiB of hosted output "
+                            f"in {frame_count} frames, limit "
+                            f"{MAX_STREAM_BYTES // (1024 * 1024)} MiB)."
+                        )
                     frame_type = frame.get("type")
                     if frame_type == "error":
                         message = frame.get("public_message") or frame.get("message")
