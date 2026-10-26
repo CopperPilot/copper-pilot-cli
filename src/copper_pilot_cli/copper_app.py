@@ -9,6 +9,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pyperclip
@@ -31,6 +32,16 @@ from copper_pilot_cli._version import __version__
 from copper_pilot_cli.clipboard import copy_selection_to_clipboard
 from copper_pilot_cli.copper_api import format_token_limits, token_limits, usage_error_message
 from copper_pilot_cli.copper_auth import DeviceLogin, clear_credential
+from copper_pilot_cli.copper_btw import (
+    MAX_IN_FLIGHT,
+    LiveTool,
+    LiveTurn,
+    SideQuestionError,
+    SideQuestionLog,
+    build_side_request,
+    live_snapshot,
+    run_side_question,
+)
 from copper_pilot_cli.copper_chrome import next_effort, next_mode, slash_catalog
 from copper_pilot_cli.copper_features import (
     LocalSkill,
@@ -93,6 +104,7 @@ from copper_pilot_cli.copper_widgets import (
     ApprovalDecision,
     ApprovalMenu,
     AssistantMessage,
+    BtwPanel,
     ChatInput,
     CompletionEntry,
     ErrorMessage,
@@ -253,6 +265,11 @@ class CopperPilotApp(App[None]):
         self._turn_error_rendered = False
         self._loading: LoadingWidget | None = None
         self._turn_state = TurnState()
+        self._turn_query = ""
+        self._turn_tool_start = 0
+        self._btw = SideQuestionLog()
+        self._btw_tasks: set[asyncio.Task[None]] = set()
+        self._btw_runner = run_side_question
         self._register_copper_theme()
         self.hooks = HookRunner(workspace, broker)
         self.broker.approve = self.request_approval
@@ -297,6 +314,7 @@ class CopperPilotApp(App[None]):
             *self.query(StatusBar),
             *self.query(HelpCard),
             *self.query(ShortcutsPanel),
+            *self.query(BtwPanel),
         ):
             widget._redraw()
         for composer in self.query(ChatInput):
@@ -311,6 +329,7 @@ class CopperPilotApp(App[None]):
     def compose(self) -> ComposeResult:
         with ChatScroll(id="transcript"):
             yield WelcomeBanner(self.workspace, model=self.copper_effort.value)
+        yield BtwPanel()
         yield ChatInput(cwd=self.workspace)
         yield StatusBar(
             self.workspace,
@@ -339,6 +358,7 @@ class CopperPilotApp(App[None]):
         )
 
     async def on_unmount(self) -> None:
+        self._cancel_btw_tasks()
         try:
             if self._turn_task and not self._turn_task.done():
                 with contextlib.suppress(Exception):
@@ -491,6 +511,9 @@ class CopperPilotApp(App[None]):
         transcript = self.query_one("#transcript", ChatScroll)
         await transcript.remove_children()
         await transcript.mount(WelcomeBanner(self.workspace, model=self.copper_effort.value))
+        self._clear_btw()
+        for panel in self.query(BtwPanel):
+            panel.close()
         self._assistant = None
         self._reasoning = None
         self._tools.clear()
@@ -654,7 +677,9 @@ class CopperPilotApp(App[None]):
             composer.first().hide_tip()
         token, _, remainder = value.partition(" ")
         skill = self._skills.get(token.removeprefix("/").lower())
-        if skill is not None:
+        if value == "/btw" or value.startswith("/btw "):
+            await self._command(value)
+        elif skill is not None:
             self._selected_skill = skill.id
             self.runtime.agent.workflow = skill.id
             await self._submit(remainder.strip() or f"Apply the {skill.label} skill.")
@@ -697,6 +722,8 @@ class CopperPilotApp(App[None]):
         self._finalize_work_run()
         self.query_one("#transcript", ChatScroll).anchor()
         await self._mount(UserMessage(value))
+        self._turn_query = value
+        self._turn_tool_start = len(self._tools)
         self._assistant = None
         self._last_assistant_content = ""
         self._reasoning = None
@@ -928,6 +955,8 @@ class CopperPilotApp(App[None]):
         command, _, argument = value.partition(" ")
         if command in {"/quit", "/exit"}:
             self.exit()
+        elif command == "/btw":
+            await self._btw_command(argument.strip())
         elif command == "/help":
             await self._mount(HelpCard(include_model=model_selector_enabled()))
         elif command == "/clear":
@@ -1114,6 +1143,168 @@ class CopperPilotApp(App[None]):
             await self._mount(ErrorMessage(f"Unknown command: {value}"))
         else:
             await self._mount(ErrorMessage(f"Unknown command: {command}"))
+
+    def _live_turn(self) -> LiveTurn:
+        running = self._turn_task is not None and not self._turn_task.done()
+        loading = self._loading
+        tools = [
+            LiveTool(tool.tool_name, dict(tool.args), tool.status)
+            for tool in list(self._tools.values())[self._turn_tool_start :]
+        ]
+        return LiveTurn(
+            running=running,
+            query=self._turn_query,
+            status=loading.status_text if loading is not None else self._turn_state.status,
+            elapsed_s=(
+                int(monotonic() - loading.started_at - loading.paused_total)
+                if loading is not None
+                else None
+            ),
+            text=self._last_assistant_content,
+            tools=tools if running else [],
+            subagents=(
+                [(item.task, item.status) for item in self._subagent_statuses.values()]
+                if running
+                else []
+            ),
+        )
+
+    async def _btw_history(self) -> list[Any]:
+        try:
+            state = await self.runtime.aget_state(self._config())
+        except Exception as exc:
+            logger.warning("Side question could not read the thread (%s)", type(exc).__name__)
+            return []
+        messages = (getattr(state, "values", {}) or {}).get("messages", [])
+        return list(messages) if isinstance(messages, list) else []
+
+    async def _btw_command(self, question: str) -> None:
+        panel = self.query_one(BtwPanel)
+        if not question:
+            if self._btw.latest() is not None:
+                self._show_btw_entry()
+            else:
+                panel.show_local(live_snapshot(self._live_turn()))
+            self._open_btw()
+            return
+        if self._btw.pending() >= MAX_IN_FLIGHT:
+            self.notify(
+                "Wait for a side answer before asking another.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        snapshot = live_snapshot(self._live_turn())
+        earlier = self._btw.completed()
+        entry = self._btw.add(question)
+        self._show_btw_entry()
+        self._open_btw()
+        task = asyncio.create_task(self._answer_btw(entry.id, question, snapshot, earlier))
+        self._btw_tasks.add(task)
+        task.add_done_callback(self._btw_tasks.discard)
+
+    async def _answer_btw(
+        self, entry_id: int, question: str, snapshot: str, earlier: list[Any]
+    ) -> None:
+        agent = self.runtime.agent
+        context = getattr(agent, "context", None)
+        failed = False
+        try:
+            request = build_side_request(
+                question,
+                history=await self._btw_history(),
+                snapshot=snapshot,
+                earlier=earlier,
+                workspace=self.workspace,
+                schematic_path=getattr(context, "schematic_path", None),
+                pcb_path=getattr(context, "pcb_path", None),
+            )
+            answer = await self._btw_runner(getattr(agent, "credential", None), request)
+        except SideQuestionError as exc:
+            failed, answer = True, str(exc)
+        except Exception as exc:
+            logger.warning("Side question failed (%s)", type(exc).__name__)
+            failed, answer = True, f"{type(exc).__name__}: {exc}"
+        entry = self._btw.resolve(entry_id, answer, failed=failed)
+        panels = self.query(BtwPanel)
+        if entry is None or not panels:
+            return
+        current = self._btw.current()
+        if panels.first().is_open:
+            if current is not None and current.id == entry_id:
+                self._show_btw_entry()
+        else:
+            self.notify("Side answer ready. Type /btw to view.", markup=False)
+
+    def _show_btw_entry(self) -> None:
+        entry = self._btw.current()
+        if entry is None:
+            return
+        self.query_one(BtwPanel).show_entry(
+            question=entry.question,
+            answer=entry.answer,
+            status=entry.status,
+            position=self._btw.index + 1,
+            total=len(self._btw),
+            earlier=[item.question for item in self._btw.earlier_than_current(3)],
+        )
+
+    def _open_btw(self) -> None:
+        focus = not self.query(ApprovalMenu) and not isinstance(self.screen, ModalScreen)
+        self.query_one(BtwPanel).open(focus=focus)
+
+    def _close_btw(self) -> None:
+        self.query_one(BtwPanel).close()
+        self.query_one(ChatInput).focus()
+
+    def _cancel_btw_tasks(self) -> None:
+        for task in list(self._btw_tasks):
+            task.cancel()
+        self._btw_tasks.clear()
+
+    def _clear_btw(self) -> None:
+        self._cancel_btw_tasks()
+        self._btw.clear()
+
+    @on(ChatInput.DismissBtw)
+    def dismiss_btw(self) -> None:
+        self._close_btw()
+
+    @on(BtwPanel.Closed)
+    def btw_closed(self) -> None:
+        self._close_btw()
+
+    @on(BtwPanel.Navigate)
+    def btw_navigate(self, event: BtwPanel.Navigate) -> None:
+        if event.delta < 0:
+            self._btw.older()
+        else:
+            self._btw.newer()
+        self._show_btw_entry()
+
+    @on(BtwPanel.Copy)
+    def btw_copy(self) -> None:
+        entry = self._btw.current()
+        if entry is None or not entry.answer:
+            return
+        try:
+            pyperclip.copy(entry.answer)
+        except pyperclip.PyperclipException:
+            self.notify("Clipboard is unavailable.", severity="warning", markup=False)
+            return
+        self.notify("Copied the side answer.", markup=False)
+
+    @on(BtwPanel.Clear)
+    def btw_clear(self) -> None:
+        self._clear_btw()
+        self.query_one(BtwPanel).show_local(live_snapshot(self._live_turn()))
+        self.notify("Cleared side questions.", markup=False)
+
+    @on(BtwPanel.TypeThrough)
+    def btw_type_through(self, event: BtwPanel.TypeThrough) -> None:
+        area = self.query_one(ChatInput).query_one(TextArea)
+        area.focus()
+        area.insert(event.character)
 
     async def _choose_theme(self, requested: str) -> None:
         names = copper_theme.theme_names()
