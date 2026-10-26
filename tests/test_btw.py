@@ -9,6 +9,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from copper_pilot_cli.copper_btw import (
+    MAX_ANSWER_CHARS,
     MAX_SNAPSHOT_TOOLS,
     MAX_TOOL_DENIALS,
     NOTHING_EXECUTED,
@@ -20,6 +21,7 @@ from copper_pilot_cli.copper_btw import (
     build_side_request,
     live_snapshot,
     run_side_question,
+    snapshot_args,
 )
 from copper_pilot_cli.copper_protocol import (
     CopperEffort,
@@ -128,6 +130,13 @@ def test_live_snapshot_summarizes_running_turn() -> None:
     assert text.endswith("TAIL")
 
 
+def test_snapshot_args_keeps_only_what_the_snapshot_prints() -> None:
+    assert snapshot_args({"path": "board.kicad_sch", "content": "x" * 5_000, "command": "ls"}) == {
+        "path": "board.kicad_sch",
+        "command": "ls",
+    }
+
+
 def test_live_snapshot_when_idle() -> None:
     text = live_snapshot(LiveTurn(running=False, query="last ask"))
     assert "No turn is running" in text
@@ -167,7 +176,7 @@ def test_build_side_request_is_tool_less_ask_on_fresh_conversation(tmp_path) -> 
     roles = [(message.role, message.content) for message in request.context]
     assert roles[0] == ("user", "Check the LDO")
     assert roles[1] == ("assistant", "The LDO is fine.")
-    assert roles[2][0] == "system" and "SNAPSHOT" in roles[2][1]
+    assert roles[2][0] == "user" and "SNAPSHOT" in roles[2][1]
     assert roles[3] == ("user", "(side question) earlier?")
     assert roles[4] == ("assistant", "earlier answer")
     assert len(roles) == 5
@@ -211,6 +220,23 @@ async def test_runner_cancels_after_repeated_tool_requests() -> None:
     assert client.cancelled == 1
     assert len(client.results) == MAX_TOOL_DENIALS + 1
     assert answer == NOTHING_EXECUTED
+
+
+@pytest.mark.asyncio
+async def test_runner_reports_its_own_cancel_as_an_answer() -> None:
+    script = [_tool(index) for index in range(MAX_TOOL_DENIALS)]
+    client = FakeClient(script, fail=ProtocolError("closed", code="STREAM_ENDED_WITHOUT_FINAL"))
+    answer = await run_side_question(CREDENTIAL, _request(), client_factory=lambda _c: client)
+    assert answer == NOTHING_EXECUTED
+
+
+@pytest.mark.asyncio
+async def test_runner_stops_and_shortens_a_runaway_answer() -> None:
+    client = FakeClient(["y" * (MAX_ANSWER_CHARS + 500)])
+    answer = await run_side_question(CREDENTIAL, _request(), client_factory=lambda _c: client)
+    assert client.cancelled == 1
+    assert answer.endswith("_Answer shortened._")
+    assert len(answer) < MAX_ANSWER_CHARS + 40
 
 
 @pytest.mark.asyncio

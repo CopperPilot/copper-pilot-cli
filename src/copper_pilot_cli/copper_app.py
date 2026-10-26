@@ -41,6 +41,7 @@ from copper_pilot_cli.copper_btw import (
     build_side_request,
     live_snapshot,
     run_side_question,
+    snapshot_args,
 )
 from copper_pilot_cli.copper_chrome import next_effort, next_mode, slash_catalog
 from copper_pilot_cli.copper_features import (
@@ -269,6 +270,7 @@ class CopperPilotApp(App[None]):
         self._turn_tool_start = 0
         self._btw = SideQuestionLog()
         self._btw_tasks: set[asyncio.Task[None]] = set()
+        self._btw_task_by_id: dict[int, asyncio.Task[None]] = {}
         self._btw_runner = run_side_question
         self._register_copper_theme()
         self.hooks = HookRunner(workspace, broker)
@@ -512,6 +514,8 @@ class CopperPilotApp(App[None]):
         await transcript.remove_children()
         await transcript.mount(WelcomeBanner(self.workspace, model=self.copper_effort.value))
         self._clear_btw()
+        self._turn_query = ""
+        self._turn_tool_start = 0
         for panel in self.query(BtwPanel):
             panel.close()
         self._assistant = None
@@ -1148,7 +1152,7 @@ class CopperPilotApp(App[None]):
         running = self._turn_task is not None and not self._turn_task.done()
         loading = self._loading
         tools = [
-            LiveTool(tool.tool_name, dict(tool.args), tool.status)
+            LiveTool(tool.tool_name, snapshot_args(tool.args), tool.status)
             for tool in list(self._tools.values())[self._turn_tool_start :]
         ]
         return LiveTurn(
@@ -1187,7 +1191,7 @@ class CopperPilotApp(App[None]):
                 panel.show_local(live_snapshot(self._live_turn()))
             self._open_btw()
             return
-        if self._btw.pending() >= MAX_IN_FLIGHT:
+        if len(self._btw_tasks) >= MAX_IN_FLIGHT:
             self.notify(
                 "Wait for a side answer before asking another.",
                 severity="warning",
@@ -1197,11 +1201,13 @@ class CopperPilotApp(App[None]):
         snapshot = live_snapshot(self._live_turn())
         earlier = self._btw.completed()
         entry = self._btw.add(question)
+        self._cancel_trimmed_btw_tasks()
         self._show_btw_entry()
         self._open_btw()
         task = asyncio.create_task(self._answer_btw(entry.id, question, snapshot, earlier))
         self._btw_tasks.add(task)
-        task.add_done_callback(self._btw_tasks.discard)
+        self._btw_task_by_id[entry.id] = task
+        task.add_done_callback(self._forget_btw_task)
 
     async def _answer_btw(
         self, entry_id: int, question: str, snapshot: str, earlier: list[Any]
@@ -1226,15 +1232,17 @@ class CopperPilotApp(App[None]):
             logger.warning("Side question failed (%s)", type(exc).__name__)
             failed, answer = True, f"{type(exc).__name__}: {exc}"
         entry = self._btw.resolve(entry_id, answer, failed=failed)
+        if entry is None or not self.is_running:
+            return
         panels = self.query(BtwPanel)
-        if entry is None or not panels:
+        if not panels:
             return
         current = self._btw.current()
         if panels.first().is_open:
             if current is not None and current.id == entry_id:
                 self._show_btw_entry()
         else:
-            self.notify("Side answer ready. Type /btw to view.", markup=False)
+            self.notify("Side question finished. Type /btw to view.", markup=False)
 
     def _show_btw_entry(self) -> None:
         entry = self._btw.current()
@@ -1257,10 +1265,24 @@ class CopperPilotApp(App[None]):
         self.query_one(BtwPanel).close()
         self.query_one(ChatInput).focus()
 
+    def _forget_btw_task(self, task: asyncio.Task[None]) -> None:
+        self._btw_tasks.discard(task)
+        for entry_id, current in list(self._btw_task_by_id.items()):
+            if current is task:
+                del self._btw_task_by_id[entry_id]
+
+    def _cancel_trimmed_btw_tasks(self) -> None:
+        """A question pushed out of the history should not keep its request running."""
+        live = {entry.id for entry in self._btw.entries}
+        for entry_id, task in list(self._btw_task_by_id.items()):
+            if entry_id not in live:
+                task.cancel()
+
     def _cancel_btw_tasks(self) -> None:
         for task in list(self._btw_tasks):
             task.cancel()
         self._btw_tasks.clear()
+        self._btw_task_by_id.clear()
 
     def _clear_btw(self) -> None:
         self._cancel_btw_tasks()

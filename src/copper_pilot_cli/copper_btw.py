@@ -40,7 +40,9 @@ MAX_SNAPSHOT_TOOLS = 30
 MAX_SNAPSHOT_TEXT = 4_000
 MAX_IN_FLIGHT = 3
 MAX_TOOL_DENIALS = 3
+MAX_ANSWER_CHARS = 64 * 1024
 SIDE_QUESTION_TIMEOUT = 120.0
+_SNAPSHOT_ARG_KEYS = ("command", "file_path", "path", "pattern", "description")
 TOOL_DENIED = "Side questions cannot use tools. Answer from the conversation context only."
 NOTHING_EXECUTED = "_The model asked for a tool; nothing was executed._"
 
@@ -147,6 +149,11 @@ class LiveTurn:
     subagents: list[tuple[str, str]] = field(default_factory=list)
 
 
+def snapshot_args(args: dict[str, Any]) -> dict[str, Any]:
+    """The few argument fields the snapshot prints, never a file's contents."""
+    return {key: args[key] for key in _SNAPSHOT_ARG_KEYS if key in args}
+
+
 def _tool_line(tool: LiveTool) -> str:
     command = tool.args.get("command")
     target = command or tool.args.get("file_path") or tool.args.get("path")
@@ -223,8 +230,10 @@ def build_side_request(
     """A tool-less Balanced Ask request on a throwaway conversation id."""
     query = wrap_question(question)
     context = _context([*history, HumanMessage(content=query)])
+    # A user turn, not system: a system turn partway through history is rejected
+    # by some hosted providers.
     context.append(
-        ChatMessage(role="system", content=f"[Live snapshot of the running turn]\n{snapshot}")
+        ChatMessage(role="user", content=f"[Live snapshot of the running turn]\n{snapshot}")
     )
     for entry in earlier:
         context.append(ChatMessage(role="user", content=f"(side question) {entry.question}"))
@@ -259,32 +268,52 @@ async def run_side_question(
         raise SideQuestionError("Not authenticated. Use `/auth login` first.")
     client = client_factory(credential)
     text: list[str] = []
+    kept = 0
     denials = 0
     stopped = False
+    truncated = False
 
-    async def deny(tool: ToolRequest) -> dict[str, Any]:
-        nonlocal denials, stopped
-        denials += 1
-        logger.info("Side question refused tool %s", tool.tool_name)
-        if denials >= MAX_TOOL_DENIALS and not stopped:
+    async def stop_early() -> None:
+        nonlocal stopped
+        if not stopped:
             stopped = True
             await client.cancel()
+
+    async def deny(tool: ToolRequest) -> dict[str, Any]:
+        nonlocal denials
+        denials += 1
+        logger.info("Side question refused tool %s", tool.tool_name)
+        if denials >= MAX_TOOL_DENIALS:
+            await stop_early()
         return {"error": TOOL_DENIED, "rejected": True}
 
     try:
         async with asyncio.timeout(limit_s):
             async for event in client.stream(request, deny):
-                if event.kind is EventKind.TEXT:
-                    text.append(str(event.data))
+                if event.kind is not EventKind.TEXT or truncated:
+                    continue
+                piece = str(event.data)
+                room = MAX_ANSWER_CHARS - kept
+                if len(piece) > room:
+                    piece = piece[:room]
+                    truncated = True
+                if piece:
+                    text.append(piece)
+                    kept += len(piece)
+                if truncated:
+                    await stop_early()
     except TimeoutError as exc:
         if not text:
             raise SideQuestionError(f"No answer within {limit_s:g}s.") from exc
     except ProtocolError as exc:
-        if not (stopped and text):
+        # Stopping the stream ourselves closes the socket; that is not a failure.
+        if not stopped:
             raise SideQuestionError(usage_error_message(exc.as_event_data())) from exc
     except (OSError, ConnectionError) as exc:
         raise SideQuestionError(f"Could not reach CopperPilot: {exc}") from exc
     answer = "".join(text).strip()
+    if truncated:
+        answer = f"{answer}\n\n_Answer shortened._".strip()
     if denials:
         answer = f"{answer}\n\n{NOTHING_EXECUTED}".strip()
     if not answer:

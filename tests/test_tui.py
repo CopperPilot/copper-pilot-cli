@@ -1549,7 +1549,7 @@ async def test_btw_answer_while_closed_only_notifies(tmp_path) -> None:
         with patch.object(app, "notify") as notify:
             gate.set()
             await _wait_until(pilot, lambda: app._btw.pending() == 0)
-        notify.assert_called_once()
+        notify.assert_called_once_with("Side question finished. Type /btw to view.", markup=False)
         assert not panel.is_open
         assert app.query_one(TextArea).has_focus
 
@@ -1599,6 +1599,8 @@ def test_btw_panel_markdown_shortens_long_answers() -> None:
     assert shortened.endswith("Press c to copy the full answer._")
     fenced = "```text\n" + "\n".join(f"line {index}" for index in range(limit * 2)) + "\n```"
     assert shorten(fenced).count("```") == 2
+    tilde = "~~~text\n" + "\n".join(f"line {index}" for index in range(limit * 2))
+    assert shorten(tilde).count("~~~") == 2
     huge_line = "x" * (copper_widgets_module.BTW_PANEL_CHARS * 2)
     assert len(shorten(huge_line)) < copper_widgets_module.BTW_PANEL_CHARS + 100
 
@@ -1622,3 +1624,35 @@ async def test_btw_panel_renders_a_short_view_but_copies_everything(tmp_path) ->
         with patch.object(copper_app_module.pyperclip, "copy") as copy:
             await pilot.press("c")
         copy.assert_called_once_with(long_answer)
+
+
+@pytest.mark.asyncio
+async def test_clear_forgets_the_request_shown_by_btw(tmp_path) -> None:
+    runtime, gate = _blocked_runtime()
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("long task")
+        await _wait_until(pilot, lambda: app._loading is not None and app._loading.is_mounted)
+        gate.set()
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        await app._command("/clear")
+        await app._btw_command("")
+        source = app.query_one(copper_widgets_module.BtwPanel).query_one(".btw-answer").source
+        assert "long task" not in source
+
+
+@pytest.mark.asyncio
+async def test_btw_cancels_a_question_dropped_from_history(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    gate = asyncio.Event()
+    app._btw.limit = 1
+    app._btw_runner = _side_runner([], gate)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("old?")
+        await _wait_until(pilot, lambda: len(app._btw_tasks) == 1)
+        dropped = next(iter(app._btw_tasks))
+        await app._btw_command("new?")
+        await _wait_until(pilot, lambda: dropped.cancelled())
+        assert [entry.question for entry in app._btw.entries] == ["new?"]
+        gate.set()
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)

@@ -1572,9 +1572,14 @@ def btw_panel_markdown(text: str) -> str:
     if len(lines) <= BTW_PANEL_LINES and len(text) <= BTW_PANEL_CHARS:
         return text
     kept = "\n".join(lines[:BTW_PANEL_LINES])[:BTW_PANEL_CHARS]
-    fences = sum(line.lstrip().startswith(("```", "~~~")) for line in kept.splitlines())
-    if fences % 2:
-        kept += "\n```"
+    opener: str | None = None
+    for line in kept.splitlines():
+        stripped = line.lstrip()
+        mark = stripped[:3]
+        if mark in {"```", "~~~"}:
+            opener = None if opener == mark else mark
+    if opener:
+        kept += f"\n{opener}"
     return f"{kept}\n\n_Shortened here. Press c to copy the full answer._"
 
 
