@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from copper_pilot_cli import copper_models, copper_theme
@@ -7,6 +9,19 @@ from copper_pilot_cli import copper_models, copper_theme
 def model_selector_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run a test with the Intelligence model selector switched on."""
     monkeypatch.setattr(copper_models, "ENABLE_MODEL_SELECTOR", True)
+
+
+@pytest.fixture(autouse=True)
+def no_update_notice_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an already-imported app's background update check off the network."""
+    module = sys.modules.get("copper_pilot_cli.copper_app")
+    if module is None:
+        return
+
+    async def no_notice() -> None:
+        return None
+
+    monkeypatch.setattr(module, "check_for_background_notice", no_notice)
 
 
 @pytest.fixture(autouse=True)
