@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.metadata
+import importlib.util
 import json
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -41,6 +44,7 @@ from copper_pilot_cli.copper_status_events import (
     subagent_progress_label,
 )
 from copper_pilot_cli.copper_tools import ApprovalMode, LocalToolBroker
+from copper_pilot_cli.copper_update import check_for_update, notify_background_update
 from copper_pilot_cli.copper_workspace import (
     canonical_workspace,
     discover_workspace,
@@ -75,7 +79,8 @@ def parser() -> argparse.ArgumentParser:
         description="CopperPilot hosted agent in the terminal.",
         epilog="Subcommands: copper-pilot auth [login|logout|status]; "
         "copper-pilot threads list|delete; copper-pilot mcp; copper-pilot acp; "
-        "copper-pilot validate [workspace] (read-only stage-gated review).",
+        "copper-pilot validate [workspace] (read-only stage-gated review); "
+        "copper-pilot update [--check] [--yes].",
     )
     result.add_argument(
         "workspace",
@@ -152,6 +157,7 @@ def command_parser(command: str) -> argparse.ArgumentParser:
         "threads": "List or delete CopperPilot chat threads.",
         "mcp": "Run a stdio MCP server that delegates to the hosted agent.",
         "acp": "Run a stdio ACP (Agent Client Protocol) server for editors such as Zed.",
+        "update": "Check for or install the latest CopperPilot CLI release.",
     }
     if command == "validate":
         from copper_pilot_cli.validate.cli import build_parser
@@ -170,6 +176,19 @@ def command_parser(command: str) -> argparse.ArgumentParser:
     )
     result.set_defaults(workspace=".", message=None, command=command)
     if command in {"mcp", "acp"}:
+        return result
+    if command == "update":
+        result.add_argument(
+            "--check",
+            action="store_true",
+            help="Report whether an update is available without installing it.",
+        )
+        result.add_argument(
+            "-y",
+            "--yes",
+            action="store_true",
+            help="Install without interactive confirmation.",
+        )
         return result
     if command == "auth":
         result.add_argument(
@@ -253,6 +272,86 @@ async def _threads_command(args: argparse.Namespace, workspace: Path) -> int:
             highlight=False,
         )
     return 0
+
+
+def _editable_installation() -> bool:
+    """An editable checkout must not be replaced by the published package."""
+    try:
+        distribution = importlib.metadata.distribution("copper-pilot-cli")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    raw = distribution.read_text("direct_url.json")
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    directory = payload.get("dir_info") if isinstance(payload, dict) else None
+    return isinstance(directory, dict) and directory.get("editable") is True
+
+
+def _pipx_installation() -> bool:
+    """Whether the active interpreter belongs to pipx's CopperPilot environment."""
+    return "pipx" in {part.lower() for part in Path(sys.prefix).parts} and (
+        "copper-pilot-cli" in Path(sys.prefix).parts
+    )
+
+
+def update_install_command() -> list[str] | None:
+    """Return the package-manager command appropriate for this installation."""
+    if _editable_installation():
+        return None
+    if _pipx_installation() and shutil.which("pipx"):
+        return ["pipx", "upgrade", "copper-pilot-cli"]
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", "--upgrade", "copper-pilot-cli"]
+    return None
+
+
+async def _update_command(args: argparse.Namespace) -> int:
+    """Run a deliberate, package-manager-owned CLI update."""
+    update = await check_for_update()
+    if not update.available:
+        console.print(f"CopperPilot CLI {update.current} is current.", markup=False)
+        return 0
+
+    feature = f"\n{update.feature_notice}" if update.feature_notice else ""
+    console.print(
+        f"Update available: {update.current} → {update.latest}.{feature}",
+        markup=False,
+        highlight=False,
+    )
+    if args.check:
+        return 0
+
+    if _editable_installation():
+        console.print(
+            "This checkout is an editable install. Update it from git instead of pip.",
+            markup=False,
+        )
+        return 2
+    command = update_install_command()
+    if command is None:
+        console.print(
+            f"Update manually with:\n{update.install_command}",
+            markup=False,
+            highlight=False,
+        )
+        return 2
+    rendered = " ".join(command)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            console.print("Use --yes to confirm an update in non-interactive mode.", markup=False)
+            return 2
+        if not Confirm.ask(f"Run `{rendered}`?"):
+            return 0
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdin=asyncio.subprocess.DEVNULL,
+    )
+    return await process.wait()
 
 
 async def _credential() -> Any:
@@ -388,6 +487,8 @@ async def _headless(
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    if args.command == "update":
+        return await _update_command(args)
     workspace = canonical_workspace(args.workspace)
     if args.command == "auth":
         return await _auth_command(args.action)
@@ -425,8 +526,17 @@ async def async_main(args: argparse.Namespace) -> int:
     if args.non_interactive or (args.message and not sys.stdout.isatty()):
         if not args.message:
             raise ValueError("--message is required in non-interactive mode.")
-        async with create_copper_graph(agent) as runtime:
-            return await _headless(runtime, workspace, thread_id, args.message, args)
+        notice = asyncio.create_task(notify_background_update())
+        try:
+            async with create_copper_graph(agent) as runtime:
+                return await _headless(runtime, workspace, thread_id, args.message, args)
+        finally:
+            if not notice.done():
+                notice.cancel()
+            try:
+                await notice
+            except asyncio.CancelledError:
+                pass
     async with create_copper_graph(agent) as runtime:
         app = CopperPilotApp(
             runtime,
@@ -468,7 +578,7 @@ def cli_main() -> None:
             raise SystemExit(130) from None
     args = (
         command_parser(argv[0]).parse_args(argv[1:])
-        if argv and argv[0] in {"auth", "threads", "mcp", "acp"}
+        if argv and argv[0] in {"auth", "threads", "mcp", "acp", "update"}
         else parser().parse_args(argv)
     )
     if args.command == "acp":
