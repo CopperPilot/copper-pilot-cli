@@ -795,14 +795,21 @@ class HostedChatClient:
                             break
                     if frame_type == "final" or response.is_final:
                         saw_final = True
+                        extra = response.model_extra or {}
+                        tos_blocked = extra.get("tos_blocked") is True
+                        model = extra.get("model") if isinstance(extra.get("model"), str) else None
                         if response.success is False or response.error:
                             logger.warning(
                                 "Hosted turn ended unsuccessfully (turn_id=%s, error=%r, "
-                                "frame keys=%s, extra fields=%s)",
+                                "tos_blocked=%s, model=%s, usage=%s, frame keys=%s, "
+                                "extra fields=%s)",
                                 response.turn_id,
                                 response.error,
+                                extra.get("tos_blocked"),
+                                model,
+                                response.usage,
                                 sorted(frame),
-                                sorted(response.model_extra or {}),
+                                sorted(extra),
                             )
                         yield CopperEvent(
                             EventKind.FINAL,
@@ -815,6 +822,8 @@ class HostedChatClient:
                                 "usage_details": envelope_usage
                                 if isinstance(envelope_usage, dict)
                                 else None,
+                                "tos_blocked": tos_blocked,
+                                "model": model,
                             },
                             **metadata,
                         )
