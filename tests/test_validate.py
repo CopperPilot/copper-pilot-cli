@@ -1415,6 +1415,7 @@ class FailedFinalClient(FakeClient):
 async def test_hosted_failure_records_the_hosted_turn_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
+    monkeypatch.setattr("copper_pilot_cli.copper_graph.RETRY_BACKOFF_SECONDS", (0.0,) * 4)
     make_project(tmp_path)
     turn = HostedTurnRunner(CREDENTIAL, client_factory=lambda: FailedFinalClient(""))
     runner = Runner(
@@ -1429,7 +1430,10 @@ async def test_hosted_failure_records_the_hosted_turn_id(tmp_path, monkeypatch) 
     outcome = await runner.run()
     result = by_id(outcome.results)["sch.ratings"]
     assert result.status is Status.ERROR
-    assert result.error == "CopperPilot ran into an error. (hosted turn turn-7)"
+    assert result.error == (
+        "CopperPilot ran into an error. (the hosted turn failed; "
+        "the service sent no further detail; hosted turn turn-7.)"
+    )
 
 
 # ------------------------------------------------------------------- CLI

@@ -716,13 +716,93 @@ async def test_background_process_killed_before_the_final_frame_does_not_resume(
     assert manager.processes() == []
 
 
+FAILED_FINAL = {
+    "success": False,
+    "error": "CopperPilot ran into an error.",
+    "usage": {"tokens_input": 0, "tokens_output": 0, "processing_time_ms": 300_400},
+    "model": "gemini-4-argon",
+}
+
+
+def failed_attempt(text: str = "Working.") -> list[Any]:
+    """The hosted 300 s cap: generic error copy echoed as text, then a failed final."""
+    return [
+        CopperEvent(EventKind.TEXT, text),
+        CopperEvent(EventKind.STATUS, "Planning next moves"),
+        CopperEvent(EventKind.TEXT, "CopperPilot ran into an error."),
+        CopperEvent(EventKind.FINAL, FAILED_FINAL),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_final_is_retried_with_the_partial_transcript(monkeypatch, tmp_path) -> None:
+    # rea-hardware: turns 5-30 min in ended with only "CopperPilot ran into an
+    # error." (hosted 300 s model-silence cap) and lost all their work.
+    agent = ScriptedAgent(
+        [
+            [tool_request(), tool_result(), *failed_attempt("Halfway.")],
+            [
+                CopperEvent(EventKind.TEXT, " Done."),
+                CopperEvent(EventKind.FINAL, {"success": True}),
+            ],
+        ]
+    )
+    events, messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert retry_stages(events) == [
+        ("failed", 1, True),
+        ("scheduled", 2, True),
+        ("restarted", 2, True),
+    ]
+    assert not [e for e in events if e["type"] == "copper.error"]
+    finals = [e for e in events if e["type"] == "copper.final"]
+    assert [final["data"]["success"] for final in finals] == [True]
+    resumed = agent.inputs[1]
+    assert resumed[-1].content == f"{RESUME_PREFIX}Review it"
+    assert "Halfway." in resumed[-2].content
+    assert "ran into an error" not in resumed[-2].content
+    assert "[Completed before the interruption: read_file (ok)]" in resumed[-2].content
+    assert messages[-1].content == "Halfway. Done."
+
+
+@pytest.mark.asyncio
+async def test_exhausted_failed_finals_surface_the_known_detail(monkeypatch, tmp_path) -> None:
+    agent = ScriptedAgent([failed_attempt() for _ in range(MAX_TURN_ATTEMPTS)])
+    events, messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert len(agent.inputs) == MAX_TURN_ATTEMPTS
+    assert retry_stages(events)[-1] == ("failed", MAX_TURN_ATTEMPTS, False)
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["message"] == (
+        "CopperPilot ran into an error. (the hosted turn failed after 300 s on "
+        "gemini-4-argon; the service sent no further detail.)"
+    )
+    assert error["data"]["code"] == "HOSTED_TURN_FAILED"
+    assert error["data"]["type"] == "server"
+    assert not [e for e in events if e["type"] == "copper.final"]
+    assert messages[-1].additional_kwargs[COPPER_CONTEXT_KEY].startswith("[Turn interrupted")
+
+
+@pytest.mark.asyncio
+async def test_content_policy_block_is_not_retried(monkeypatch, tmp_path) -> None:
+    blocked = {**FAILED_FINAL, "tos_blocked": True}
+    agent = ScriptedAgent([[CopperEvent(EventKind.FINAL, blocked)], failed_attempt()])
+    events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert len(agent.inputs) == 1
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["message"] == (
+        "CopperPilot ran into an error. (blocked by the hosted content policy.)"
+    )
+    assert error["data"]["retryable"] is False
+
+
 @pytest.mark.asyncio
 async def test_failed_final_is_not_held_back_by_a_running_background_process(
     monkeypatch, tmp_path
 ) -> None:
-    # rea-hardware: a filesystem-wide glob went to the background, the hosted
-    # turn then ended with "CopperPilot ran into an error.", and the CLI waited
-    # on the glob with no further updates until the caller's 30 min timeout.
+    # A failed final retries (and finally fails) at once instead of first
+    # waiting for a runaway background shell, which is then killed.
     manager = BackgroundProcessManager()
     started = await run_shell(
         py("import time; time.sleep(60)"),
@@ -731,55 +811,15 @@ async def test_failed_final_is_not_held_back_by_a_running_background_process(
         foreground_seconds=0.05,
     )
     assert started["background"] is True
-    failed = {"success": False, "error": "CopperPilot ran into an error."}
     agent = ScriptedAgent(
-        [
-            [CopperEvent(EventKind.TEXT, "Searching."), CopperEvent(EventKind.FINAL, failed)],
-            [CopperEvent(EventKind.TEXT, "should not run"), CopperEvent(EventKind.FINAL, {})],
-        ],
+        [failed_attempt() for _ in range(MAX_TURN_ATTEMPTS)],
         tool_broker=SimpleNamespace(background=manager),
     )
-    events, messages = await asyncio.wait_for(run_graph(agent, monkeypatch, tmp_path), 10)
+    events, _messages = await asyncio.wait_for(run_graph(agent, monkeypatch, tmp_path), 10)
 
-    assert len(agent.inputs) == 1
+    assert len(agent.inputs) == MAX_TURN_ATTEMPTS
     assert not [e for e in events if e.get("title") == "background_processes_waiting"]
-    finals = [e for e in events if e["type"] == "copper.final"]
-    assert finals[-1]["data"]["error"] == "CopperPilot ran into an error."
-    assert messages[-1].content == "Searching."
-    assert not manager.has_running()
-
-
-@pytest.mark.asyncio
-async def test_failed_continuation_final_ends_the_turn(monkeypatch, tmp_path) -> None:
-    manager = BackgroundProcessManager()
-    await run_shell(
-        py("import time; time.sleep(0.2)"), tmp_path, manager=manager, foreground_seconds=0.05
-    )
-    failed = {"success": False, "error": "CopperPilot ran into an error."}
-
-    class Agent(ScriptedAgent):
-        async def astream_events_raw(self, value):
-            if len(self.inputs) == 1:
-                # The continuation backgrounds another long command, then fails.
-                await run_shell(
-                    py("import time; time.sleep(60)"),
-                    tmp_path,
-                    manager=manager,
-                    foreground_seconds=0.05,
-                )
-            async for event in super().astream_events_raw(value):
-                yield event
-
-    agent = Agent(
-        [
-            [CopperEvent(EventKind.TEXT, "Started."), CopperEvent(EventKind.FINAL, {})],
-            [CopperEvent(EventKind.FINAL, failed)],
-            [CopperEvent(EventKind.TEXT, "should not run"), CopperEvent(EventKind.FINAL, {})],
-        ],
-        tool_broker=SimpleNamespace(background=manager),
-    )
-    await asyncio.wait_for(run_graph(agent, monkeypatch, tmp_path), 10)
-    assert len(agent.inputs) == 2
+    assert [e for e in events if e["type"] == "copper.error"]
     assert not manager.has_running()
 
 
