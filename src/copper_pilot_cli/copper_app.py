@@ -728,12 +728,12 @@ class CopperPilotApp(App[None]):
         self._turn_task = asyncio.create_task(self._run_turn(value))
 
     async def _run_turn(self, value: str) -> None:
-        self._cancel_requested = False
-        self._turn_state = TurnState()
-        self._turn_state.apply(TurnEvent("turn_started"))
-        await self._start_loading()
-        self._update_status("Thinking")
         try:
+            self._cancel_requested = False
+            self._turn_state = TurnState()
+            self._turn_state.apply(TurnEvent("turn_started"))
+            await self._start_loading()
+            self._update_status("Thinking")
             await self.hooks.run("before_turn")
             async for item in self.runtime.astream(
                 {
