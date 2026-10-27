@@ -51,6 +51,11 @@ The first interactive launch opens a browser for CopperPilot device login.
 With no path argument, the current directory is the workspace and a new chat
 starts immediately. Any existing directory is valid.
 
+CopperPilot checks for feature updates once per day without delaying your work.
+When a release adds a feature, it prints one line with the feature and
+`copper-pilot update`. Use `copper-pilot update --check` to inspect the latest
+release, or `copper-pilot update` to run the owning package manager's update.
+
 ```console
 copper-pilot ./my-board
 copper-pilot --resume

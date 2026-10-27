@@ -9,6 +9,7 @@ copper-pilot threads --help
 copper-pilot mcp --help
 copper-pilot acp --help
 copper-pilot validate --help
+copper-pilot update --help
 ```
 
 Python 3.11 or newer is required. Install with `pip install copper-pilot-cli`.
@@ -52,6 +53,20 @@ copper-pilot ./my-board --model gpt-6.1-sol -m "Review the USB-C front end"
 Headless mode is also used when `--message` is set and stdout is not a TTY.
 With `--json --no-stream`, the document includes `thread_id` so a later run can
 pass `--resume`.
+
+## Update
+
+```console
+copper-pilot update --check
+copper-pilot update
+```
+
+The CLI performs a throttled, best-effort update check once a day. It writes a
+single message to stderr only when a newer release declares a feature note, so
+JSON and regular stdout output stay unchanged. `update --check` only reports
+the current and latest versions. `update` asks for confirmation, then delegates
+to pipx or the active Python environment's pip; use `--yes` in non-interactive
+automation.
 
 ## Validate
 
