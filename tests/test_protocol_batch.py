@@ -96,17 +96,20 @@ async def test_batch_round_trip_overlaps_reads_and_matches_results_by_id(monkeyp
     )
     install(monkeypatch, socket)
     delays = {"a": 0.3, "b": 0.2, "c": 0.1}
+    spans: dict[str, tuple[float, float]] = {}
 
     async def execute(tool_request):
-        await asyncio.sleep(delays[tool_request.tool_call_id])
+        call_id = tool_request.tool_call_id
+        started_at = time.perf_counter()
+        await asyncio.sleep(delays[call_id])
+        spans[call_id] = (started_at, time.perf_counter())
         return {"result": f"contents of {tool_request.arguments['file_path']}"}
 
-    started = time.perf_counter()
     events = [item async for item in client().stream(request(), execute)]
-    elapsed = time.perf_counter() - started
 
-    # Serial execution would take 0.6 s; overlapping reads take about 0.3 s.
-    assert elapsed < 0.5
+    # All three reads must be in flight together. A serial run finishes the
+    # shortest read before the last one starts, independent of machine speed.
+    assert max(start for start, _end in spans.values()) < min(end for _start, end in spans.values())
     assert [item.kind for item in events] == [
         EventKind.TOOL_REQUEST,
         EventKind.TOOL_REQUEST,
