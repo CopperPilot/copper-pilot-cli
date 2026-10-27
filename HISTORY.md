@@ -7,6 +7,104 @@ Changelog
 
 Fix
 ~~~
+- Do not count echoed request fields toward the stream byte budget.
+  [AdityaNG, Claude Opus 5.5]
+
+  The hosted service echoes the request `query` (and, in the final frame,
+  `context`) in every chat_response. A live probe showed the echo is ~97% of
+  each frame. A validate arch.review prompt is ~76 KB, so a long review on a
+  large board crossed the 64 MiB client budget after ~815 frames (2601 s)
+  although the hosted output itself was ~4.4 MB, and the check ERRORed with
+  "Chat exceeded the client stream byte budget."
+
+  The budget now counts frame bytes minus the echoed request fields the
+  client never reads, and the error names the counted size and frame count.
+- Stop cutting long hosted answers at the 16 KB status limit. [AdityaNG,
+  Claude Opus 5.5]
+
+  Every hosted response frame went through sanitize_status, which caps
+  status lines at 16 KB. The hosted side can send a whole answer as one
+  response frame, so a validate review longer than 16 KB lost the end of
+  its findings JSON. The reviewer then found no json block, sent a repair
+  turn into the already huge thread, and the server refused it ("This
+  conversation is too large to continue"), so arch.review ERRORed. Chat
+  and ACP answers over 16 KB were cut the same way.
+
+  Response text now gets a 1 MiB bound; status and reasoning lines keep
+  16 KB. A validate check that fails with a hosted failed final also
+  records the hosted turn id, as chat does.
+- Surface stalled or failed hosted turns instead of hanging. [AdityaNG,
+  Claude Opus 5.5]
+
+  Three ways a long ACP turn could hang or hide its cause:
+
+  - idle_frame_timeout was None, so a hosted server that kept the socket
+    (and keepalive) up but stopped sending hung the prompt forever. It now
+    defaults to 10 minutes (COPPER_PILOT_IDLE_TIMEOUT_SECONDS, 0 disables)
+    and raises the existing retryable CHAT_IDLE_TIMEOUT with the silence
+    length in the message. The hosted side heartbeats every 25 s.
+  - A failed hosted final (success false) still waited, unbounded, for
+    background shells and then ran a continuation turn. A runaway background
+    command held the hosted error back until the caller timed out, and a
+    continuation that succeeded still reported the stale error. A failed
+    final now ends the turn and kills leftover background processes.
+  - The hosted copy "CopperPilot ran into an error." carries no detail. The
+    ACP error now names the hosted turn id, and the client logs the failing
+    final frame's keys, so the server-side cause can be found.
+- Guard the state lock with sys.platform so ty passes on Windows.
+  [AdityaNG, Claude Opus 5.5]
+- Stop concurrent sessions racing on recent-projects state. [AdityaNG,
+  Claude Opus 5.5]
+
+  Every process wrote recent-projects.json (and config.json) through the
+  same fixed temp name, so parallel `copper-pilot acp` session starts moved
+  or clobbered each other's temp file and session/new failed with
+  FileNotFoundError on os.replace.
+
+  Writes now go through a per-write mkstemp temp file, the recent-projects
+  read-modify-write holds a POSIX flock so no entry is dropped, and the
+  bookkeeping logs instead of raising so it can never fail a session.
+
+Other
+~~~~~
+- Merge pull request #37 from CopperPilot/fix/stream-byte-budget.
+  [Aditya]
+
+  fix: do not count echoed request fields toward the stream byte budget
+- Merge pull request #35 from CopperPilot/fix/long-response-truncation.
+  [Aditya]
+
+  fix: stop cutting long hosted answers at the 16 KB status limit
+- Merge pull request #33 from CopperPilot/fix/hosted-stream-stall.
+  [Aditya]
+
+  fix: surface stalled or failed hosted turns instead of hanging
+- Merge pull request #34 from CopperPilot/fix/validate-hierarchical-
+  nets. [Aditya]
+
+  fix(validate): ground findings that cite label names of hierarchical nets
+- Fix(validate): ground findings that cite label names of hierarchical
+  nets. [AdityaNG, Claude Opus 5.5]
+
+  KiCad names local and hierarchical label nets with their sheet path
+  ("/RAIL_IO_3", "/power/RAIL_IO_3"), but reviewers cite the label
+  ("RAIL_IO_3"). Grounding compared the cited name to the full net name
+  only, so every real finding on such a board was marked UNGROUNDED and
+  could never fail a blocking check (WARN / exit 3 instead of FAIL).
+
+  A cited net now grounds when it equals a design net name or is a
+  "/"-boundary suffix of one; invented names still do not.
+- Merge pull request #32 from CopperPilot/fix/recent-projects-race.
+  [Aditya]
+
+  fix: stop concurrent ACP sessions racing on recent-projects state
+
+
+0.1.11 (2026-10-25)
+-------------------
+
+Fix
+~~~
 - Do not block turn cancellation on loading-widget removal. [Cursor,
   Naveen_Copperpilot]
 
@@ -40,6 +138,7 @@ Fix
 
 Other
 ~~~~~
+- Release: version 0.1.11 🚀 [AdityaNG]
 - Merge pull request #31 from naveen-
   forkd/feat/cli_chat_chrome_2026_10_24. [Aditya]
 
