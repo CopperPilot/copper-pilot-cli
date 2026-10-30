@@ -23,6 +23,20 @@ from copper_pilot_cli.validate.design import (
     load_intent,
 )
 from copper_pilot_cli.validate.kicad import SUPPORTED_MAJORS, KicadError
+from copper_pilot_cli.validate.pcb import (
+    CARDINALS,
+    Board,
+    body_points,
+    edge_gaps,
+    external_connector_kind,
+    footprint_needs_model,
+    kicad_path_variables,
+    mating_direction,
+    parse_board,
+    ray_exit,
+    resolve_model,
+    suggested_rotation,
+)
 
 MAX_REFS_PER_FINDING = 50
 _IGNORED_SEVERITIES = {"excluded", "ignore", "ignored", "exclusion"}
@@ -655,6 +669,244 @@ def check_repo(design: DesignContext, check: CheckSpec, limits: dict[str, Any]) 
     return CheckOutcome(findings=findings, summary=f"{len(absolute)} files with user paths")
 
 
+# --------------------------------------------------------- PCB geometry
+
+EDGE_TOLERANCE_MM = 2.5
+EDGE_SETBACK_MM = 8.0
+
+
+def _load_board(design: DesignContext) -> tuple[Board | None, str | None]:
+    pcb = design.pcb_path
+    if pcb is None or not pcb.is_file():
+        return None, "no .kicad_pcb was found"
+    try:
+        return parse_board(pcb.read_text(encoding="utf-8", errors="replace")), None
+    except ValueError as exc:
+        return None, f"could not parse {pcb.name}: {exc}"
+
+
+def _direction_label(direction: tuple[float, float]) -> str:
+    return CARDINALS[direction]
+
+
+def _edge_distance(gap: float, edge: str) -> str:
+    if gap < 0:
+        return f"overhangs the {edge} edge by {-gap:.1f} mm"
+    return f"sits {gap:.1f} mm from the {edge} edge"
+
+
+def check_connector_edge(
+    design: DesignContext, check: CheckSpec, limits: dict[str, Any]
+) -> CheckOutcome:
+    """External connectors sit on the board edge with the mating face pointing out."""
+    del check, limits
+    board, error = _load_board(design)
+    if board is None:
+        return CheckOutcome(error=error)
+    if not board.outline:
+        return CheckOutcome(summary="no Edge.Cuts outline; connector placement not checked")
+    findings: list[Finding] = []
+    checked = 0
+    ambiguous: list[str] = []
+    for footprint in board.footprints:
+        kind = external_connector_kind(footprint)
+        if kind is None:
+            continue
+        body = body_points(footprint)
+        facing = mating_direction(footprint, body)
+        if facing is None:
+            ambiguous.append(footprint.ref)
+            continue
+        checked += 1
+        label = f"{footprint.ref} ({kind}, {footprint.name})"
+        where = f"at ({footprint.x:g}, {footprint.y:g}) mm, rotation {footprint.rotation:g} deg"
+        gaps = edge_gaps(footprint, body, board.outline)
+        if gaps is None:
+            # The body centre is already off the board: fine when the board is behind it.
+            center = footprint.to_board(
+                (
+                    (min(p[0] for p in body) + max(p[0] for p in body)) / 2,
+                    (min(p[1] for p in body) + max(p[1] for p in body)) / 2,
+                )
+            )
+            behind = ray_exit(center, (-facing[0], -facing[1]), board.outline)
+            if behind is None:
+                findings.append(
+                    _finding(
+                        Severity.P1,
+                        f"{footprint.ref} hangs off the board facing back over it",
+                        f"{label} {where}: the body is outside the outline and its mating "
+                        f"face points {_direction_label(facing)}, back toward the board.",
+                        refs=[footprint.ref],
+                        layer=footprint.layer,
+                        x_mm=footprint.x,
+                        y_mm=footprint.y,
+                        evidence="Mating face from pad centroid to body (Fab/courtyard) centre.",
+                        rule="External connectors mate from outside the board edge",
+                        action="Rotate the connector 180 degrees so its opening faces out.",
+                    )
+                )
+            continue
+        front_gap = gaps.gaps.get(facing)
+        if front_gap is not None and front_gap <= EDGE_TOLERANCE_MM:
+            continue
+        nearest = min(gaps.gaps, key=lambda d: gaps.gaps[d])
+        nearest_gap = gaps.gaps[nearest]
+        gap_text = f"{front_gap:.1f} mm" if front_gap is not None else "no edge"
+        evidence = (
+            "Mating face from pad centroid to body (Fab/courtyard) centre; body-to-edge "
+            "gaps: "
+            + ", ".join(
+                f"{_direction_label(d)} {value:.1f} mm" for d, value in sorted(gaps.gaps.items())
+            )
+        )
+        if nearest == facing and front_gap is not None and front_gap <= EDGE_SETBACK_MM:
+            findings.append(
+                _finding(
+                    Severity.P2,
+                    f"{footprint.ref} is set back {front_gap:.1f} mm from the board edge",
+                    f"{label} {where} faces {_direction_label(facing)}, but its front is "
+                    f"{front_gap:.1f} mm inside the outline; the mating plug may not reach.",
+                    refs=[footprint.ref],
+                    layer=footprint.layer,
+                    x_mm=footprint.x,
+                    y_mm=footprint.y,
+                    evidence=evidence,
+                    rule=f"Connector front within {EDGE_TOLERANCE_MM} mm of the edge it faces",
+                    action=f"Move {footprint.ref} {front_gap:.1f} mm toward "
+                    f"{_direction_label(facing)} so its front meets the board edge.",
+                )
+            )
+            continue
+        if nearest_gap <= EDGE_SETBACK_MM:
+            rotation = suggested_rotation(footprint.rotation, facing, nearest)
+            opposite = facing == (-nearest[0], -nearest[1])
+            title = (
+                f"{footprint.ref} faces into the board"
+                if opposite
+                else f"{footprint.ref} faces along the board edge, not out of it"
+            )
+            detail = (
+                f"{label} {where} faces {_direction_label(facing)} ({gap_text} of board in "
+                f"front of it) but {_edge_distance(nearest_gap, _direction_label(nearest))}; "
+                f"it should face {_direction_label(nearest)}."
+            )
+            action = (
+                f"Rotate {footprint.ref} to {rotation:g} deg so the opening faces "
+                f"{_direction_label(nearest)}, then re-align its front with the edge."
+            )
+        else:
+            title = f"{footprint.ref} is not on a board edge"
+            detail = (
+                f"{label} {where} faces {_direction_label(facing)} ({gap_text} of board in "
+                f"front of it); the nearest edge is {_direction_label(nearest)}, "
+                f"{nearest_gap:.1f} mm away."
+            )
+            action = (
+                f"Move {footprint.ref} to a board edge with its opening facing out of the board."
+            )
+        findings.append(
+            _finding(
+                Severity.P1,
+                title,
+                detail,
+                refs=[footprint.ref],
+                layer=footprint.layer,
+                x_mm=footprint.x,
+                y_mm=footprint.y,
+                evidence=evidence,
+                rule="External connectors sit on the board edge with the mating face outward",
+                action=action,
+            )
+        )
+    summary = f"{checked} external connector(s) checked"
+    if ambiguous:
+        summary += f"; orientation unclear, not checked: {', '.join(ambiguous)}"
+    return CheckOutcome(findings=findings, summary=summary)
+
+
+def check_models_3d(
+    design: DesignContext, check: CheckSpec, limits: dict[str, Any]
+) -> CheckOutcome:
+    """Every footprint's 3D model resolves to a file; bodies without a model are flagged."""
+    del check, limits
+    board, error = _load_board(design)
+    if board is None or design.pcb_path is None:
+        return CheckOutcome(error=error)
+    project_dir = design.pcb_path.parent
+    executable = getattr(design.kicad, "executable", None)
+    variables, model_dirs = kicad_path_variables(
+        project_dir, executable if isinstance(executable, Path) else None
+    )
+    missing: dict[str, list[str]] = {}
+    tried_for: dict[str, list[str]] = {}
+    unknown_for: dict[str, list[str]] = {}
+    no_model: dict[str, list[str]] = {}
+    total = resolved = 0
+    for footprint in board.footprints:
+        models = [model for model in footprint.models if not model.hidden]
+        if not models:
+            if footprint_needs_model(footprint):
+                no_model.setdefault(footprint.name, []).append(footprint.ref)
+            continue
+        for model in models:
+            total += 1
+            found, tried, unknown = resolve_model(model.path, project_dir, variables, model_dirs)
+            if found is not None:
+                resolved += 1
+                continue
+            refs = missing.setdefault(model.path, [])
+            if footprint.ref not in refs:
+                refs.append(footprint.ref)
+            tried_for[model.path] = tried
+            unknown_for[model.path] = unknown
+    findings: list[Finding] = []
+    for path, refs in sorted(missing.items(), key=lambda item: item[1][0]):
+        unknown = unknown_for[path]
+        tried = tried_for[path]
+        if unknown:
+            why = f"path variable {', '.join(unknown)} is not defined"
+        elif tried:
+            why = f"no file at {tried[0]}" + (
+                f" (or {len(tried) - 1} other location(s))" if len(tried) > 1 else ""
+            )
+        else:
+            why = "no 3D model directory was found to resolve it"
+        findings.append(
+            _finding(
+                Severity.P1,
+                f"3D model missing for {', '.join(refs[:6])}"
+                + (f" and {len(refs) - 6} more" if len(refs) > 6 else ""),
+                f"{path}: {why}. The 3D view, renders and STEP export omit this part.",
+                refs=refs[:MAX_REFS_PER_FINDING],
+                evidence=f"(model {path!r}); tried: {'; '.join(tried[:3]) or 'nothing'}",
+                rule="Every footprint 3D model path must resolve to a file",
+                action=(
+                    "Copy the model file into the project (for example "
+                    "${KIPRJMOD}/<lib>.3dshapes/) and point the footprint at it, or switch to "
+                    "a stock ${KICAD10_3DMODEL_DIR} model that exists."
+                ),
+            )
+        )
+    for name, refs in sorted(no_model.items(), key=lambda item: item[1][0]):
+        findings.append(
+            _finding(
+                Severity.P2,
+                f"No 3D model on {name} ({', '.join(refs[:6])}"
+                + (f" and {len(refs) - 6} more)" if len(refs) > 6 else ")"),
+                f"Footprint {name} has pads but no (model ...) entry, so the part is invisible "
+                "in renders and STEP exports.",
+                refs=refs[:MAX_REFS_PER_FINDING],
+                rule="Parts with a physical body need a 3D model",
+                action="Add a 3D model (STEP preferred) to the footprint.",
+            )
+        )
+    summary = f"{resolved}/{total} model paths resolve"
+    if no_model:
+        summary += f"; {sum(len(r) for r in no_model.values())} footprint(s) without a model"
+    return CheckOutcome(findings=findings, summary=summary)
+
+
 BUILTINS: dict[str, Builtin] = {
     "tools": Builtin(check_tools, cacheable=False, description="kicad-cli presence and version"),
     "project": Builtin(check_project, cacheable=False, description="project discovery and index"),
@@ -666,4 +918,11 @@ BUILTINS: dict[str, Builtin] = {
     "drc": Builtin(check_drc, description="kicad-cli pcb drc, grouped by type"),
     "outputs": Builtin(check_outputs, description="Gerber and drill generation"),
     "repo": Builtin(check_repo, description="portable paths and project-local libraries"),
+    "connector_edge": Builtin(
+        check_connector_edge, description="external connectors on the edge, facing out"
+    ),
+    # Not cacheable: the result depends on model files outside the PCB input hash.
+    "models_3d": Builtin(
+        check_models_3d, cacheable=False, description="3D model paths resolve to files"
+    ),
 }

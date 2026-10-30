@@ -18,7 +18,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Inval
 from websockets.frames import Close
 from websockets.http11 import Response
 
-from copper_pilot_cli import copper_graph
+from copper_pilot_cli import copper_background, copper_graph
 from copper_pilot_cli.copper_background import (
     OUTPUT_LIMIT_ERROR,
     BackgroundProcessManager,
@@ -975,3 +975,44 @@ async def test_broker_execute_uses_the_background_contract(tmp_path) -> None:
         )
     )
     assert killed["timed_out"] is True
+
+
+def test_shell_environment_appends_the_cli_scripts_dir(monkeypatch, tmp_path) -> None:
+    scripts = tmp_path / "venv-bin"
+    scripts.mkdir()
+    monkeypatch.setattr(copper_background, "tool_scripts_dirs", lambda: [str(scripts)])
+    user_path = os.pathsep.join(["/usr/local/bin", "/usr/bin"])
+    env = copper_background.shell_environment({"PATH": user_path, "HOME": "/h"})
+    # Appended, so the user's python/pip/kicad keep precedence.
+    assert env["PATH"] == os.pathsep.join([user_path, str(scripts)])
+    assert env["HOME"] == "/h"
+    again = copper_background.shell_environment(env)
+    assert again["PATH"].count(str(scripts)) == 1
+
+
+def test_tool_scripts_dirs_include_the_running_environment() -> None:
+    assert os.path.dirname(sys.executable) in copper_background.tool_scripts_dirs()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script fixture")
+async def test_agent_shell_finds_console_scripts_installed_with_the_cli(
+    monkeypatch, tmp_path
+) -> None:
+    """pipx/uv tool installs only expose `copper-pilot`; dependency CLIs must still run."""
+    scripts = tmp_path / "tool-venv" / "bin"
+    scripts.mkdir(parents=True)
+    tool = scripts / "fake-easyeda2kicad"
+    tool.write_text("#!/bin/sh\necho imported $1\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setattr(copper_background, "tool_scripts_dirs", lambda: [str(scripts)])
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    broker = LocalToolBroker(tmp_path, mode=ApprovalMode.YOLO)
+    result = await broker.execute(
+        ToolRequest(
+            tool_call_id="call-1",
+            tool_name="execute",
+            arguments={"command": "fake-easyeda2kicad --lcsc_id=C2040"},
+        )
+    )
+    assert result == {"result": "imported --lcsc_id=C2040", "exit_code": 0}

@@ -147,6 +147,10 @@ for that stage.
 - A check whose hard prerequisite is FAIL, ERROR (with
   `error_blocks_dependents`) or gate-SKIPPED is SKIPPED with `blocked_by`
   naming it.
+- A check with `ungated: true` still runs after a stage or wave gate has
+  halted the run; its own `requires` still apply. The default graph uses it
+  for the fast, deterministic PCB geometry checks (`pcb.models_3d`,
+  `pcb.connector_edge`), whose answers do not depend on earlier stages.
 - **Snapshot.** Before the first agent check the workspace is copied to a
   temporary snapshot (excluding `.git`, `.copperpilot`, `*-backups`, lock
   files and caches) with every file read-only and one writable
@@ -224,6 +228,7 @@ checks:
     requires: [intake.project]   # hard: SKIPPED if any of these fail or error
     after: []                    # soft: ordering only
     gate: blocking          # blocking | advisory
+    ungated: false          # true: still runs after a stage/wave gate halts the run
     inputs: [sch, pcb, libs]     # cache key inputs: sch|pcb|pro|libs|intent|all
     repeat: 1               # >1 = majority consensus
     effort: intelligence    # optional per-check effort
@@ -233,7 +238,7 @@ checks:
   - id: sch.erc
     stage: S3
     kind: builtin
-    builtin: erc            # tools | project | intent | bom_fields | erc | parity | rules | drc | outputs | repo
+    builtin: erc            # tools | project | intent | bom_fields | erc | parity | rules | drc | outputs | repo | connector_edge | models_3d
     requires: [intake.project]
 
   # overrides (only with extends: default)
@@ -253,10 +258,10 @@ registered builtin; a `{items}` placeholder is present when `scope` is not
 |-------|----------------------------|--------------|
 | S0 Intake | `intake.tools` (kicad-cli 9/10), `intake.project` (netlist export; parts, nets, sheets, layers indexed), `intake.intent` (advisory: project index and plan present) | — |
 | S1 Architecture | — | `arch.review` (block diagram, power tree and budget, protection, clocks, boot path; intelligence effort) |
-| S2 Parts | `parts.bom_fields` (Value, Footprint, MPN, LCSC `C#####`, Datasheet; DNP and mechanical parts exempt) | `parts.lcsc`, `parts.symbols`, `parts.footprints` (per part) |
+| S2 Parts | `parts.bom_fields` (Value, Footprint, MPN, LCSC `C#####`, Datasheet; DNP and mechanical parts exempt), `pcb.models_3d` (ungated: every footprint `(model ...)` path resolves through `${KIPRJMOD}`, `${KICADn_3DMODEL_DIR}`, KiCad's configured path variables and the system 3D directory, P1 per missing file; parts with a body but no model, P2) | `parts.lcsc`, `parts.symbols`, `parts.footprints` (per part) |
 | S3 Schematic | `sch.erc` | `sch.conventions` (per sheet), `sch.circuits` (per sheet; requires `arch.review`, `parts.symbols`, `sch.erc`), `sch.ratings` |
 | S4 Netlist→layout | `pcb.parity` (schematic parity + unconnected items), `pcb.rules` (board rules and net classes ≥ fab limits) | — |
-| S5 Placement | — | `pcb.placement` (requires `pcb.parity`, `parts.footprints`) |
+| S5 Placement | `pcb.connector_edge` (ungated: USB, RJ45, HDMI, DisplayPort, DVI, barrel/audio jacks and D-Sub sit on the board edge with the mating face pointing out; the face is taken from the pad centroid to the Fab/courtyard body centre; P1 when facing inward or along the edge or not on an edge, P2 when set back more than 2.5 mm; headers, board-to-board, vertical and ambiguous parts are not judged) | `pcb.placement` (requires `pcb.parity`, `parts.footprints`) |
 | S6 Routing SI/PI | — | `pcb.power_routing`, `pcb.signal_integrity` (per net class) |
 | S7 DFM/DFA | `pcb.drc` | `dfm.fab`, `dfa.assembly`, `pcb.silkscreen` (advisory) |
 | S8 Release | `release.outputs` (Gerbers + drill; outline, drill and copper-layer counts), `release.repo` (no absolute user paths; project-local libraries) | `release.cpl` |

@@ -157,6 +157,9 @@ class CheckSpec(BaseModel):
     requires: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
     gate: Literal["blocking", "advisory"] = "blocking"
+    # Run even after a stage or wave gate has halted the run (`requires` still apply).
+    # For fast deterministic checks whose answer does not depend on earlier stages.
+    ungated: bool = False
     inputs: list[InputKind] = Field(default_factory=lambda: ["all"])  # ty: ignore[invalid-assignment]
     repeat: int = 1
     prompt: str | None = None

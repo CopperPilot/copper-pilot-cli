@@ -47,6 +47,13 @@ pip install copper-pilot-cli
 copper-pilot
 ```
 
+To let the agent import LCSC/EasyEDA parts (symbol, footprint and 3D model) with
+`easyeda2kicad`, install the optional extra, which is AGPL-3.0 licensed:
+`pip install "copper-pilot-cli[easyeda]"` (or
+`uv tool install "copper-pilot-cli[easyeda]"`). Agent shell commands can run
+command-line tools installed alongside the CLI even when pipx or `uv tool` keeps
+them off your `PATH`.
+
 The first interactive launch opens a browser for CopperPilot device login.
 With no path argument, the current directory is the workspace and a new chat
 starts immediately. Any existing directory is valid.
