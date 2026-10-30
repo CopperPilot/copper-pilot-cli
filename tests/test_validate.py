@@ -1817,6 +1817,33 @@ async def test_connector_edge_flags_inward_sideways_and_inboard_connectors(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_connector_edge_reads_named_references(tmp_path) -> None:
+    make_project(tmp_path)
+    _write_pcb(
+        tmp_path,
+        _edge_board(
+            # Agents often name connectors by role (J_ETH, J_USBA) instead of J1, J2.
+            _fp(
+                "lib:TRJG0926HENL",
+                "J_ETH",
+                (3, 20, 90),
+                value="MagJack",
+                pads=_RA_PADS,
+                fab=_RA_BODY,
+            ),
+            _fp("lib:USB_A_Test", "J-USBA", (10, 37, 0), pads=_RA_PADS, fab=_RA_BODY),
+            _fp("lib:PinHeader_2x20_P2.54mm_Vertical", "J_GPIO", (30, 10, 0), pads=_RA_PADS),
+            # Prefix must be followed by a digit or separator: JMP_EMMC is a jumper.
+            _fp("lib:USB_C_Test", "JMP_EMMC", (30, 20, 0), pads=_RA_PADS, fab=_RA_BODY),
+        ),
+    )
+    outcome = await runner_for(tmp_path, options=RunOptions(only=["pcb.connector_edge"])).run()
+    result = by_id(outcome.results)["pcb.connector_edge"]
+    assert [item.locator.refs[0] for item in result.findings] == ["J_ETH"]
+    assert "2 external connector(s) checked" in (result.summary or "")
+
+
+@pytest.mark.asyncio
 async def test_connector_edge_skips_ambiguous_and_accepts_overhang(tmp_path) -> None:
     make_project(tmp_path)
     symmetric = [(-2.0, -2.0), (2.0, -2.0), (-2.0, 2.0), (2.0, 2.0)]
