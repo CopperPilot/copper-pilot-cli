@@ -19,6 +19,7 @@ from copper_pilot_cli.copper_background import (
     DEFAULT_FOREGROUND_SECONDS,
     BackgroundProcessManager,
     run_shell,
+    shell_environment,
 )
 from copper_pilot_cli.copper_protocol import ToolRequest
 
@@ -324,6 +325,7 @@ class LocalToolBroker:
             timeout=120,
             max_output_bytes=5_000_000,
             inherit_env=True,
+            env=shell_environment(),
         )
         self._middleware = FilesystemMiddleware(
             backend=self._native_backend,

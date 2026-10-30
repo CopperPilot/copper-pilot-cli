@@ -45,6 +45,12 @@ dependencies = [
 acp = [
   "agent-client-protocol>=0.12,<1",
 ]
+# LCSC/EasyEDA -> KiCad symbol, footprint and 3D model importer the agent runs as a
+# command (`easyeda2kicad --full --lcsc_id=C2040`). Optional because it is
+# AGPL-3.0, which the license gate in CI does not allow in the default install.
+easyeda = [
+  "easyeda2kicad>=1.0.1,<2",
+]
 dev = [
   "agent-client-protocol>=0.12,<1",
   "build>=1.4,<2",

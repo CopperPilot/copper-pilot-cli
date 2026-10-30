@@ -1677,3 +1677,272 @@ async def test_cancelled_run_writes_partial_report(tmp_path) -> None:
     assert results["arch.review"].blocked_by == ["interrupted"]
     assert (outcome.run_dir / "report.json").is_file()
     assert runner.snapshot is None
+
+
+# ------------------------------------------------------- PCB geometry checks
+
+
+def _fp(
+    lib_id: str,
+    ref: str,
+    at: tuple[float, float, float],
+    *,
+    value: str = "",
+    pads: list[tuple[float, float]] | None = None,
+    fab: tuple[float, float, float, float] | None = None,
+    models: list[str] | None = None,
+    extra: str = "",
+) -> str:
+    x, y, rotation = at
+    pad_text = "".join(
+        f'\n\t\t(pad "{n + 1}" smd rect (at {px} {py}) (size 0.6 1.2) (layers "F.Cu"))'
+        for n, (px, py) in enumerate(pads or [])
+    )
+    fab_text = ""
+    if fab is not None:
+        x0, y0, x1, y1 = fab
+        fab_text = (
+            f"\n\t\t(fp_rect (start {x0} {y0}) (end {x1} {y1}) "
+            '(stroke (width 0.1) (type solid)) (fill no) (layer "F.Fab"))'
+        )
+    model_text = "".join(f'\n\t\t(model "{path}" (offset (xyz 0 0 0)))' for path in models or [])
+    return (
+        f'\n\t(footprint "{lib_id}" (layer "F.Cu") (at {x} {y} {rotation})'
+        f'\n\t\t(property "Reference" "{ref}" (at 0 0 0) (layer "F.SilkS"))'
+        f'\n\t\t(property "Value" "{value or lib_id.split(":")[-1]}" (at 0 0 0) (layer "F.Fab"))'
+        f"{extra}{pad_text}{fab_text}{model_text}\n\t)"
+    )
+
+
+# A right-angle connector: pins along the back (local -Y), body running forward to
+# the opening at local +Y, the way KiCad's stock horizontal connectors are drawn.
+_RA_PADS = [(-2.0, -3.0), (0.0, -3.0), (2.0, -3.0), (-4.0, -1.0), (4.0, -1.0)]
+_RA_BODY = (-4.5, -3.5, 4.5, 4.0)
+
+
+def _edge_board(*footprints: str) -> str:
+    return (
+        '(kicad_pcb (version 20240108) (generator "pcbnew")'
+        '\n\t(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))'
+        "\n\t(gr_rect (start 0 0) (end 60 40) (stroke (width 0.05) (type default)) "
+        '(fill no) (layer "Edge.Cuts"))' + "".join(footprints) + "\n)\n"
+    )
+
+
+def _write_pcb(root: Path, text: str) -> None:
+    (root / "board" / "board.kicad_pcb").write_text(text, encoding="utf-8")
+
+
+def test_board_parser_reads_footprints_outline_and_rotation() -> None:
+    from copper_pilot_cli.validate.pcb import parse_board, rotate
+
+    board = parse_board(
+        _edge_board(
+            _fp(
+                "Connector_USB:USB_C_Test",
+                "J1",
+                (30, 36, 90),
+                pads=_RA_PADS,
+                fab=_RA_BODY,
+                models=["${KIPRJMOD}/a.step"],
+            )
+        )
+    )
+    assert board.outline_bbox() == (0.0, 0.0, 60.0, 40.0)
+    (footprint,) = board.footprints
+    assert (footprint.ref, footprint.name, footprint.rotation) == ("J1", "USB_C_Test", 90.0)
+    assert [model.path for model in footprint.models] == ["${KIPRJMOD}/a.step"]
+    assert len(footprint.pads) == 5 and footprint.local_points("F.Fab")
+    # KiCad rotates counter-clockwise on screen with Y pointing down.
+    right = rotate((0.0, 1.0), 90)
+    assert (round(right[0], 6), round(right[1], 6)) == (1.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_connector_edge_flags_inward_sideways_and_inboard_connectors(tmp_path) -> None:
+    make_project(tmp_path)
+    _write_pcb(
+        tmp_path,
+        _edge_board(
+            # Bottom edge (y=40), opening facing +Y: correct.
+            _fp("Connector_USB:USB_C_Test", "J1", (10, 37, 0), pads=_RA_PADS, fab=_RA_BODY),
+            # Left edge, rotated 90 so the opening faces +X into the board: wrong.
+            _fp(
+                "lib:TRJG0926HENL",
+                "J2",
+                (3, 20, 90),
+                value="MagJack",
+                pads=_RA_PADS,
+                fab=_RA_BODY,
+                extra='\n\t\t(tags "RJ45 Magjack")',
+            ),
+            # Right edge, opening facing up along the edge: wrong.
+            _fp("lib:USB3_A_Test", "J3", (57, 20, 180), pads=_RA_PADS, fab=_RA_BODY),
+            # Middle of the board: not on an edge.
+            _fp("lib:HDMI_A_Test", "J4", (30, 20, 0), pads=_RA_PADS, fab=_RA_BODY),
+            # Facing the top edge but 5 mm short of it: set back (P2).
+            _fp("lib:DC_Jack_Test", "J5", (45, 9, 180), pads=_RA_PADS, fab=_RA_BODY),
+            # Excluded families: pin headers, vertical USB, board-to-board, generic values.
+            _fp("lib:PinHeader_1x02_P2.54mm_Vertical", "J6", (30, 30, 0), pads=_RA_PADS),
+            _fp("lib:USB_A_Vertical_Test", "J7", (20, 30, 0), pads=_RA_PADS, fab=_RA_BODY),
+            _fp(
+                "lib:Hirose_DF40C-100DS-0.4V_USB",
+                "J8",
+                (40, 30, 0),
+                pads=_RA_PADS,
+                fab=_RA_BODY,
+            ),
+            _fp("lib:Custom", "J9", (50, 30, 0), value="Conn_01x04 USB", pads=_RA_PADS),
+            # Not a connector reference: an ESD part named after USB.
+            _fp("lib:USBLC6-2SC6", "U1", (30, 30, 0), pads=_RA_PADS, fab=_RA_BODY),
+        ),
+    )
+    outcome = await runner_for(tmp_path, options=RunOptions(only=["pcb.connector_edge"])).run()
+    result = by_id(outcome.results)["pcb.connector_edge"]
+    assert result.status is Status.FAIL
+    found = {item.locator.refs[0]: item for item in result.findings}
+    assert set(found) == {"J2", "J3", "J4", "J5"}
+    assert found["J2"].severity is Severity.P1
+    assert found["J2"].title == "J2 faces into the board"
+    assert (
+        "faces +X (right)" in found["J2"].detail and "should face -X (left)" in found["J2"].detail
+    )
+    assert "to -90 deg" in found["J2"].suggested_action
+    assert (found["J2"].locator.x_mm, found["J2"].locator.y_mm) == (3.0, 20.0)
+    assert found["J3"].title == "J3 faces along the board edge, not out of it"
+    assert "should face +X (right)" in found["J3"].detail
+    assert found["J4"].title == "J4 is not on a board edge"
+    assert found["J5"].severity is Severity.P2 and "set back" in found["J5"].title
+    assert "5 external connector(s) checked" in (result.summary or "")
+
+
+@pytest.mark.asyncio
+async def test_connector_edge_skips_ambiguous_and_accepts_overhang(tmp_path) -> None:
+    make_project(tmp_path)
+    symmetric = [(-2.0, -2.0), (2.0, -2.0), (-2.0, 2.0), (2.0, 2.0)]
+    _write_pcb(
+        tmp_path,
+        _edge_board(
+            # Pads centred in the body: orientation unknown, so it is not judged.
+            _fp("lib:USB_C_Mid", "J1", (30, 20, 0), pads=symmetric, fab=(-4, -4, 4, 4)),
+            # Body centre past the right edge, opening facing out: fine.
+            _fp("lib:RJ45_Test", "J2", (58, 20, 90), pads=_RA_PADS, fab=_RA_BODY),
+        ),
+    )
+    outcome = await runner_for(tmp_path, options=RunOptions(only=["pcb.connector_edge"])).run()
+    result = by_id(outcome.results)["pcb.connector_edge"]
+    assert result.status is Status.PASS
+    assert "not checked: J1" in (result.summary or "")
+
+
+@pytest.mark.asyncio
+async def test_models_3d_resolves_paths_and_reports_missing(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli.validate import pcb as pcb_module
+
+    make_project(tmp_path)
+    board_dir = tmp_path / "board"
+    (board_dir / "lib.3dshapes").mkdir()
+    (board_dir / "lib.3dshapes" / "present.step").write_text("ISO", encoding="utf-8")
+    stock = tmp_path / "stock3d"
+    (stock / "Resistor_SMD.3dshapes").mkdir(parents=True)
+    (stock / "Resistor_SMD.3dshapes" / "R_0603.step").write_text("ISO", encoding="utf-8")
+    monkeypatch.setattr(pcb_module, "_kicad_config_dirs", lambda: [])
+    monkeypatch.setattr(pcb_module, "_system_model_dirs", lambda _cli: [stock])
+    for name in [n for n in os.environ if n.startswith(("KICAD", "KISYS"))]:
+        monkeypatch.delenv(name)
+    pads = [(-0.8, 0.0), (0.8, 0.0)]
+    _write_pcb(
+        tmp_path,
+        _edge_board(
+            _fp(
+                "lib:A",
+                "U1",
+                (5, 5, 0),
+                pads=pads,
+                models=["${KIPRJMOD}/lib.3dshapes/present.step"],
+            ),
+            _fp("lib:A", "U2", (8, 5, 0), pads=pads, models=["lib.3dshapes/present.step"]),
+            # Any KiCad version's stock variable falls back to the system 3D directory.
+            _fp(
+                "lib:R",
+                "R1",
+                (5, 9, 0),
+                pads=pads,
+                models=["${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603.step"],
+            ),
+            _fp(
+                "lib:R",
+                "R2",
+                (8, 9, 0),
+                pads=pads,
+                models=["${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603.step"],
+            ),
+            _fp(
+                "lib:J",
+                "J1",
+                (5, 13, 0),
+                pads=pads,
+                models=["${KIPRJMOD}/CM5IO.3dshapes/missing.stp"],
+            ),
+            _fp(
+                "lib:J",
+                "J2",
+                (8, 13, 0),
+                pads=pads,
+                models=["${KIPRJMOD}/CM5IO.3dshapes/missing.stp"],
+            ),
+            _fp("lib:X", "Y1", (5, 17, 0), pads=pads, models=["${MY_LIBS}/x.step"]),
+            # Bodies without any model: P2. Mounting holes and fiducials are exempt.
+            _fp("Package_SO:SOIC-8", "U3", (5, 21, 0), pads=pads),
+            _fp("Package_SO:SOIC-8", "U4", (8, 21, 0), pads=pads),
+            _fp("MountingHole:MountingHole_3.2mm_M3", "H1", (5, 25, 0), pads=pads),
+            _fp("Fiducial:Fiducial_1mm", "FID1", (8, 25, 0), pads=pads),
+            _fp("TestPoint:TestPoint_Pad_1.0x1.0mm", "TP1", (11, 25, 0), pads=pads),
+        ),
+    )
+    outcome = await runner_for(tmp_path, options=RunOptions(only=["pcb.models_3d"])).run()
+    result = by_id(outcome.results)["pcb.models_3d"]
+    assert result.status is Status.FAIL
+    by_title = {item.title: item for item in result.findings}
+    missing = by_title["3D model missing for J1, J2"]
+    assert missing.severity is Severity.P1 and missing.locator.refs == ["J1", "J2"]
+    assert "${KIPRJMOD}/CM5IO.3dshapes/missing.stp" in missing.detail
+    assert str(board_dir / "CM5IO.3dshapes" / "missing.stp") in missing.detail
+    unknown = by_title["3D model missing for Y1"]
+    assert "MY_LIBS is not defined" in unknown.detail
+    no_model = by_title["No 3D model on SOIC-8 (U3, U4)"]
+    assert no_model.severity is Severity.P2
+    assert len(result.findings) == 3
+    assert result.summary == "4/7 model paths resolve; 2 footprint(s) without a model"
+
+
+@pytest.mark.asyncio
+async def test_pcb_geometry_checks_run_after_a_stage_gate_halts(tmp_path) -> None:
+    make_project(tmp_path)
+    _write_pcb(
+        tmp_path,
+        _edge_board(
+            _fp("lib:RJ45_Test", "J1", (3, 20, 90), pads=_RA_PADS, fab=_RA_BODY),
+        ),
+    )
+    kicad = FakeKicad(
+        erc=[{"severity": "error", "type": "pin_not_connected", "description": "x", "items": []}]
+    )
+    outcome = await runner_for(tmp_path, kicad=kicad).run()
+    results = by_id(outcome.results)
+    assert results["sch.erc"].status is Status.FAIL
+    assert results["pcb.placement"].blocked_by == ["stage gate: S3 (sch.erc)"]
+    assert results["pcb.drc"].status is Status.SKIPPED
+    # Ungated deterministic checks still report after the halt.
+    assert results["pcb.connector_edge"].status is Status.FAIL
+    assert results["pcb.connector_edge"].findings[0].locator.refs == ["J1"]
+    assert results["pcb.models_3d"].status is not Status.SKIPPED
+
+
+def test_default_graph_marks_pcb_geometry_checks_ungated() -> None:
+    config = build_config(packaged_default_raw())
+    for check_id in ("pcb.connector_edge", "pcb.models_3d"):
+        check = config.check(check_id)
+        assert check.kind == "builtin" and check.ungated and check.requires == []
+    footprints = config.check("parts.footprints").prompt or ""
+    assert "3D model is P3" not in footprints and "pcb.models_3d" in footprints

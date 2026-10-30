@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import sys
+import sysconfig
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -93,6 +94,38 @@ async def kill_process_tree(process: asyncio.subprocess.Process) -> None:
         return
 
 
+def tool_scripts_dirs() -> list[str]:
+    """Console-script directories of the Python environment running the CLI.
+
+    pipx, `uv tool` and plain virtualenv installs expose only `copper-pilot` on
+    the user's PATH; command-line tools installed alongside it (for example
+    `easyeda2kicad`) stay inside the environment's bin/Scripts folder.
+    """
+    found: list[str] = []
+    for candidate in (sysconfig.get_path("scripts"), os.path.dirname(sys.executable)):
+        if candidate and os.path.isdir(candidate) and candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def shell_environment(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for agent shell commands: the user's, plus the CLI's scripts.
+
+    The CLI's script folders are appended, not prepended, so the user's own
+    `python`, `pip` and KiCad tools keep precedence and only commands missing
+    from PATH resolve to the ones installed with the CLI.
+    """
+    env = dict(os.environ if base is None else base)
+    key = next((name for name in env if name.upper() == "PATH"), "PATH")
+    entries = [entry for entry in env.get(key, "").split(os.pathsep) if entry]
+    known = {os.path.normcase(os.path.normpath(entry)) for entry in entries}
+    for directory in tool_scripts_dirs():
+        if os.path.normcase(os.path.normpath(directory)) not in known:
+            entries.append(directory)
+    env[key] = os.pathsep.join(entries)
+    return env
+
+
 async def spawn_shell(command: str, cwd: Path) -> asyncio.subprocess.Process:
     """Start a shell command detached into its own process group."""
     return await asyncio.create_subprocess_shell(
@@ -101,7 +134,7 @@ async def spawn_shell(command: str, cwd: Path) -> asyncio.subprocess.Process:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        env=os.environ.copy(),
+        env=shell_environment(),
         start_new_session=sys.platform != "win32",
     )
 

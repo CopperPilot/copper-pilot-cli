@@ -149,8 +149,17 @@ checks:
       For each part below, compare the assigned footprint with the datasheet land pattern and
       with the package LCSC ships: pad count, pitch, pad size, pin-1 position and the
       symbol-to-footprint pin map. A pin-map mismatch is P0. A land pattern that deviates from
-      the datasheet recommendation is P1; a missing courtyard or 3D model is P3.
+      the datasheet recommendation is P1; a missing courtyard is P3. Missing 3D models are
+      reported by pcb.models_3d; do not repeat them.
       {items}
+
+  - id: pcb.models_3d
+    stage: S2
+    title: Every footprint 3D model resolves to a file
+    kind: builtin
+    builtin: models_3d
+    ungated: true
+    inputs: [pcb]
 
   # -------------------------------------------------------------- S3 Schematic
   - id: sch.erc
@@ -225,6 +234,14 @@ checks:
     inputs: [pro, pcb]
 
   # ------------------------------------------------------------- S5 Placement
+  - id: pcb.connector_edge
+    stage: S5
+    title: External connectors sit on the board edge, facing out
+    kind: builtin
+    builtin: connector_edge
+    ungated: true
+    inputs: [pcb]
+
   - id: pcb.placement
     stage: S5
     title: Placement serves the circuits and the mechanicals

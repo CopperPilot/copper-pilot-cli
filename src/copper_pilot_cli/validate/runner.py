@@ -327,15 +327,14 @@ class Runner:
             checks = by_stage.get(stage.id, [])
             if not checks:
                 continue
-            if self.halt is not None:
-                for check in checks:
-                    self._record_skip(check, self._failed_prerequisites(check) or [self.halt])
-                continue
             for wave in stage_waves(checks):
                 if self.halt is not None:
-                    for check in wave:
+                    halted = [check for check in wave if not check.ungated]
+                    for check in halted:
                         self._record_skip(check, self._failed_prerequisites(check) or [self.halt])
-                    continue
+                    wave = [check for check in wave if check.ungated]
+                    if not wave:
+                        continue
                 await self._run_wave(wave)
                 if self.options.gate is GateMode.STRICT:
                     failed = self._blocking_failures(wave)
