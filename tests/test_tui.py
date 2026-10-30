@@ -1374,3 +1374,285 @@ async def test_retry_event_updates_status_and_error_event_fails_the_turn(tmp_pat
         await _wait_until(pilot, lambda: app._turn_task is None)
         assert app._turn_state.phase is TurnPhase.FAILED
         assert len(list(app.query(ErrorMessage))) == 1
+
+
+def _blocked_runtime() -> tuple[FakeRuntime, asyncio.Event]:
+    runtime = FakeRuntime()
+    gate = asyncio.Event()
+
+    async def blocked_stream(_values, _config):
+        await gate.wait()
+        if False:
+            yield None
+
+    runtime.astream = blocked_stream
+    return runtime, gate
+
+
+def _side_runner(calls: list, gate: asyncio.Event | None = None):
+    async def runner(credential, request):
+        calls.append(request)
+        if gate is not None:
+            await gate.wait()
+        question = request.query.rsplit("Question: ", 1)[-1]
+        return f"answer to {question}"
+
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_btw_answers_without_touching_the_running_turn(tmp_path) -> None:
+    runtime, gate = _blocked_runtime()
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    calls: list = []
+    app._btw_runner = _side_runner(calls)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("long task")
+        await _wait_until(pilot, lambda: app._loading is not None and app._loading.is_mounted)
+        turn = app._turn_task
+        area = app.query_one(TextArea)
+        area.text = "/btw what is it doing?"
+        area.focus()
+        await pilot.press("enter")
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        await _wait_until(pilot, lambda: app._btw.current() is not None)
+        await _wait_until(pilot, lambda: app._btw.current().status == "done")
+        assert panel.is_open and panel.has_focus
+        assert app._btw.current().answer == "answer to what is it doing?"
+        request = calls[0]
+        assert request.mode is CopperMode.ASK
+        assert request.conversation_id != "thread"
+        assert any("long task" in message.content for message in request.context)
+        assert len(app.query(UserMessage)) == 1
+        assert not app.query(AssistantMessage)
+        assert "answer to" not in app._last_assistant_content
+        assert app._turn_task is turn and not turn.done()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not panel.is_open
+        assert runtime.cancelled is False
+        assert app._turn_task is turn and not turn.done()
+        assert app.query_one(TextArea).has_focus
+
+        await pilot.press("escape")
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        assert runtime.cancelled is True
+        gate.set()
+
+
+@pytest.mark.asyncio
+async def test_btw_esc_in_composer_closes_panel_first(tmp_path) -> None:
+    runtime, gate = _blocked_runtime()
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("long task")
+        await _wait_until(pilot, lambda: app._turn_task is not None)
+        await app._btw_command("")
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        assert panel.is_open
+        app.query_one(TextArea).focus()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not panel.is_open
+        assert runtime.cancelled is False
+        gate.set()
+
+
+@pytest.mark.asyncio
+async def test_btw_navigation_copy_and_clear(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    app._btw_runner = _side_runner([])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("first?")
+        await app._btw_command("second?")
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        assert panel.has_focus and (panel.position, panel.total) == (2, 2)
+        await pilot.press("left")
+        assert app._btw.current().question == "first?"
+        assert panel.position == 1
+        await pilot.press("left")
+        assert app._btw.current().question == "first?"
+        await pilot.press("right_square_bracket")
+        assert app._btw.current().question == "second?"
+        await pilot.press("shift+left")
+        assert app._btw.current().question == "first?"
+        with patch.object(copper_app_module.pyperclip, "copy") as copy:
+            await pilot.press("c")
+        copy.assert_called_once_with("answer to first?")
+        await pilot.press("x")
+        assert len(app._btw) == 0
+        assert panel.is_open
+
+
+@pytest.mark.asyncio
+async def test_btw_type_through_returns_to_prompt(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("")
+        await pilot.pause()
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        assert panel.has_focus
+        await pilot.press("h")
+        area = app.query_one(TextArea)
+        assert area.has_focus and area.text == "h"
+        assert panel.is_open
+
+
+@pytest.mark.asyncio
+async def test_btw_is_not_shadowed_by_a_skill_and_shows_local_status(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    calls: list = []
+    app._btw_runner = _side_runner(calls)
+    async with app.run_test(size=(100, 30)) as pilot:
+        app._skills["btw"] = SimpleNamespace(id="btw", label="Btw")
+        await app._handle_submission("/btw")
+        await pilot.pause()
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        assert panel.is_open and panel.total == 0
+        assert "No turn is running" in panel.query_one(".btw-answer").source
+        assert not app.query(UserMessage)
+        assert app._selected_skill is None
+        assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_btw_caps_in_flight_and_clear_cancels(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    gate = asyncio.Event()
+    calls: list = []
+    app._btw_runner = _side_runner(calls, gate)
+    async with app.run_test(size=(100, 30)) as pilot:
+        for index in range(4):
+            await app._btw_command(f"q{index}?")
+        assert len(app._btw) == 3
+        await _wait_until(pilot, lambda: len(calls) == 3)
+        tasks = set(app._btw_tasks)
+        await app._command("/clear")
+        await pilot.pause()
+        assert len(app._btw) == 0
+        assert not app.query_one(copper_widgets_module.BtwPanel).is_open
+        assert all(task.cancelled() or task.done() for task in tasks)
+
+
+@pytest.mark.asyncio
+async def test_btw_answer_while_closed_only_notifies(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    gate = asyncio.Event()
+    app._btw_runner = _side_runner([], gate)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("later?")
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        await pilot.press("escape")
+        assert not panel.is_open
+        with patch.object(app, "notify") as notify:
+            gate.set()
+            await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        notify.assert_called_once_with("Side question finished. Type /btw to view.", markup=False)
+        assert not panel.is_open
+        assert app.query_one(TextArea).has_focus
+
+
+@pytest.mark.asyncio
+async def test_btw_error_stays_in_panel(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("are we logged in?")
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        entry = app._btw.current()
+        assert entry.status == "error" and "Not authenticated" in entry.answer
+        assert not app.query(ErrorMessage)
+
+
+@pytest.mark.asyncio
+async def test_btw_panel_skips_rendering_an_unchanged_answer(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    app._btw_runner = _side_runner([])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("first?")
+        await app._btw_command("second?")
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        await pilot.pause()
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        answer = panel.query_one(".btw-answer", copper_widgets_module.Markdown)
+        with patch.object(answer, "update", wraps=answer.update) as update:
+            await pilot.press("left")
+            await pilot.press("left")
+            await pilot.press("shift+left")
+            assert update.call_count == 1
+            await app._btw_command("")
+            assert update.call_count == 2
+            await pilot.press("right")
+            await pilot.press("right")
+            await app._btw_command("")
+            assert update.call_count == 2
+
+
+def test_btw_panel_markdown_shortens_long_answers() -> None:
+    shorten = copper_widgets_module.btw_panel_markdown
+    limit = copper_widgets_module.BTW_PANEL_LINES
+    assert shorten("short answer") == "short answer"
+    long_list = "\n".join(f"- item {index}" for index in range(limit * 3))
+    shortened = shorten(long_list)
+    assert f"- item {limit - 1}" in shortened and f"- item {limit}\n" not in shortened
+    assert shortened.endswith("Press c to copy the full answer._")
+    fenced = "```text\n" + "\n".join(f"line {index}" for index in range(limit * 2)) + "\n```"
+    assert shorten(fenced).count("```") == 2
+    tilde = "~~~text\n" + "\n".join(f"line {index}" for index in range(limit * 2))
+    assert shorten(tilde).count("~~~") == 2
+    huge_line = "x" * (copper_widgets_module.BTW_PANEL_CHARS * 2)
+    assert len(shorten(huge_line)) < copper_widgets_module.BTW_PANEL_CHARS + 100
+
+
+@pytest.mark.asyncio
+async def test_btw_panel_renders_a_short_view_but_copies_everything(tmp_path) -> None:
+    long_answer = "\n".join(f"- point {index}" for index in range(500))
+
+    async def runner(_credential, _request):
+        return long_answer
+
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    app._btw_runner = runner
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("everything?")
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)
+        await pilot.pause()
+        panel = app.query_one(copper_widgets_module.BtwPanel)
+        source = panel.query_one(".btw-answer", copper_widgets_module.Markdown).source
+        assert "- point 499" not in source and "Press c to copy" in source
+        with patch.object(copper_app_module.pyperclip, "copy") as copy:
+            await pilot.press("c")
+        copy.assert_called_once_with(long_answer)
+
+
+@pytest.mark.asyncio
+async def test_clear_forgets_the_request_shown_by_btw(tmp_path) -> None:
+    runtime, gate = _blocked_runtime()
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("long task")
+        await _wait_until(pilot, lambda: app._loading is not None and app._loading.is_mounted)
+        gate.set()
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        await app._command("/clear")
+        await app._btw_command("")
+        source = app.query_one(copper_widgets_module.BtwPanel).query_one(".btw-answer").source
+        assert "long task" not in source
+
+
+@pytest.mark.asyncio
+async def test_btw_cancels_a_question_dropped_from_history(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    gate = asyncio.Event()
+    app._btw.limit = 1
+    app._btw_runner = _side_runner([], gate)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._btw_command("old?")
+        await _wait_until(pilot, lambda: len(app._btw_tasks) == 1)
+        dropped = next(iter(app._btw_tasks))
+        await app._btw_command("new?")
+        await _wait_until(pilot, lambda: dropped.cancelled())
+        assert [entry.question for entry in app._btw.entries] == ["new?"]
+        gate.set()
+        await _wait_until(pilot, lambda: app._btw.pending() == 0)

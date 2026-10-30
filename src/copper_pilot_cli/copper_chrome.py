@@ -27,6 +27,7 @@ Segment = tuple[str, str | None]
 SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/approval", "Switch approval mode"),
     ("/auth", "Log in or out"),
+    ("/btw", "Ask a side question without interrupting"),
     ("/build", "Build a saved plan"),
     ("/clear", "Clear the transcript"),
     ("/context", "Show workspace and thread"),
@@ -58,7 +59,7 @@ KEY_HELP: tuple[tuple[str, str], ...] = (
     ("shift+tab", "switch mode: plan, ask, agent"),
     ("ctrl+e", "switch effort: balanced, intelligent"),
     ("up/down", "history"),
-    ("esc", "stop the turn"),
+    ("esc", "close /btw, else stop the turn"),
     ("ctrl+c", "cancel or quit"),
     ("ctrl+q", "quit"),
     ("ctrl+r", "resume thread"),
