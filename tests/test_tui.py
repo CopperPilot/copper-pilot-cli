@@ -716,6 +716,40 @@ async def test_cancel_still_cleans_up_when_transport_cancel_fails(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_loading_mount_still_cleans_up(tmp_path) -> None:
+    """Cancel while the spinner is still mounting must finish the turn."""
+    runtime = FakeRuntime()
+    release_mount = asyncio.Event()
+
+    async def blocked_stream(_values, _config):
+        await asyncio.Event().wait()
+        if False:
+            yield None
+
+    runtime.astream = blocked_stream
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    original_mount = CopperPilotApp._mount
+
+    async def hold_loading_mount(self, widget):
+        await original_mount(self, widget)
+        if isinstance(widget, LoadingWidget):
+            await release_mount.wait()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        with patch.object(CopperPilotApp, "_mount", hold_loading_mount):
+            await app._submit("long task")
+            await _wait_until(
+                pilot,
+                lambda: app._loading is not None and app._loading.is_mounted,
+            )
+            await app.action_cancel_or_quit()
+            await _wait_until(pilot, lambda: app._turn_task is None)
+        assert app._turn_state.phase is TurnPhase.CANCELLED
+        assert not list(app.query(LoadingWidget))
+        assert not app.query_one(ChatInput).has_class("-busy")
+
+
+@pytest.mark.asyncio
 async def test_hosted_error_event_is_rendered_only_once(tmp_path) -> None:
     runtime = FakeRuntime()
 

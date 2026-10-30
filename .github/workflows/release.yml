@@ -38,6 +38,24 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare feature notice
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from copper_pilot_cli.copper_update import build_release_notice
+
+          document = build_release_notice(
+              json.loads(Path("release-notices.json").read_text(encoding="utf-8")),
+              os.environ["RELEASE_VERSION"],
+          )
+          Path("release-notice.json").write_text(json.dumps(document) + "\n", encoding="utf-8")
+          PY
+
       - run: make lint
       - run: make test
       - run: python -m build
@@ -65,5 +83,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
+          files: |
+            dist/*
+            release-notice.json
           body_path: HISTORY.md

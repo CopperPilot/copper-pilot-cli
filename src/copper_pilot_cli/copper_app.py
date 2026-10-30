@@ -99,7 +99,12 @@ from copper_pilot_cli.copper_tools import (
     ApprovalRequest,
     LocalToolBroker,
 )
-from copper_pilot_cli.copper_update import check_for_update
+from copper_pilot_cli.copper_update import (
+    check_for_background_notice,
+    check_for_update,
+    mark_notice_shown,
+    notice_message,
+)
 from copper_pilot_cli.copper_widgets import (
     MAX_WIDGET_TEXT,
     ApprovalDecision,
@@ -249,6 +254,7 @@ class CopperPilotApp(App[None]):
         self.catalog = catalog or cached_chat_model_catalog()
         self.initial_message = initial_message
         self._turn_task: asyncio.Task[None] | None = None
+        self._update_notice_task: asyncio.Task[None] | None = None
         self._cancel_requested = False
         self._assistant: AssistantMessage | None = None
         self._last_assistant_content = ""
@@ -350,6 +356,20 @@ class CopperPilotApp(App[None]):
         self.query_one(ChatInput).focus()
         if self.initial_message:
             self.call_after_refresh(self._submit, self.initial_message)
+        self._update_notice_task = asyncio.create_task(self._show_update_notice())
+
+    async def _show_update_notice(self) -> None:
+        try:
+            update = await check_for_background_notice()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+        if update is None or not self.is_running:
+            return
+        # Release text is untrusted; Textual markup is disabled so it stays literal.
+        self.notify(notice_message(update), timeout=10, markup=False)
+        mark_notice_shown(update)
 
     def on_mouse_up(self, event: MouseUp) -> None:  # noqa: ARG002
         """Copy selection after Textual completes its click-chain update."""
@@ -361,6 +381,10 @@ class CopperPilotApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._cancel_btw_tasks()
+        if self._update_notice_task is not None:
+            self._update_notice_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._update_notice_task
         try:
             if self._turn_task and not self._turn_task.done():
                 with contextlib.suppress(Exception):
@@ -638,7 +662,7 @@ class CopperPilotApp(App[None]):
             composer.first().set_busy(False)
         loading.stop()
         if loading.is_mounted:
-            loading.remove()
+            await loading.remove()
 
     async def _close_streams(self) -> None:
         if self._assistant is not None:
@@ -735,12 +759,12 @@ class CopperPilotApp(App[None]):
         self._turn_task = asyncio.create_task(self._run_turn(value))
 
     async def _run_turn(self, value: str) -> None:
-        self._cancel_requested = False
-        self._turn_state = TurnState()
-        self._turn_state.apply(TurnEvent("turn_started"))
-        await self._start_loading()
-        self._update_status("Thinking")
         try:
+            self._cancel_requested = False
+            self._turn_state = TurnState()
+            self._turn_state.apply(TurnEvent("turn_started"))
+            await self._start_loading()
+            self._update_status("Thinking")
             await self.hooks.run("before_turn")
             async for item in self.runtime.astream(
                 {
@@ -1134,7 +1158,13 @@ class CopperPilotApp(App[None]):
                 await self._mount(ErrorMessage(str(exc)))
             else:
                 message = (
-                    f"CopperPilot CLI {update.latest} is available.\n\n`{update.install_command}`"
+                    f"CopperPilot CLI {update.latest} is available."
+                    + (
+                        f"\n\n`{update.feature_notice.replace('`', chr(39))}`"
+                        if update.feature_notice
+                        else ""
+                    )
+                    + "\n\nRun `copper-pilot update`."
                     if update.available
                     else f"CopperPilot CLI {update.current} is current."
                 )
