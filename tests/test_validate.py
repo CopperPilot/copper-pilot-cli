@@ -1432,7 +1432,8 @@ async def test_hosted_failure_records_the_hosted_turn_id(tmp_path, monkeypatch) 
     assert result.status is Status.ERROR
     assert result.error == (
         "CopperPilot ran into an error. (the hosted turn failed; "
-        "the service sent no further detail; hosted turn turn-7.)"
+        "the service sent no further detail; hosted turn turn-7.) "
+        "[all 4 attempts failed the same way]"
     )
 
 
