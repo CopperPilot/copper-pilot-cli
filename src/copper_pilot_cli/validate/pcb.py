@@ -415,7 +415,9 @@ _INTERNAL_RE = re.compile(
     re.IGNORECASE,
 )
 _SKIPPED_PROPERTIES = {"Reference", "Value", "Datasheet", "Footprint", "ki_fp_filters"}
-_CONNECTOR_REF_RE = re.compile(r"^(?:J|P|CN|CON|X|XS|XJ|USB|RJ|HDMI|ETH|LAN)\d", re.IGNORECASE)
+_CONNECTOR_REF_RE = re.compile(
+    r"^(?:J|P|CN|CON|X|XS|XJ|USB|RJ|HDMI|ETH|LAN)(?:\d|[_-])", re.IGNORECASE
+)
 
 
 def external_connector_kind(footprint: Footprint) -> str | None:
