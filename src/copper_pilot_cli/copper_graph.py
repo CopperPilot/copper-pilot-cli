@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import operator
+import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ from copper_pilot_cli.copper_protocol import (
     CopperMode,
     ErrorInfo,
     EventKind,
+    ProtocolError,
     classify_error,
     normalize_effort,
 )
@@ -216,8 +218,7 @@ class _TurnRun:
         self.context_parts: list[str] = []
         self.failure: ErrorInfo | None = None
         self.cancelled = False
-        # The hosted service ended the turn with ``success: false``.
-        self.final_failed = False
+        self.fresh_conversation = False
 
     # ------------------------------------------------------------ streaming
 
@@ -242,12 +243,40 @@ class _TurnRun:
                 # Hold the hosted error until we know whether this attempt is retried.
                 self.pending_error = projected
                 continue
+            if event.kind is EventKind.FINAL and _final_failed(projected["data"]):
+                # A failed final carries only generic hosted copy; retry it like a
+                # dropped stream instead of ending the turn and losing the work.
+                raise self._hosted_failure(projected["data"], event.turn_id)
             self.emit(projected)
             self._track(event)
 
+    def _hosted_failure(self, data: dict[str, Any], turn_id: str | None) -> ProtocolError:
+        message = str(data.get("error") or "Hosted turn failed.")
+        # The hosted side echoes its error copy as response text before the
+        # final; keep it out of the partial answer carried into a resume.
+        if self.text and self.text[-1].strip() == message.strip():
+            self.text.pop()
+        blocked = data.get("tos_blocked") is True
+        usage = data.get("usage")
+        elapsed = usage.get("processing_time_ms") if isinstance(usage, dict) else None
+        facts = []
+        if isinstance(elapsed, (int, float)):
+            facts.append(f"after {elapsed / 1000:.0f} s")
+        if data.get("model"):
+            facts.append(f"on {data['model']}")
+        if blocked:
+            detail = "blocked by the hosted content policy"
+        else:
+            detail = "the hosted turn failed"
+            detail += f" {' '.join(facts)}" if facts else ""
+            detail += "; the service sent no further detail"
+        if turn_id:
+            detail += f"; hosted turn {turn_id}"
+        return ProtocolError(
+            f"{message} ({detail}.)", code="HOSTED_TURN_FAILED", retryable=not blocked
+        )
+
     def _track(self, event: CopperEvent) -> None:
-        if event.kind is EventKind.FINAL and isinstance(event.data, dict):
-            self.final_failed = event.data.get("success") is False or bool(event.data.get("error"))
         if event.kind is EventKind.TEXT:
             self.text.append(str(event.data))
         elif event.kind is EventKind.STATUS_EVENT and isinstance(event.data, dict):
@@ -333,6 +362,8 @@ class _TurnRun:
                     self.cancelled = True
                     return False
                 will_retry = info.retryable and attempt < MAX_TURN_ATTEMPTS
+                if not will_retry and attempt < MAX_TURN_ATTEMPTS and self._start_fresh(exc):
+                    will_retry = True
                 logger.warning(
                     "Hosted turn attempt %s/%s failed (type=%s, retryable=%s): %s",
                     attempt,
@@ -355,6 +386,29 @@ class _TurnRun:
                 await asyncio.sleep(delay)
                 self.emit(retry_event("restarted", attempt + 1, error=info, will_retry=True))
         return False
+
+    def _start_fresh(self, exc: BaseException) -> bool:
+        """Move a turn the service refuses as too large onto a new hosted conversation.
+
+        The hosted service keeps each conversation's history and refuses any
+        request once that history is too large, even a tiny resume. The
+        stitched resume carries its own transcript, so it can continue on a
+        fresh conversation id; this happens at most once per turn.
+        """
+        refused = isinstance(exc, ProtocolError) and (
+            exc.status == 413 or exc.code == "chat_request_too_large"
+        )
+        if not refused or self.fresh_conversation or not hasattr(self.agent, "conversation_id"):
+            return False
+        self.fresh_conversation = True
+        previous = self.agent.conversation_id
+        self.agent.conversation_id = str(uuid.uuid4())
+        logger.warning(
+            "Hosted conversation %s is too large; resuming on a fresh conversation %s",
+            previous,
+            self.agent.conversation_id,
+        )
+        return True
 
     def report_failure(self, info: ErrorInfo, exc: BaseException) -> None:
         self.failure = info
@@ -430,8 +484,6 @@ class _TurnRun:
             ]
             if not await self.run_with_retry(continuation, first_messages=messages):
                 return False
-            if self.final_failed:
-                return False
         return True
 
     # ---------------------------------------------------------------- close
@@ -467,6 +519,10 @@ class _TurnRun:
             "copper_model": getattr(self.agent, "model", None) or "",
             "copper_events": self.recorded_events,
         }
+
+
+def _final_failed(data: Any) -> bool:
+    return isinstance(data, dict) and (data.get("success") is False or bool(data.get("error")))
 
 
 def _background_manager(agent: Any) -> Any:
@@ -532,12 +588,12 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 query if isinstance(query, str) else json.dumps(query),
                 first_messages=original,
             )
-            # A failed final ends the turn: waiting on background shells first
-            # would hold the hosted error back for as long as they run.
-            if completed and not run.final_failed:
+            # A failed final is a failed attempt (see consume), so background
+            # shells never hold a hosted error back.
+            if completed:
                 await run.wait_for_background()
         finally:
-            if run.failure is not None or run.cancelled or run.final_failed:
+            if run.failure is not None or run.cancelled:
                 manager = _background_manager(agent)
                 if manager is not None:
                     await manager.kill_all()

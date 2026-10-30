@@ -54,6 +54,50 @@ Headless mode is also used when `--message` is set and stdout is not a TTY.
 With `--json --no-stream`, the document includes `thread_id` so a later run can
 pass `--resume`.
 
+### Side questions (`/btw`)
+
+```text
+/btw what is it doing right now?
+/btw
+```
+
+`/btw <question>` asks about the session without interrupting the running
+turn. The answer appears in a panel above the prompt. It is drawn from the
+thread so far plus a live snapshot of the running turn: the request, the
+current status, this turn's tool calls, survey workers, and the reply so far.
+
+- The side question runs on its own hosted Ask stream with a new conversation
+  id. It always uses Balanced effort, and every tool request is refused, so it
+  cannot read files, run commands, or change anything. If the model asks for
+  a tool anyway, the answer ends with a note that nothing was executed.
+- The question and answer are never saved to the thread, never shown in the
+  transcript, and never sent to the main turn. The newest five answered side
+  questions are replayed to the next one.
+- Each side question uses hosted usage like a short Ask turn. A usage limit or
+  error is shown in the panel, not in the transcript. At most three can be in
+  flight at once.
+- `/btw` with no question reopens the panel on the latest answer. If you have
+  not asked one yet, it shows the live snapshot without a hosted call.
+- History is in memory only, up to 20 entries. `x`, `/clear`, `/cwd`, and
+  resuming another thread clear it, and it is gone when the CLI exits.
+- If the panel is closed when an answer arrives, a notification says it is
+  ready. The panel never takes focus from an approval prompt.
+- The panel shows at most the first 60 lines (8,000 characters) of an answer,
+  so moving between long answers stays fast; `c` copies the full answer.
+
+| Key (panel focused) | Action |
+|---------------------|--------|
+| `Esc`, `Enter`, `Space` | Close the panel and return to the prompt |
+| `←` / `→`, `Shift+←` / `Shift+→`, `[` / `]` | Older / newer side answer |
+| `↑` / `↓`, `PageUp` / `PageDown`, `Home` / `End` | Scroll the answer |
+| `c` | Copy the raw answer |
+| `x` | Clear side-question history |
+| Any other character | Return to the prompt and type it |
+
+With the prompt focused, the first `Esc` closes an open panel. Only an `Esc`
+with no panel open stops the running turn. `/btw` is available in the
+interactive app only; headless, MCP, and ACP runs do not offer it.
+
 ## Update
 
 ```console
