@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import operator
+import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -217,6 +218,7 @@ class _TurnRun:
         self.context_parts: list[str] = []
         self.failure: ErrorInfo | None = None
         self.cancelled = False
+        self.fresh_conversation = False
 
     # ------------------------------------------------------------ streaming
 
@@ -360,6 +362,8 @@ class _TurnRun:
                     self.cancelled = True
                     return False
                 will_retry = info.retryable and attempt < MAX_TURN_ATTEMPTS
+                if not will_retry and attempt < MAX_TURN_ATTEMPTS and self._start_fresh(exc):
+                    will_retry = True
                 logger.warning(
                     "Hosted turn attempt %s/%s failed (type=%s, retryable=%s): %s",
                     attempt,
@@ -382,6 +386,29 @@ class _TurnRun:
                 await asyncio.sleep(delay)
                 self.emit(retry_event("restarted", attempt + 1, error=info, will_retry=True))
         return False
+
+    def _start_fresh(self, exc: BaseException) -> bool:
+        """Move a turn the service refuses as too large onto a new hosted conversation.
+
+        The hosted service keeps each conversation's history and refuses any
+        request once that history is too large, even a tiny resume. The
+        stitched resume carries its own transcript, so it can continue on a
+        fresh conversation id; this happens at most once per turn.
+        """
+        refused = isinstance(exc, ProtocolError) and (
+            exc.status == 413 or exc.code == "chat_request_too_large"
+        )
+        if not refused or self.fresh_conversation or not hasattr(self.agent, "conversation_id"):
+            return False
+        self.fresh_conversation = True
+        previous = self.agent.conversation_id
+        self.agent.conversation_id = str(uuid.uuid4())
+        logger.warning(
+            "Hosted conversation %s is too large; resuming on a fresh conversation %s",
+            previous,
+            self.agent.conversation_id,
+        )
+        return True
 
     def report_failure(self, info: ErrorInfo, exc: BaseException) -> None:
         self.failure = info
