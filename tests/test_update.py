@@ -293,3 +293,17 @@ def test_pip_and_pipx_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _return(value: copper_update.UpdateInfo) -> copper_update.UpdateInfo:
     return value
+
+
+def test_notice_message_does_not_double_the_period() -> None:
+    update = copper_update.UpdateInfo(
+        current="1.2.0",
+        latest="1.3.0",
+        available=True,
+        install_command="pip install --upgrade copper-pilot-cli",
+        feature_notice="Added board-review shortcuts.",
+    )
+
+    assert copper_update.notice_message(update) == (
+        "Update available: 1.2.0 → 1.3.0 — Added board-review shortcuts. Run: copper-pilot update"
+    )

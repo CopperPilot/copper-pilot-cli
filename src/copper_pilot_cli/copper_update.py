@@ -203,9 +203,10 @@ async def check_for_background_notice() -> UpdateInfo | None:
 
 
 def notice_message(update: UpdateInfo) -> str:
+    feature = (update.feature_notice or "").rstrip(".")
     return (
         f"Update available: {update.current} → {update.latest} — "
-        f"{update.feature_notice}. Run: copper-pilot update"
+        f"{feature}. Run: copper-pilot update"
     )
 
 
