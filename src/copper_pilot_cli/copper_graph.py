@@ -219,6 +219,9 @@ class _TurnRun:
         self.failure: ErrorInfo | None = None
         self.cancelled = False
         self.fresh_conversation = False
+        # Failures of earlier attempts this turn; the last one alone is often
+        # the generic hosted copy while the earlier ones name the real cause.
+        self.attempt_failures: list[ErrorInfo] = []
 
     # ------------------------------------------------------------ streaming
 
@@ -374,8 +377,9 @@ class _TurnRun:
                 )
                 self.emit(retry_event("failed", attempt, error=info, will_retry=will_retry))
                 if not will_retry:
-                    self.report_failure(info, exc)
+                    self.report_failure(self._with_history(info, attempt), exc)
                     return False
+                self.attempt_failures.append(info)
                 self.pending_error = None
                 delay = RETRY_BACKOFF_SECONDS[min(attempt - 1, len(RETRY_BACKOFF_SECONDS) - 1)]
                 self.emit(
@@ -386,6 +390,21 @@ class _TurnRun:
                 await asyncio.sleep(delay)
                 self.emit(retry_event("restarted", attempt + 1, error=info, will_retry=True))
         return False
+
+    def _with_history(self, info: ErrorInfo, attempt: int) -> ErrorInfo:
+        if not self.attempt_failures:
+            return info
+        if all(
+            (item.type, item.message) == (info.type, info.message) for item in self.attempt_failures
+        ):
+            message = f"{info.message} [all {attempt} attempts failed the same way]"
+            return ErrorInfo(info.type, message, info.retryable)
+        earlier = "; ".join(
+            f"{index} {item.type}: {_clip(item.message)}"
+            for index, item in enumerate(self.attempt_failures, start=1)
+        )
+        message = f"{info.message} [attempt {attempt}; earlier attempts: {earlier}]"
+        return ErrorInfo(info.type, message, info.retryable)
 
     def _start_fresh(self, exc: BaseException) -> bool:
         """Move a turn the service refuses as too large onto a new hosted conversation.
@@ -519,6 +538,11 @@ class _TurnRun:
             "copper_model": getattr(self.agent, "model", None) or "",
             "copper_events": self.recorded_events,
         }
+
+
+def _clip(text: str, limit: int = 120) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _final_failed(data: Any) -> bool:

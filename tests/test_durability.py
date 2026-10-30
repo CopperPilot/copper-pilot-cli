@@ -778,7 +778,8 @@ async def test_exhausted_failed_finals_surface_the_known_detail(monkeypatch, tmp
     (error,) = [e for e in events if e["type"] == "copper.error"]
     assert error["data"]["message"] == (
         "CopperPilot ran into an error. (the hosted turn failed after 300 s on "
-        "gemini-4-argon; the service sent no further detail.)"
+        "gemini-4-argon; the service sent no further detail.) "
+        "[all 4 attempts failed the same way]"
     )
     assert error["data"]["code"] == "HOSTED_TURN_FAILED"
     assert error["data"]["type"] == "server"
@@ -841,6 +842,37 @@ async def test_local_payload_limit_does_not_start_a_fresh_conversation(
     agent = ScriptedAgent([[local], [CopperEvent(EventKind.TEXT, "never")]])
     _events, _messages = await run_graph(agent, monkeypatch, tmp_path)
     assert agent.conversations == ["conversation"]
+
+
+@pytest.mark.asyncio
+async def test_final_error_names_what_earlier_attempts_saw(monkeypatch, tmp_path) -> None:
+    # rea-hardware, 2026-10-30: during a hosted outage every attempt failed
+    # differently (dropped sockets, HTTP 503, restarts) but the turn error
+    # only carried the last attempt's generic copy.
+    agent = ScriptedAgent(
+        [[DROP], [refused(503)], [CopperEvent(EventKind.TEXT, "Half"), DROP], failed_attempt()]
+    )
+    events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert len(agent.inputs) == MAX_TURN_ATTEMPTS
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    message = error["data"]["message"]
+    assert message.startswith(
+        "CopperPilot ran into an error. (the hosted turn failed after 300 s on "
+        "gemini-4-argon; the service sent no further detail.) [attempt 4; earlier attempts: "
+    )
+    assert "1 connection: Chat socket closed before a final response (close code 1011" in message
+    assert "2 server: " in message and "503" in message
+    assert "3 connection: " in message
+    assert error["data"]["code"] == "HOSTED_TURN_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_single_attempt_failure_has_no_history(monkeypatch, tmp_path) -> None:
+    agent = ScriptedAgent([[ProtocolError("Request invalid.", code="chat_request_invalid")]])
+    events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["message"] == "Request invalid."
 
 
 @pytest.mark.asyncio
