@@ -335,9 +335,12 @@ class ScriptedAgent:
     tool_broker: Any = None
     inputs: list[list[Any]] = field(default_factory=list)
     cancel_on_attempt: int | None = None
+    conversation_id: str = "conversation"
+    conversations: list[str] = field(default_factory=list)
 
     async def astream_events_raw(self, value):
         self.inputs.append(list(value["messages"]))
+        self.conversations.append(self.conversation_id)
         script = self.attempts.pop(0)
         for item in script:
             if isinstance(item, BaseException):
@@ -781,6 +784,63 @@ async def test_exhausted_failed_finals_surface_the_known_detail(monkeypatch, tmp
     assert error["data"]["type"] == "server"
     assert not [e for e in events if e["type"] == "copper.final"]
     assert messages[-1].additional_kwargs[COPPER_CONTEXT_KEY].startswith("[Turn interrupted")
+
+
+TOO_LARGE = ProtocolError(
+    "This conversation is too large to continue. Start a new chat and try again.",
+    code="chat_request_too_large",
+    status=413,
+)
+
+
+@pytest.mark.asyncio
+async def test_resume_refused_as_too_large_continues_on_a_fresh_conversation(
+    monkeypatch, tmp_path
+) -> None:
+    # rea-hardware validate arch.review on an RK3566 tablet: the hosted turn
+    # failed after 698 s of tool work, and the resume was refused within
+    # 245 ms because the hosted conversation history was too large.
+    agent = ScriptedAgent(
+        [
+            [tool_request(), tool_result(), *failed_attempt("Halfway.")],
+            [CopperEvent(EventKind.ERROR, {"message": "too large", "status": 413}), TOO_LARGE],
+            [
+                CopperEvent(EventKind.TEXT, " Done."),
+                CopperEvent(EventKind.FINAL, {"success": True}),
+            ],
+        ]
+    )
+    events, messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert agent.conversations[0] == agent.conversations[1] == "conversation"
+    assert agent.conversations[2] != "conversation"
+    assert agent.conversation_id == agent.conversations[2]
+    assert not [e for e in events if e["type"] == "copper.error"]
+    resumed = agent.inputs[2]
+    assert resumed[-1].content == f"{RESUME_PREFIX}Review it"
+    assert "[Completed before the interruption: read_file (ok)]" in resumed[-2].content
+    assert messages[-1].content == "Halfway. Done."
+
+
+@pytest.mark.asyncio
+async def test_too_large_on_a_fresh_conversation_ends_the_turn(monkeypatch, tmp_path) -> None:
+    agent = ScriptedAgent([[TOO_LARGE], [TOO_LARGE], [CopperEvent(EventKind.TEXT, "never")]])
+    events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+
+    assert len(agent.inputs) == 2
+    assert agent.conversations[0] != agent.conversations[1]
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["status"] == 413
+
+
+@pytest.mark.asyncio
+async def test_local_payload_limit_does_not_start_a_fresh_conversation(
+    monkeypatch, tmp_path
+) -> None:
+    local = ProtocolError("Chat history is too large to send.", code="PAYLOAD_TOO_LARGE")
+    agent = ScriptedAgent([[local], [CopperEvent(EventKind.TEXT, "never")]])
+    _events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+    assert agent.conversations == ["conversation"]
 
 
 @pytest.mark.asyncio
