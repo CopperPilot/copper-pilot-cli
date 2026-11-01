@@ -115,7 +115,13 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             self.credential.fingerprint,
         )
 
-    def _request(self, messages: list[BaseMessage]) -> ChatRequest:
+    def _request(
+        self,
+        messages: list[BaseMessage],
+        *,
+        turn_id: str | None = None,
+        resume: dict[str, Any] | None = None,
+    ) -> ChatRequest:
         if not messages or messages[-1].type != "human":
             raise ValueError("The final input message must be a human message.")
         query = messages[-1].content
@@ -138,6 +144,8 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             pcb_path=self.context.pcb_path,
             project_data={"workspace_path": str(self.workspace)},
             initial_file_tree=build_initial_file_tree(self.workspace) or None,
+            turn_id=turn_id,
+            resume=resume,
         )
 
     async def astream_events_raw(
@@ -145,11 +153,30 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         input: AgentInput,
         config: RunnableConfig | None = None,
     ) -> AsyncIterator[CopperEvent]:
+        """Stream one hosted attempt.
+
+        A mapping input may carry ``turn_id`` (this attempt's id), ``resume``
+        (the ``request.resume`` journal for a resume attempt) and
+        ``continuation`` (a later attempt of the same logical turn). Later
+        attempts keep the tool broker's results, so a repeated
+        ``tool_call_id`` is answered from cache instead of running again.
+        """
         del config
-        request = self._request(_messages(input))
-        self.tool_broker.begin_turn()
+        options = input if isinstance(input, Mapping) else {}
+        resume = options.get("resume")
+        request = self._request(
+            _messages(input),
+            turn_id=options.get("turn_id"),
+            resume=resume if isinstance(resume, dict) else None,
+        )
+        if not options.get("continuation") and request.resume is None:
+            self.tool_broker.begin_turn()
         async for event in self._client.stream(request, self.tool_broker.execute):
             yield event
+
+    async def server_reachable(self) -> bool:
+        """Whether the hosted service answers its heartbeat (checked before a resume)."""
+        return await self._client.heartbeat()
 
     async def ainvoke(
         self,

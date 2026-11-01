@@ -983,8 +983,8 @@ async def test_retry_thoughts_skip_the_terminal_attempt(tmp_path, monkeypatch) -
         if update.session_update == "agent_thought_chunk"
     ]
     assert thoughts == [
-        "Attempt 1/4 failed: boom (will retry)\n",
-        "Retrying (1/3) in 2s: boom\n",
+        "Attempt 1/9 failed: boom (will retry)\n",
+        "Retrying (1/8) in 2s: boom\n",
     ]
 
 
