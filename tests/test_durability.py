@@ -195,11 +195,20 @@ async def test_drop_while_sending_tool_result_reports_close_code(monkeypatch) ->
     async def handler(_request):
         return {"result": "content"}
 
-    kinds = []
-    with pytest.raises(ProtocolError, match="no close frame"):
+    events = []
+    with pytest.raises(ProtocolError, match="no close frame") as caught:
         async for event in client.stream(request(), handler):
-            kinds.append(event.kind)
-    assert kinds == [EventKind.TOOL_REQUEST]
+            events.append(event)
+    # The tool ran; its result is still reported (marked undelivered) so the
+    # journal records it as completed and a resume does not run it again.
+    assert [event.kind for event in events] == [EventKind.TOOL_REQUEST, EventKind.TOOL_RESULT]
+    assert events[1].data == {
+        "tool_call_id": "call-1",
+        "tool_name": "read_file",
+        "result": {"result": "content"},
+        "delivered": False,
+    }
+    assert caught.value.resume_reason == "tool_result_undeliverable"
 
 
 class _StallingSocket(_Socket):

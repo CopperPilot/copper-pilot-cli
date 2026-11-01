@@ -17,6 +17,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse, urlunparse
 
 import certifi
+import httpx
 from markdownify import markdownify
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from websockets.asyncio.client import connect
@@ -28,6 +29,7 @@ from copper_pilot_cli.tool_batch import (
     parallel_tools_enabled,
     run_tool_batch,
 )
+from copper_pilot_cli.turn_journal import TURN_RESUME_CAPABILITY, turn_resume_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,16 @@ MAX_STATUS_BYTES = 16 * 1024
 # passes 16 KB) and the hosted side may send it as one frame.
 MAX_RESPONSE_TEXT_BYTES = 1024 * 1024
 IDLE_FRAME_TIMEOUT_ENV = "COPPER_PILOT_IDLE_TIMEOUT_SECONDS"
-DEFAULT_IDLE_FRAME_TIMEOUT = 10 * 60.0
+# Longer than the hosted service's 300 s hard quiet timeout, so the server
+# always reports a stalled turn before the client gives up on it.
+DEFAULT_IDLE_FRAME_TIMEOUT = 330.0
+# WebSocket keepalive (protocol v1 liveness): a ping every 15 s; no pong within
+# 20 s closes the socket and the turn is resumed.
+PING_INTERVAL_SECONDS = 15.0
+PING_TIMEOUT_SECONDS = 20.0
+# Close code the client sends when the server goes quiet for the idle window.
+CLIENT_LIVENESS_CLOSE_CODE = 4000
+HEARTBEAT_PATH = "/api/heartbeat"
 
 
 def idle_frame_timeout() -> float | None:
@@ -81,6 +92,10 @@ class ProtocolError(RuntimeError):
         can_purchase_overage: bool | None = None,
         retryable: bool | None = None,
         resets_at: str | None = None,
+        resumable: bool = False,
+        close_code: int | None = None,
+        close_reason: str | None = None,
+        resume_reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -89,6 +104,13 @@ class ProtocolError(RuntimeError):
         self.can_purchase_overage = can_purchase_overage
         self.retryable = retryable
         self.resets_at = resets_at
+        # A ``final`` with ``resumable: true``: the server ended the turn on
+        # purpose (restart, socket rotation) and expects an immediate resume.
+        self.resumable = resumable
+        # Transport details for drop diagnostics and the resume ``reason``.
+        self.close_code = close_code
+        self.close_reason = close_reason
+        self.resume_reason = resume_reason
 
     def as_event_data(self) -> dict[str, Any]:
         """Return a JSON-safe error payload for headless and MCP consumers."""
@@ -173,6 +195,8 @@ def _classify_refused_handshake(status: int, message: str) -> ErrorInfo:
 def _classify_protocol_error(exc: ProtocolError, message: str) -> ErrorInfo:
     code = exc.code or ""
     status = exc.status
+    if exc.resumable:
+        return ErrorInfo("resumable", message, True)
     if code in _TIMEOUT_CODES:
         return ErrorInfo("timeout", message, True)
     if code in _CONNECTION_CODES:
@@ -280,6 +304,10 @@ class ChatRequest(BaseModel):
     skill_manifest_id: str | None = None
     runtime_context: dict[str, Any] | None = None
     enable_computer_use: Literal[False] = False
+    # A new id for every attempt; the server echoes it on every frame.
+    turn_id: str | None = None
+    # ``request.resume`` (turn resume protocol v1); only on resume attempts.
+    resume: dict[str, Any] | None = None
 
     @field_validator("effort", mode="before")
     @classmethod
@@ -400,6 +428,21 @@ def bound_context(
     return bounded
 
 
+def client_capabilities() -> list[str]:
+    """Capabilities advertised in ``chat_start``.
+
+    ``turn_resume_v1`` is advertised on every turn, not only on resumes: it
+    also tells the server this client handles resumable finals, so it may
+    rotate or drain the socket instead of failing the turn.
+    """
+    capabilities = []
+    if parallel_tools_enabled():
+        capabilities.append(PARALLEL_TOOL_REQUESTS_CAPABILITY)
+    if turn_resume_enabled():
+        capabilities.append(TURN_RESUME_CAPABILITY)
+    return capabilities
+
+
 def make_chat_start(request: ChatRequest) -> dict[str, Any]:
     """Serialize a protocol-v1 frame, progressively shrinking chat history."""
     attempts = (
@@ -424,8 +467,9 @@ def make_chat_start(request: ChatRequest) -> dict[str, Any]:
             "protocol_version": 1,
             "request": payload.model_dump(mode="json", exclude_none=True),
         }
-        if parallel_tools_enabled():
-            frame["capabilities"] = [PARALLEL_TOOL_REQUESTS_CAPABILITY]
+        capabilities = client_capabilities()
+        if capabilities:
+            frame["capabilities"] = capabilities
         last_size = len(json.dumps(frame, separators=(",", ":")).encode())
         if last_size <= frame_limit:
             return frame
@@ -522,6 +566,26 @@ def tool_result_frame(conversation_id: str, tool_call_id: str, result: Any) -> d
     return frame
 
 
+def _frame_error(frame: dict[str, Any]) -> ProtocolError:
+    message = frame.get("public_message") or frame.get("message")
+    safe_message = sanitize_status(str(message or "Hosted chat failed."))
+    return ProtocolError(
+        safe_message,
+        code=str(frame["code"]) if frame.get("code") is not None else None,
+        status=frame.get("status") if isinstance(frame.get("status"), int) else None,
+        block_reason=(
+            str(frame["block_reason"]) if frame.get("block_reason") is not None else None
+        ),
+        can_purchase_overage=(
+            frame.get("can_purchase_overage")
+            if isinstance(frame.get("can_purchase_overage"), bool)
+            else None
+        ),
+        retryable=frame.get("retryable") if isinstance(frame.get("retryable"), bool) else None,
+        resets_at=usage_reset_time(frame),
+    )
+
+
 class HostedChatClient:
     """One hosted CopperPilot chat stream."""
 
@@ -535,13 +599,26 @@ class HostedChatClient:
         # Long hosted reasoning or subagent runs can stay silent for minutes,
         # and websocket keepalive only detects a dead peer. A server that keeps
         # the socket open but stops sending would otherwise hang the turn
-        # forever, so a generous idle bound turns that stall into an error.
+        # forever, so an idle bound turns that stall into a resumable error.
         self.idle_frame_timeout: float | None = idle_frame_timeout()
         self.frame_budget = 10_000
 
     async def cancel(self) -> None:
         if self._socket is not None:
             await self._socket.send(json.dumps({"type": "cancel"}))
+
+    async def heartbeat(self, request_timeout: float = 5.0) -> bool:
+        """Whether ``GET /api/heartbeat`` answers 200 (the service is reachable)."""
+        try:
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}{HEARTBEAT_PATH}",
+                    headers={"User-Agent": f"CopperPilot CLI/{__version__}"},
+                )
+        except (httpx.HTTPError, OSError) as exc:
+            logger.info("Heartbeat failed (%s)", type(exc).__name__)
+            return False
+        return response.status_code == 200
 
     async def stream(
         self,
@@ -577,7 +654,7 @@ class HostedChatClient:
                     attempt + 1,
                     info.message,
                 )
-                if observed or attempt == 1 or not info.retryable:
+                if observed or attempt == 1 or not info.retryable or info.type == "resumable":
                     raise
                 await asyncio.sleep(0.25)
 
@@ -586,7 +663,13 @@ class HostedChatClient:
         request: ChatRequest,
         tool_handler: ToolHandler,
     ) -> AsyncGenerator[CopperEvent, None]:
-        """Stream normalized events and fulfill local tool requests."""
+        """Stream normalized events and fulfill local tool requests.
+
+        A reader task drains the socket into ``inbox`` for the whole turn, so
+        frames (and the library's ping/pong handling) keep flowing while a
+        local tool runs. Frames are still processed in order, one tool step at
+        a time, exactly as before; only the reading is concurrent.
+        """
         if self._socket is not None:
             raise ProtocolError("A chat stream is already active.")
         headers = {
@@ -596,25 +679,60 @@ class HostedChatClient:
         }
         saw_final = False
         closed: ConnectionClosed | None = None
+        undeliverable = False
         url = websocket_url(self.base_url, agentic=request.agentic_mode)
         ssl_context = (
             ssl.create_default_context(cafile=certifi.where()) if url.startswith("wss://") else None
         )
         logger.info(
-            "Opening hosted chat transport (host=%s, mode=%s)",
+            "Opening hosted chat transport (host=%s, mode=%s, turn_id=%s, resume_attempt=%s)",
             urlparse(url).netloc,
             request.mode.value,
+            request.turn_id,
+            (request.resume or {}).get("attempt", 0),
         )
         async with connect(
             url,
             additional_headers=headers,
             open_timeout=30,
             max_size=16 * 1024 * 1024,
+            ping_interval=PING_INTERVAL_SECONDS,
+            ping_timeout=PING_TIMEOUT_SECONDS,
             ssl=ssl_context,
         ) as socket:
             self._socket = socket
             self._owner = request.conversation_id
             await socket.send(json.dumps(make_chat_start(request), separators=(",", ":")))
+            inbox: asyncio.Queue[Any] = asyncio.Queue(maxsize=_MAX_BUFFERED_FRAMES)
+            reader = asyncio.create_task(_read_frames(socket, inbox))
+
+            async def deliver(tool_request: ToolRequest, result: Any) -> CopperEvent:
+                """Send one tool result; keep it for the journal even when the socket is gone."""
+                nonlocal closed, undeliverable
+                result_frame = tool_result_frame(
+                    request.conversation_id, tool_request.tool_call_id, result
+                )
+                if self._owner != request.conversation_id:
+                    raise ProtocolError("Chat socket owner changed during tool execution.")
+                payload: dict[str, Any] = {
+                    "tool_call_id": tool_request.tool_call_id,
+                    "tool_name": tool_request.tool_name,
+                    "result": result_frame["result"],
+                }
+                if closed is None:
+                    try:
+                        await socket.send(json.dumps(result_frame, separators=(",", ":")))
+                    except ConnectionClosed as exc:
+                        # The server went away while the tool ran; the result is
+                        # still reported (and journaled) so a resume does not
+                        # run the tool again.
+                        closed = exc
+                if closed is not None:
+                    undeliverable = True
+                    payload["delivered"] = False
+                return CopperEvent(EventKind.TOOL_RESULT, payload, **metadata)
+
+            metadata: dict[str, Any] = {}
             try:
                 frame_count = 0
                 stream_bytes = 0
@@ -623,23 +741,29 @@ class HostedChatClient:
                         self.first_frame_timeout if frame_count == 0 else self.idle_frame_timeout
                     )
                     try:
-                        raw = await asyncio.wait_for(socket.recv(), timeout)
+                        raw = await asyncio.wait_for(inbox.get(), timeout)
                     except TimeoutError as exc:
                         phase = "first frame" if frame_count == 0 else "next frame"
                         message = (
                             f"Timed out waiting for the hosted chat {phase} "
                             f"(no data for {timeout:g} s)."
                         )
+                        await _close_quietly(socket, CLIENT_LIVENESS_CLOSE_CODE)
                         raise ProtocolError(
                             message,
                             code="CHAT_FIRST_FRAME_TIMEOUT"
                             if frame_count == 0
                             else "CHAT_IDLE_TIMEOUT",
                             retryable=True,
+                            close_code=CLIENT_LIVENESS_CLOSE_CODE,
+                            close_reason="client_liveness_timeout",
+                            resume_reason="idle_timeout",
                         ) from exc
-                    except ConnectionClosed as exc:
-                        closed = exc
+                    if isinstance(raw, ConnectionClosed):
+                        closed = raw
                         break
+                    if isinstance(raw, BaseException):
+                        raise raw
                     frame_count += 1
                     if frame_count > self.frame_budget:
                         raise ProtocolError("Chat exceeded the client frame budget.")
@@ -659,31 +783,7 @@ class HostedChatClient:
                         )
                     frame_type = frame.get("type")
                     if frame_type == "error":
-                        message = frame.get("public_message") or frame.get("message")
-                        safe_message = sanitize_status(str(message or "Hosted chat failed."))
-                        error = ProtocolError(
-                            safe_message,
-                            code=str(frame["code"]) if frame.get("code") is not None else None,
-                            status=frame.get("status")
-                            if isinstance(frame.get("status"), int)
-                            else None,
-                            block_reason=(
-                                str(frame["block_reason"])
-                                if frame.get("block_reason") is not None
-                                else None
-                            ),
-                            can_purchase_overage=(
-                                frame.get("can_purchase_overage")
-                                if isinstance(frame.get("can_purchase_overage"), bool)
-                                else None
-                            ),
-                            retryable=(
-                                frame.get("retryable")
-                                if isinstance(frame.get("retryable"), bool)
-                                else None
-                            ),
-                            resets_at=usage_reset_time(frame),
-                        )
+                        error = _frame_error(frame)
                         yield CopperEvent(EventKind.ERROR, error.as_event_data())
                         raise error
                     if frame_type not in {"event", "final"}:
@@ -692,8 +792,8 @@ class HostedChatClient:
                         response = ChatResponse.model_validate(frame.get("chat_response") or {})
                     except ValueError as exc:
                         raise ProtocolError("Hosted chat response has an invalid shape.") from exc
-                    metadata: dict[str, Any] = {
-                        "turn_id": response.turn_id,
+                    metadata = {
+                        "turn_id": response.turn_id or request.turn_id,
                         "sequence": response.sequence,
                         "resume_attempt": response.resume_attempt,
                     }
@@ -730,27 +830,9 @@ class HostedChatClient:
                             result = await tool_handler(response.tool_request)
                         except Exception as exc:
                             result = tool_error_result(exc)
-                        result_frame = tool_result_frame(
-                            request.conversation_id, response.tool_request.tool_call_id, result
-                        )
-                        if self._owner != request.conversation_id:
-                            raise ProtocolError("Chat socket owner changed during tool execution.")
-                        try:
-                            await socket.send(json.dumps(result_frame, separators=(",", ":")))
-                        except ConnectionClosed as exc:
-                            # The server went away while the tool ran; report it the
-                            # same way as a drop between frames so the caller can resume.
-                            closed = exc
+                        yield await deliver(response.tool_request, result)
+                        if closed is not None:
                             break
-                        yield CopperEvent(
-                            EventKind.TOOL_RESULT,
-                            {
-                                "tool_call_id": response.tool_request.tool_call_id,
-                                "tool_name": response.tool_request.tool_name,
-                                "result": result_frame["result"],
-                            },
-                            **metadata,
-                        )
                     if response.tool_requests:
                         for tool_request in response.tool_requests:
                             yield CopperEvent(EventKind.TOOL_REQUEST, tool_request, **metadata)
@@ -760,35 +842,15 @@ class HostedChatClient:
                             workspace=request.workspace_path,
                         )
                         try:
+                            # After a drop the remaining members still finish; their
+                            # results go to the journal instead of the socket.
                             async for tool_request, outcome in batch:
                                 result = (
                                     tool_error_result(outcome)
                                     if isinstance(outcome, BaseException)
                                     else outcome
                                 )
-                                result_frame = tool_result_frame(
-                                    request.conversation_id, tool_request.tool_call_id, result
-                                )
-                                if self._owner != request.conversation_id:
-                                    raise ProtocolError(
-                                        "Chat socket owner changed during tool execution."
-                                    )
-                                try:
-                                    await socket.send(
-                                        json.dumps(result_frame, separators=(",", ":"))
-                                    )
-                                except ConnectionClosed as exc:
-                                    closed = exc
-                                    break
-                                yield CopperEvent(
-                                    EventKind.TOOL_RESULT,
-                                    {
-                                        "tool_call_id": tool_request.tool_call_id,
-                                        "tool_name": tool_request.tool_name,
-                                        "result": result_frame["result"],
-                                    },
-                                    **metadata,
-                                )
+                                yield await deliver(tool_request, result)
                         finally:
                             await batch.aclose()
                         if closed is not None:
@@ -798,14 +860,22 @@ class HostedChatClient:
                         extra = response.model_extra or {}
                         tos_blocked = extra.get("tos_blocked") is True
                         model = extra.get("model") if isinstance(extra.get("model"), str) else None
+                        resumable = extra.get("resumable") is True
+                        error_code = (
+                            str(extra["error_code"])
+                            if isinstance(extra.get("error_code"), str)
+                            else None
+                        )
                         if response.success is False or response.error:
                             logger.warning(
                                 "Hosted turn ended unsuccessfully (turn_id=%s, error=%r, "
-                                "tos_blocked=%s, model=%s, usage=%s, frame keys=%s, "
-                                "extra fields=%s)",
+                                "tos_blocked=%s, resumable=%s, error_code=%s, model=%s, "
+                                "usage=%s, frame keys=%s, extra fields=%s)",
                                 response.turn_id,
                                 response.error,
                                 extra.get("tos_blocked"),
+                                resumable,
+                                error_code,
                                 model,
                                 response.usage,
                                 sorted(frame),
@@ -824,6 +894,8 @@ class HostedChatClient:
                                 else None,
                                 "tos_blocked": tos_blocked,
                                 "model": model,
+                                "resumable": resumable,
+                                "error_code": error_code,
                             },
                             **metadata,
                         )
@@ -831,11 +903,43 @@ class HostedChatClient:
             finally:
                 self._socket = None
                 self._owner = None
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
         if not saw_final:
             detail = _close_detail(closed) if closed is not None else "closed cleanly"
+            frame = (closed.rcvd or closed.sent) if closed is not None else None
             logger.warning("Hosted chat socket closed before a final response (%s)", detail)
             raise ProtocolError(
                 f"Chat socket closed before a final response ({detail}).",
                 code="STREAM_ENDED_WITHOUT_FINAL",
                 retryable=True,
+                close_code=frame.code if frame is not None else None,
+                close_reason=frame.reason if frame is not None else None,
+                resume_reason="tool_result_undeliverable" if undeliverable else "connection_lost",
             ) from closed
+
+
+_MAX_BUFFERED_FRAMES = 1_000
+
+
+async def _read_frames(socket: Any, inbox: asyncio.Queue[Any]) -> None:
+    """Move every received frame (then the close, or a failure) into ``inbox``."""
+    try:
+        while True:
+            # A bounded inbox: a flood of frames while a tool runs stops the
+            # reader (and lets the transport push back) instead of buffering.
+            await inbox.put(await socket.recv())
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - handed to the consumer in order
+        await inbox.put(exc)
+
+
+async def _close_quietly(socket: Any, code: int) -> None:
+    close = getattr(socket, "close", None)
+    if close is None:
+        return
+    try:
+        await asyncio.wait_for(close(code, "client_liveness_timeout"), 5)
+    except Exception as exc:  # noqa: BLE001 - best effort before resuming
+        logger.info("Closing an idle chat socket failed (%s)", type(exc).__name__)

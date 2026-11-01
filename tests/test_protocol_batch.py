@@ -72,13 +72,16 @@ def client() -> HostedChatClient:
 
 def test_chat_start_advertises_parallel_tool_requests(monkeypatch) -> None:
     monkeypatch.delenv("COPPER_PILOT_PARALLEL_TOOLS", raising=False)
+    monkeypatch.delenv("COPPER_PILOT_TURN_RESUME", raising=False)
     frame = make_chat_start(request())
-    assert frame["capabilities"] == ["parallel_tool_requests"]
+    assert frame["capabilities"] == ["parallel_tool_requests", "turn_resume_v1"]
     assert frame["protocol_version"] == 1
 
 
 def test_capability_can_be_disabled(monkeypatch) -> None:
     monkeypatch.setenv("COPPER_PILOT_PARALLEL_TOOLS", "0")
+    assert make_chat_start(request())["capabilities"] == ["turn_resume_v1"]
+    monkeypatch.setenv("COPPER_PILOT_TURN_RESUME", "0")
     assert "capabilities" not in make_chat_start(request())
 
 
@@ -146,7 +149,7 @@ async def test_single_tool_requests_still_work_without_the_capability(monkeypatc
         return {"result": tool_request.tool_call_id}
 
     events = [item async for item in client().stream(request(), execute)]
-    assert "capabilities" not in socket.sent[0]
+    assert "parallel_tool_requests" not in socket.sent[0].get("capabilities", [])
     assert [item.kind for item in events[:4]] == [
         EventKind.TOOL_REQUEST,
         EventKind.TOOL_RESULT,
