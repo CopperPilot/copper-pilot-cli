@@ -2239,6 +2239,6 @@ async def test_continue_prompts_resume_the_unfinished_turn(
     await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text=text)])
     assert runtime.values is not None
     if resumed:
-        assert runtime.values == {"copper_resume": {"reason": "manual"}}
+        assert runtime.values == {"copper_resume": {}}
     else:
         assert runtime.values["messages"][0].content == text

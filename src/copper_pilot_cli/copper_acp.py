@@ -1064,8 +1064,9 @@ class CopperAcpAgent:
                 resume == "implicit" and await runtime.unfinished_turn(config) is not None
             ):
                 # Continue the unfinished turn from its journal instead of
-                # sending "continue" to the hosted agent as a new request.
-                values = {"copper_resume": {"reason": "manual"}}
+                # sending "continue" to the hosted agent as a new request. The
+                # graph picks the reason: app_restart after a crash, else manual.
+                values = {"copper_resume": {}}
             async for item in runtime.astream(values, config):
                 _namespace, stream_mode, data = item
                 if stream_mode != "custom" or not isinstance(data, dict):
