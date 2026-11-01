@@ -1690,3 +1690,71 @@ async def test_btw_cancels_a_question_dropped_from_history(tmp_path) -> None:
         assert [entry.question for entry in app._btw.entries] == ["new?"]
         gate.set()
         await _wait_until(pilot, lambda: app._btw.pending() == 0)
+
+
+# ------------------------------------------------------------- turn resume
+
+
+class ResumableRuntime(FakeRuntime):
+    """A thread with an unfinished turn; resuming it clears the journal."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from copper_pilot_cli.turn_journal import TurnJournal
+
+        self.journal: object | None = TurnJournal(
+            query="Route the USB pair", original_len=1, last_error={"type": "connection"}
+        )
+        self.values: list[dict] = []
+
+    async def unfinished_turn(self, _config):
+        return self.journal
+
+    async def astream(self, values, _config):
+        self.values.append(values)
+        self.journal = None
+        yield (), "custom", {"type": "copper.text", "data": "routed"}
+        yield (), "custom", {"type": "copper.final", "data": {"success": True}}
+
+
+@pytest.mark.asyncio
+async def test_unfinished_turn_is_offered_and_resumed_with_slash_resume(tmp_path) -> None:
+    from copper_pilot_cli.copper_widgets import ResumeNotice
+
+    runtime = ResumableRuntime()
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_until(pilot, lambda: bool(list(app.query(ResumeNotice))))
+        notice = str(list(app.query(ResumeNotice))[0].render())
+        assert "Route the USB pair" in notice and "/resume" in notice
+        await app._command("/resume")
+        await _wait_until(pilot, lambda: app._turn_task is None and runtime.values)
+        assert runtime.values == [{"copper_resume": {}}]
+        assert not list(app.query(ResumeNotice))
+        assert app._turn_state.phase is TurnPhase.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_exhausted_turn_shows_the_resume_affordance(tmp_path) -> None:
+    from copper_pilot_cli.copper_widgets import ResumeNotice
+
+    runtime = FakeRuntime()
+
+    async def exhausted(_values, _config):
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.resume",
+                "data": {"attempt": 9, "will_retry": False, "manual_resume": True},
+                "title": "Turn unfinished",
+            },
+        )
+        yield (), "custom", {"type": "copper.error", "data": {"message": "gave up"}}
+
+    runtime.astream = exhausted
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("route it")
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        assert len(list(app.query(ResumeNotice))) == 1

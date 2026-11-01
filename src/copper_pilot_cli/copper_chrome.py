@@ -40,7 +40,7 @@ SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/hooks", "Show hook status"),
     ("/mode", "Switch agent, plan, or ask"),
     ("/quit", "Quit CopperPilot"),
-    ("/resume", "Resume a thread"),
+    ("/resume", "Resume the unfinished turn, or pick a thread"),
     ("/theme", "Switch theme: black, warm, light, high-contrast"),
     ("/threads", "List threads"),
     ("/tokens", "Show token usage"),

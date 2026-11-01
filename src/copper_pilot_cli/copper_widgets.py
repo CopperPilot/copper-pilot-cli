@@ -1751,6 +1751,17 @@ class ErrorMessage(Static):
         super().__init__(literal_text(content))
 
 
+class ResumeNotice(Static):
+    """An unfinished turn that ``/resume`` (or a "continue" message) can pick up."""
+
+    DEFAULT_CSS = """
+    ResumeNotice { height: auto; color: $warning; border-left: wide $warning; padding: 0 1; }
+    """
+
+    def __init__(self, content: str) -> None:
+        super().__init__(literal_text(content))
+
+
 class ThreadSelectorScreen(ModalScreen[str | None]):
     """Folder-scoped thread picker with an explicit all-folders toggle."""
 
