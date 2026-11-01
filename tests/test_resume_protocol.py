@@ -611,3 +611,58 @@ async def test_events_carry_correlation_fields(graph_env) -> None:
     texts = [e for e in events if e["type"] == "copper.text"]
     assert texts[0]["turn_id"] == agent.payloads[1]["turn_id"]
     assert texts[0]["turn_attempt"] == 1
+
+
+# ------------------------------------------------------------------ headless
+
+
+@pytest.mark.asyncio
+async def test_headless_json_carries_turn_fields_and_resume_events(
+    graph_env, monkeypatch, capsys
+) -> None:
+    from copper_pilot_cli.copper_main import _headless, parser
+
+    agent = Agent([[CopperEvent(EventKind.TEXT, "a", sequence=1)], DONE])
+    agent.attempts[0].append(DROP)
+    args = parser().parse_args([str(graph_env), "-n", "-m", "Route the board", "--json"])
+    async with create_copper_graph(agent) as runtime:
+        assert await _headless(runtime, graph_env, "t", "Route the board", args) == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    root = agent.payloads[0]["turn_id"]
+    for line in lines:
+        assert {"type", "data", "title", "turn_id", "root_turn_id", "resume_attempt", "ts"} <= set(
+            line
+        )
+        assert line["root_turn_id"] == root
+    text = [line for line in lines if line["type"] == "text"]
+    assert [(line["data"], line["resume_attempt"]) for line in text] == [("a", 0), (" done", 1)]
+    assert text[0]["sequence"] == 1 and text[0]["turn_id"] == root
+    (resume,) = [line for line in lines if line["type"] == "resume"]
+    assert resume["data"]["attempt"] == 1
+    assert resume["data"]["reason"] == "connection_lost"
+    assert resume["data"]["will_retry"] is True
+    assert {"delay_s", "will_retry", "attempt", "reason"} <= set(resume["data"])
+
+
+@pytest.mark.asyncio
+async def test_headless_resume_flag_resumes_the_unfinished_turn(
+    graph_env, monkeypatch, capsys
+) -> None:
+    from copper_pilot_cli.copper_main import _headless, parser
+
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 0)
+    agent = Agent([[CopperEvent(EventKind.TEXT, "Half"), DROP], DONE])
+    first = parser().parse_args([str(graph_env), "-n", "-m", "Route the board"])
+    resumed = parser().parse_args([str(graph_env), "-n", "-r", "t"])
+    async with create_copper_graph(agent) as runtime:
+        assert await _headless(runtime, graph_env, "t", "Route the board", first) == 1
+        assert "copper-pilot -n -r t" in capsys.readouterr().out
+        assert await _headless(runtime, graph_env, "t", None, resumed) == 0
+        assert await runtime.unfinished_turn(runtime.config("t", graph_env)) is None
+        # Nothing left to resume: a clear error instead of a new turn.
+        assert await _headless(runtime, graph_env, "t", None, resumed) == 2
+    output = capsys.readouterr().out
+    assert "Resuming the unfinished turn: Route the board" in output
+    assert "no unfinished turn" in output
+    assert agent.payloads[1]["resume"]["reason"] == "manual"
+    assert len(agent.payloads) == 2
