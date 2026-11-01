@@ -28,6 +28,7 @@ from copper_pilot_cli.copper_protocol import (
     PING_INTERVAL_SECONDS,
     PING_TIMEOUT_SECONDS,
     ChatRequest,
+    CopperEffort,
     CopperEvent,
     CopperMode,
     EventKind,
@@ -666,3 +667,77 @@ async def test_headless_resume_flag_resumes_the_unfinished_turn(
     assert "no unfinished turn" in output
     assert agent.payloads[1]["resume"]["reason"] == "manual"
     assert len(agent.payloads) == 2
+
+
+# ---------------------------------------------------------------- end to end
+
+
+@pytest.mark.asyncio
+async def test_wire_resume_after_a_drop_mid_tool(graph_env, monkeypatch) -> None:
+    """Real agent + protocol: the second chat_start carries the journal."""
+    from copper_pilot_cli.copper_auth import DeviceCredential
+    from copper_pilot_cli.copper_tools import ApprovalMode, LocalToolBroker
+    from copper_pilot_cli.langchain import CopperPilotAgent
+
+    (graph_env / "a.txt").write_text("hello")
+    read = {"tool_call_id": "r1", "tool_name": "read_file", "arguments": {"file_path": "a.txt"}}
+    sockets = [
+        Socket(
+            [frame(response="Reading. ", turn_id="x"), frame(tool_request=read)],
+            send_error=ConnectionClosedError(Close(1012, "service restart"), None),
+        ),
+        # The resumed server repeats the same tool call id; the broker cache answers it.
+        Socket([frame(tool_request=read), frame("final", response="Done.", is_final=True)]),
+    ]
+    monkeypatch.setattr(
+        "copper_pilot_cli.copper_protocol.connect", lambda *_a, **_k: sockets.pop(0)
+    )
+    opened = list(sockets)
+    broker = LocalToolBroker(graph_env, mode=ApprovalMode.YOLO)
+    runs = []
+    original_execute = broker._execute_once
+
+    async def counted(request):
+        runs.append(request.tool_call_id)
+        return await original_execute(request)
+
+    monkeypatch.setattr(broker, "_execute_once", counted)
+    agent = CopperPilotAgent(
+        graph_env,
+        credential=DeviceCredential(
+            base_url="https://example.test", api_key="cf_live_x", fingerprint="f"
+        ),
+        conversation_id="t",
+        effort=CopperEffort.INTELLIGENCE,
+        tool_broker=broker,
+    )
+
+    async def reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(agent, "server_reachable", reachable)
+    _events, values, unfinished = await run_turn(agent, graph_env, FIRST)
+
+    first, second = (socket.sent[0] for socket in opened)
+    assert first["request"]["turn_id"] != second["request"]["turn_id"]
+    assert "resume" not in first["request"]
+    assert second["request"]["query"] == first["request"]["query"] == "Route the board"
+    assert second["request"]["context"] == first["request"]["context"]
+    assert second["request"]["effort"] == "intelligence"
+    assert "turn_resume_v1" in second["capabilities"]
+    resume = second["request"]["resume"]
+    assert resume["root_turn_id"] == first["request"]["turn_id"]
+    assert resume["reason"] == "tool_result_undeliverable"
+    assert resume["assistant_text"] == "Reading."
+    assert resume["tool_events"] == [
+        {
+            "tool_call_id": "r1",
+            "tool_name": "read_file",
+            "arguments": {"file_path": "a.txt"},
+            "status": "completed",
+            "result": resume["tool_events"][0]["result"],
+        }
+    ]
+    assert "hello" in resume["tool_events"][0]["result"]
+    assert runs == ["r1"]
+    assert unfinished is None and values["copper_turn_journal"] is None
