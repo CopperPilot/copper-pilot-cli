@@ -68,8 +68,16 @@ copper-pilot ./my-board
 copper-pilot --resume
 copper-pilot threads list
 copper-pilot -n -m "Review this board" --json
+copper-pilot -n -r          # resume the most recent thread's unfinished turn
 copper-pilot --mode plan --effort intelligence -m "Survey and plan this board"
 ```
+
+Long turns survive dropped connections and server restarts: the CLI keeps a
+journal of the turn on your machine and resumes it automatically. If a turn
+still does not finish (or the CLI was closed mid-turn), type `/resume` in the
+TUI, run `copper-pilot -n -r`, or send "continue"; the turn picks up where it
+left off without re-running finished tools. See
+[Turn durability](docs/cli.md#turn-durability).
 
 Both `copper-pilot` and `copper-pilot-cli` run the same program.
 `copper-pilot --help` lists flags; [docs/cli.md](docs/cli.md) is the full
