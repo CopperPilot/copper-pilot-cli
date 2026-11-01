@@ -80,7 +80,7 @@ from copper_pilot_cli.copper_features import (
     parse_plan,
     path_first_attachment,
 )
-from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_graph import RESUME_EVENT, RETRY_EVENT, create_copper_graph
 from copper_pilot_cli.copper_models import (
     ChatModelCatalog,
     cached_chat_model_catalog,
@@ -118,6 +118,7 @@ from copper_pilot_cli.copper_workspace import (
 )
 from copper_pilot_cli.langchain import CopperPilotAgent
 from copper_pilot_cli.sessions import generate_thread_id
+from copper_pilot_cli.turn_journal import is_resume_request
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,13 @@ MODEL_CONFIG_ID = "model"
 EFFORT_COMMAND = "effort"
 MODEL_COMMAND = "model"
 USAGE_COMMAND = "usage"
+RESUME_COMMAND = "resume"
+UNFINISHED_TURN_MESSAGE = (
+    "The turn stopped before it finished ({error}). Its progress is saved on this "
+    "device; send “continue” (or /resume) to pick it up where it left off."
+)
+# Failures a resume cannot fix by itself; they keep their own error reporting.
+_ACCOUNT_FAILURES = frozenset({"usage_limit", "authentication"})
 # JSON-RPC error code for a turn refused by a usage limit. There is no ACP
 # standard; -32003 matches xAI's Grok ACP agent, which T3 Code already reads
 # as a usage limit. ``data`` carries ``class``/``resetAt`` for any client.
@@ -154,6 +162,7 @@ _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _MODEL_COMMAND = re.compile(r"^/model(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _LIMITS_TIMEOUT_SECONDS = 5.0
 _USAGE_COMMAND = re.compile(r"^/usage\s*$", re.IGNORECASE)
+_RESUME_COMMAND = re.compile(r"^/resume\s*$", re.IGNORECASE)
 _USER_REQUEST = re.compile(r"<user_request>\s*(.*?)\s*</user_request>", re.DOTALL)
 _PLAN_ARTIFACT = re.compile(
     r"(?:^|[\\/])\.copperpilot[\\/]plans[\\/][^\\/]+\.plan\.md$", re.IGNORECASE
@@ -224,6 +233,8 @@ class AcpSession:
     last_usage: dict[str, Any] | None = None
     commands_sent: bool = False
     failure: Any = None
+    # Automatic resumes ran out; the journal is kept for a later "continue".
+    unfinished: bool = False
 
     @property
     def busy(self) -> bool:
@@ -482,7 +493,21 @@ def available_commands() -> list[AvailableCommand]:
             description="Show the CopperPilot usage window, weekly balance, and reset times.",
         )
     )
+    commands.append(
+        AvailableCommand(
+            name=RESUME_COMMAND,
+            description="Resume the unfinished turn where it left off (also: “continue”).",
+        )
+    )
     return commands
+
+
+def resume_request(message: str) -> str | None:
+    """``"explicit"`` for ``/resume``, ``"implicit"`` for "continue …", else ``None``."""
+    text = user_request_text(message).strip()
+    if _RESUME_COMMAND.match(text):
+        return "explicit"
+    return "implicit" if is_resume_request(text) else None
 
 
 def user_request_text(message: str) -> str:
@@ -901,8 +926,17 @@ class CopperAcpAgent:
         session.subagents = {}
         session.tool_paths = {}
         session.failure = None
+        session.unfinished = False
         query = with_attachment_paths(message or IMAGE_ONLY_QUERY, attachments)
-        session.turn = asyncio.create_task(self._run_turn(session, credential, query, attachments))
+        session.turn = asyncio.create_task(
+            self._run_turn(
+                session,
+                credential,
+                query,
+                attachments,
+                resume=None if images else resume_request(first_block),
+            )
+        )
         try:
             await session.turn
         except asyncio.CancelledError:
@@ -915,6 +949,16 @@ class CopperAcpAgent:
                 logger.info("Hosted turn ended after cancellation (%s)", type(exc).__name__)
             else:
                 limited = await self._usage_limit_failure(exc, credential)
+                if limited is None and session.unfinished:
+                    # Automatic resumes ran out. End the prompt cleanly and say
+                    # how to continue; the next "continue" resumes the journal.
+                    await self.conn.session_update(
+                        session_id=session.session_id,
+                        update=update_agent_message_text(
+                            "\n\n" + UNFINISHED_TURN_MESSAGE.format(error=str(exc).rstrip("."))
+                        ),
+                    )
+                    return PromptResponse(stop_reason="max_turn_requests")
                 raise (limited or self._map_turn_failure(exc)) from exc
         finally:
             session.turn = None
@@ -993,6 +1037,8 @@ class CopperAcpAgent:
         credential: DeviceCredential,
         message: str,
         attachments: list[dict[str, Any]] | None = None,
+        *,
+        resume: str | None = None,
     ) -> None:
         agent = CopperPilotAgent(
             session.workspace,
@@ -1008,12 +1054,18 @@ class CopperAcpAgent:
         async with create_copper_graph(agent) as runtime:
             session.runtime = runtime
             config = runtime.config(session.session_id, session.workspace)
-            values = {
+            values: dict[str, Any] = {
                 "messages": [HumanMessage(content=message)],
                 "copper_mode": session.mode.value,
                 "copper_effort": session.effort.value,
                 "copper_model": session.model or "",
             }
+            if resume == "explicit" or (
+                resume == "implicit" and await runtime.unfinished_turn(config) is not None
+            ):
+                # Continue the unfinished turn from its journal instead of
+                # sending "continue" to the hosted agent as a new request.
+                values = {"copper_resume": {"reason": "manual"}}
             async for item in runtime.astream(values, config):
                 _namespace, stream_mode, data = item
                 if stream_mode != "custom" or not isinstance(data, dict):
@@ -1241,6 +1293,20 @@ class CopperAcpAgent:
         elif kind == EventKind.ERROR.value:
             session.failure = payload
             return error_message(payload)
+        elif event.get("type") == RESUME_EVENT and isinstance(payload, dict):
+            if not payload.get("will_retry"):
+                session.unfinished = bool(payload.get("manual_resume")) and (
+                    payload.get("error_type") not in _ACCOUNT_FAILURES
+                )
+            elif payload.get("reason") in {
+                "server_restarting",
+                "socket_rotation",
+                "manual",
+                "app_restart",
+            }:
+                # Error-driven resumes already show their retry line.
+                label = str(event.get("title") or "Resuming the turn")
+                await send(session_id=session_id, update=update_agent_thought_text(f"{label}\n"))
         elif event.get("type") == RETRY_EVENT:
             data = payload if isinstance(payload, dict) else {}
             if data.get("stage") == "failed" and not data.get("will_retry"):
