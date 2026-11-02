@@ -2206,6 +2206,63 @@ async def test_exhausted_auto_resume_ends_the_prompt_with_a_resume_hint(
     assert "continue" in message and "/resume" in message
 
 
+async def test_provider_capacity_shows_as_progress_and_pauses_with_high_demand_copy(
+    tmp_path, monkeypatch
+) -> None:
+    from copper_pilot_cli.copper_acp import PROVIDER_BUSY_TURN_MESSAGE
+    from copper_pilot_cli.copper_graph import PROVIDER_BUSY_PAUSED_MESSAGE
+
+    events = [
+        {
+            "type": "copper.capacity_wait",
+            "data": {"kind": "capacity_wait", "phase": "retrying", "retry_in_s": 20},
+            "title": "High demand — waiting to continue (next try in 20 s)",
+        },
+        {
+            "type": "copper.resume",
+            "data": {"reason": "provider_busy", "will_retry": True, "delay_s": 45.0},
+            "title": "CopperPilot is under high demand; continuing in 45 s",
+        },
+        {
+            "type": "copper.resume",
+            "data": {
+                "reason": "provider_busy",
+                "will_retry": False,
+                "manual_resume": True,
+                "error_type": "provider_busy",
+            },
+            "title": "paused",
+        },
+        {
+            "type": "copper.error",
+            "data": {
+                "type": "provider_busy",
+                "message": PROVIDER_BUSY_PAUSED_MESSAGE,
+                "resumable": True,
+            },
+        },
+    ]
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, JournalRuntime(events)
+    )
+    response = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="Route it")]
+    )
+    assert response.stop_reason == "max_turn_requests"
+    thoughts = [
+        update.content.text
+        for _sid, update in conn.updates
+        if getattr(update, "session_update", "") == "agent_thought_chunk"
+    ]
+    assert thoughts == [
+        "High demand — waiting to continue (next try in 20 s)\n",
+        "CopperPilot is under high demand; continuing in 45 s\n",
+    ]
+    message = conn.updates[-1][1].content.text
+    assert message == "\n\n" + PROVIDER_BUSY_TURN_MESSAGE
+    assert "high demand" in message and "error" not in message
+
+
 async def test_account_failures_keep_their_error_after_exhaustion(tmp_path, monkeypatch) -> None:
     events = [dict(EXHAUSTED[1]), {"type": "copper.error", "data": {"message": "Sign in again."}}]
     events[0]["data"] = {**EXHAUSTED[1]["data"], "error_type": "authentication"}

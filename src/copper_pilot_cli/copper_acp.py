@@ -80,7 +80,13 @@ from copper_pilot_cli.copper_features import (
     parse_plan,
     path_first_attachment,
 )
-from copper_pilot_cli.copper_graph import RESUME_EVENT, RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_graph import (
+    CAPACITY_WAIT_EVENT,
+    PROVIDER_BUSY_PAUSED_MESSAGE,
+    RESUME_EVENT,
+    RETRY_EVENT,
+    create_copper_graph,
+)
 from copper_pilot_cli.copper_models import (
     ChatModelCatalog,
     cached_chat_model_catalog,
@@ -143,6 +149,9 @@ RESUME_COMMAND = "resume"
 UNFINISHED_TURN_MESSAGE = (
     "The turn stopped before it finished ({error}). Its progress is saved on this "
     "device; send “continue” (or /resume) to pick it up where it left off."
+)
+PROVIDER_BUSY_TURN_MESSAGE = (
+    f"{PROVIDER_BUSY_PAUSED_MESSAGE} Send “continue” (or /resume) to pick it up."
 )
 # Failures a resume cannot fix by itself; they keep their own error reporting.
 _ACCOUNT_FAILURES = frozenset({"usage_limit", "authentication"})
@@ -235,6 +244,8 @@ class AcpSession:
     failure: Any = None
     # Automatic resumes ran out; the journal is kept for a later "continue".
     unfinished: bool = False
+    # The unfinished turn paused because the LLM provider stayed out of capacity.
+    provider_busy: bool = False
 
     @property
     def busy(self) -> bool:
@@ -927,6 +938,7 @@ class CopperAcpAgent:
         session.tool_paths = {}
         session.failure = None
         session.unfinished = False
+        session.provider_busy = False
         query = with_attachment_paths(message or IMAGE_ONLY_QUERY, attachments)
         session.turn = asyncio.create_task(
             self._run_turn(
@@ -952,11 +964,14 @@ class CopperAcpAgent:
                 if limited is None and session.unfinished:
                     # Automatic resumes ran out. End the prompt cleanly and say
                     # how to continue; the next "continue" resumes the journal.
+                    text = (
+                        PROVIDER_BUSY_TURN_MESSAGE
+                        if session.provider_busy
+                        else UNFINISHED_TURN_MESSAGE.format(error=str(exc).rstrip("."))
+                    )
                     await self.conn.session_update(
                         session_id=session.session_id,
-                        update=update_agent_message_text(
-                            "\n\n" + UNFINISHED_TURN_MESSAGE.format(error=str(exc).rstrip("."))
-                        ),
+                        update=update_agent_message_text("\n\n" + text),
                     )
                     return PromptResponse(stop_reason="max_turn_requests")
                 raise (limited or self._map_turn_failure(exc)) from exc
@@ -1294,16 +1309,24 @@ class CopperAcpAgent:
         elif kind == EventKind.ERROR.value:
             session.failure = payload
             return error_message(payload)
+        elif event.get("type") == CAPACITY_WAIT_EVENT:
+            # Progress, not an error: the hosted model is waiting for capacity.
+            label = str(event.get("title") or "High demand — waiting to continue")
+            await send(session_id=session_id, update=update_agent_thought_text(f"{label}\n"))
         elif event.get("type") == RESUME_EVENT and isinstance(payload, dict):
             if not payload.get("will_retry"):
                 session.unfinished = bool(payload.get("manual_resume")) and (
                     payload.get("error_type") not in _ACCOUNT_FAILURES
+                )
+                session.provider_busy = (
+                    session.unfinished and payload.get("reason") == "provider_busy"
                 )
             elif payload.get("reason") in {
                 "server_restarting",
                 "socket_rotation",
                 "manual",
                 "app_restart",
+                "provider_busy",
             }:
                 # Error-driven resumes already show their retry line.
                 label = str(event.get("title") or "Resuming the turn")
