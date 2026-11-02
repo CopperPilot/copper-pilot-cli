@@ -970,3 +970,45 @@ async def test_provider_busy_stops_after_the_time_window(graph_env, monkeypatch,
     (error,) = [e for e in events if e["type"] == "copper.error"]
     assert error["data"]["type"] == "provider_busy"
     assert unfinished is not None
+
+
+@pytest.mark.asyncio
+async def test_headless_shows_capacity_waits_and_busy_pauses(
+    graph_env, monkeypatch, capsys, sleeps
+) -> None:
+    from copper_pilot_cli.copper_main import _headless, parser
+
+    monkeypatch.setattr(copper_graph, "PROVIDER_BUSY_MAX_RESUMES", 1)
+    agent = Agent([[waiting(), busy(20)], [busy(20)]])
+    args = parser().parse_args([str(graph_env), "-n", "-m", "Route the board"])
+    async with create_copper_graph(agent) as runtime:
+        assert await _headless(runtime, graph_env, "t", "Route the board", args) == 1
+    output = capsys.readouterr().out
+    assert "High demand — waiting to continue (next try in 20 s)" in output
+    assert "CopperPilot is under high demand; continuing in" in output
+    assert "under high demand right now" in output
+    assert "copper-pilot -n -r t" in output
+    assert "ran into an error" not in output
+
+
+@pytest.mark.asyncio
+async def test_headless_json_capacity_wait_event_shape(graph_env, capsys, sleeps) -> None:
+    from copper_pilot_cli.copper_main import _headless, parser
+
+    agent = Agent([[waiting(), busy(30)], DONE])
+    args = parser().parse_args([str(graph_env), "-n", "-m", "Route the board", "--json"])
+    async with create_copper_graph(agent) as runtime:
+        assert await _headless(runtime, graph_env, "t", "Route the board", args) == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    (wait,) = [line for line in lines if line["type"] == "capacity_wait"]
+    root = agent.payloads[0]["turn_id"]
+    assert wait["phase"] == "retrying" and wait["retry_in_s"] == 20
+    assert wait["model"] == "gemini-3.8-flash"
+    assert {"waited_s", "budget_s", "attempt", "message"} <= set(wait)
+    assert wait["data"]["phase"] == "retrying"
+    assert wait["title"] == "High demand — waiting to continue (next try in 20 s)"
+    assert wait["turn_id"] == wait["root_turn_id"] == root
+    assert wait["resume_attempt"] == 0 and isinstance(wait["ts"], float)
+    (resume,) = [line for line in lines if line["type"] == "resume"]
+    assert resume["data"]["reason"] == "provider_busy"
+    assert resume["data"]["delay_s"] >= 24
