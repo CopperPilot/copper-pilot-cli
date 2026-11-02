@@ -146,8 +146,15 @@ class _Scope:
         # broad as searching ours; never treat "/" as that directory.
         parent = self.home.parent
         self.homes = _forms(parent) if len(parent.parts) > 1 else ()
-        # TMPDIR may sit under the home directory (macOS keeps it elsewhere).
-        temp_dirs = [Path(tempfile.gettempdir())]
+        # TMPDIR may sit under the home directory. A temp dir that holds the
+        # home directory (a sandboxed HOME) would allow all of it, so skip it.
+        temp_dirs = [
+            temp
+            for temp in (Path(tempfile.gettempdir()),)
+            if not any(
+                _within(form, temp_form) for form in self.private for temp_form in _forms(temp)
+            )
+        ]
         self.allowed = tuple(
             form
             for root in (

@@ -127,3 +127,12 @@ def test_workspace_outside_home_still_guards_home() -> None:
 def test_non_string_and_unbalanced_quotes() -> None:
     assert classify_outside_workspace(None, WORKSPACE, HOME) is None
     assert classify("grep -rn 'unterminated /") is not None
+
+
+def test_temp_dir_allowed_unless_it_holds_home(monkeypatch) -> None:
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(HOME / "tmp"))
+    assert classify("cat ~/tmp/out.txt") is None
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/home")
+    assert classify("cat ~/other/x") == "touches ~/other/x"
