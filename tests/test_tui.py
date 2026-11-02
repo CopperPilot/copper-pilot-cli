@@ -1758,3 +1758,67 @@ async def test_exhausted_turn_shows_the_resume_affordance(tmp_path) -> None:
         await app._submit("route it")
         await _wait_until(pilot, lambda: app._turn_task is None)
         assert len(list(app.query(ResumeNotice))) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_capacity_waits_show_a_countdown_not_an_error(tmp_path) -> None:
+    from copper_pilot_cli.copper_graph import PROVIDER_BUSY_PAUSED_MESSAGE
+    from copper_pilot_cli.copper_widgets import ResumeNotice
+
+    runtime = FakeRuntime()
+    gate = asyncio.Event()
+    seen: list[str] = []
+
+    async def busy(_values, _config):
+        wait = {"kind": "capacity_wait", "phase": "retrying", "retry_in_s": 20, "message": "m"}
+        yield (), "custom", {"type": "copper.capacity_wait", "data": wait, "title": "t"}
+        await gate.wait()
+        gate.clear()
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.resume",
+                "data": {"reason": "provider_busy", "will_retry": True, "delay_s": 45.0},
+            },
+        )
+        await gate.wait()
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.resume",
+                "data": {"reason": "provider_busy", "will_retry": False, "manual_resume": True},
+            },
+        )
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.error",
+                "data": {"type": "provider_busy", "message": PROVIDER_BUSY_PAUSED_MESSAGE},
+            },
+        )
+
+    runtime.astream = busy
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("route it")
+
+        def status() -> str:
+            return app._loading.status_text if app._loading is not None else ""
+
+        await _wait_until(pilot, lambda: "next try in" in status())
+        seen.append(status())
+        assert app._countdown is not None
+        gate.set()
+        await _wait_until(pilot, lambda: "continuing in" in status())
+        seen.append(status())
+        gate.set()
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        assert app._countdown is None
+        (notice,) = list(app.query(ResumeNotice))
+        assert "high demand" in str(notice.render())
+        assert not list(app.query(ErrorMessage))
+    assert seen[0].startswith("High demand — waiting to continue (next try in ")
+    assert seen[1].startswith("CopperPilot is under high demand; continuing in ")

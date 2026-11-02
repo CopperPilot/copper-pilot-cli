@@ -7,6 +7,7 @@ import base64
 import contextlib
 import json
 import logging
+import math
 import uuid
 from pathlib import Path
 from time import monotonic
@@ -53,7 +54,13 @@ from copper_pilot_cli.copper_features import (
     resolve_skill_manifest,
     scan_local_skills,
 )
-from copper_pilot_cli.copper_graph import RESUME_EVENT, RETRY_EVENT, CopperGraphRuntime
+from copper_pilot_cli.copper_graph import (
+    CAPACITY_WAIT_EVENT,
+    PROVIDER_BUSY_PAUSED_MESSAGE,
+    RESUME_EVENT,
+    RETRY_EVENT,
+    CopperGraphRuntime,
+)
 from copper_pilot_cli.copper_hooks import HookRunner
 from copper_pilot_cli.copper_models import (
     ChatModelCatalog,
@@ -271,6 +278,9 @@ class CopperPilotApp(App[None]):
         self._skills: dict[str, LocalSkill] = {}
         self._selected_skill: str | None = None
         self._turn_error_rendered = False
+        # Live "next try in N s" countdown while the provider is out of capacity.
+        self._countdown: Any = None
+        self._capacity_notified = False
         self._loading: LoadingWidget | None = None
         self._turn_state = TurnState()
         self._turn_query = ""
@@ -846,6 +856,8 @@ class CopperPilotApp(App[None]):
                 await self._mount(ErrorMessage(str(exc)))
             await self._finalize_turn(TurnPhase.FAILED, str(exc))
         finally:
+            self._stop_countdown()
+            self._capacity_notified = False
             self.runtime.agent.workflow = None
             self.runtime.agent.plan_context = None
             self.runtime.agent.runtime_context = None
@@ -893,6 +905,9 @@ class CopperPilotApp(App[None]):
             )
         ):
             return
+        if kind not in {CAPACITY_WAIT_EVENT, RESUME_EVENT}:
+            # Any normal frame means the high-demand wait is over.
+            self._stop_countdown()
         if kind == "copper.text":
             self._finalize_work_run()
             if self._reasoning is not None:
@@ -948,6 +963,27 @@ class CopperPilotApp(App[None]):
             self._reasoning = None
         elif kind == "copper.status":
             self._update_status(str(data)[:120].replace("\n", " "))
+        elif kind == CAPACITY_WAIT_EVENT and isinstance(data, dict):
+            self._show_capacity_wait(data, str(event.get("title") or "High demand"))
+        elif (
+            kind == RESUME_EVENT
+            and isinstance(data, dict)
+            and data.get("reason") == "provider_busy"
+        ):
+            delay = data.get("delay_s")
+            if data.get("will_retry") and isinstance(delay, (int, float)) and delay >= 1:
+                self._start_countdown(
+                    "CopperPilot is under high demand; continuing in {seconds} s",
+                    delay,
+                    "CopperPilot is under high demand; continuing",
+                )
+            elif data.get("manual_resume") and self._turn_task is not None:
+                await self._mount(
+                    ResumeNotice(
+                        f"{PROVIDER_BUSY_PAUSED_MESSAGE} "
+                        "Type /resume (or “continue”) when you are ready."
+                    )
+                )
         elif kind == RESUME_EVENT and isinstance(data, dict):
             label = str(event.get("title") or "Resuming the turn")
             if data.get("will_retry"):
@@ -981,7 +1017,52 @@ class CopperPilotApp(App[None]):
             if self._work_run is not None:
                 self._work_run.mark_failed()
             self._finalize_work_run()
-            await self._mount(ErrorMessage(message))
+            if not (isinstance(data, dict) and data.get("type") == "provider_busy"):
+                # A provider-busy pause already shows its high-demand notice.
+                await self._mount(ErrorMessage(message))
+
+    def _show_capacity_wait(self, data: dict[str, Any], title: str) -> None:
+        """The hosted model waits for provider capacity: a status, not an error."""
+        retry_in = data.get("retry_in_s")
+        if data.get("phase") not in {"queued", "retrying"}:
+            self._stop_countdown()
+            self._update_status("Continuing")
+            return
+        if not self._capacity_notified:
+            self._capacity_notified = True
+            self.notify(
+                str(data.get("message") or title), title="High demand", markup=False, timeout=8
+            )
+        if isinstance(retry_in, (int, float)) and retry_in >= 1:
+            self._start_countdown(
+                "High demand — waiting to continue (next try in {seconds} s)",
+                retry_in,
+                "High demand — waiting to continue",
+            )
+        else:
+            self._stop_countdown()
+            self._update_status(title)
+
+    def _start_countdown(self, template: str, seconds: float, done: str) -> None:
+        """Show ``template`` on the working line, counting ``{seconds}`` down to ``done``."""
+        self._stop_countdown()
+        deadline = monotonic() + seconds
+
+        def tick() -> None:
+            remaining = deadline - monotonic()
+            if remaining < 0.5:
+                self._stop_countdown()
+                self._update_status(done)
+                return
+            self._update_status(template.format(seconds=math.ceil(remaining)))
+
+        self._countdown = self.set_interval(1.0, tick)
+        tick()
+
+    def _stop_countdown(self) -> None:
+        if self._countdown is not None:
+            self._countdown.stop()
+            self._countdown = None
 
     async def _handle_status_event(self, data: dict[str, Any]) -> None:
         if data.get("kind") == "subagent":
