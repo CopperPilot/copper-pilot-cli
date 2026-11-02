@@ -67,6 +67,31 @@ PING_TIMEOUT_SECONDS = 20.0
 # Close code the client sends when the server goes quiet for the idle window.
 CLIENT_LIVENESS_CLOSE_CODE = 4000
 HEARTBEAT_PATH = "/api/heartbeat"
+# Provider capacity (LLM rate limits). While the hosted model waits for
+# capacity the server sends ``status_event.kind == "capacity_wait"``; when its
+# wait budget runs out the turn ends with a resumable ``provider_busy`` final.
+CAPACITY_WAIT_KIND = "capacity_wait"
+PROVIDER_BUSY_CODE = "provider_busy"
+CAPACITY_WAITING_PHASES = frozenset({"queued", "retrying"})
+
+
+def _number(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def capacity_hold_seconds(status_event: Any) -> float | None:
+    """Extra quiet time a ``capacity_wait`` status event allows, else ``None``.
+
+    While the server waits for provider capacity the turn is healthy even if
+    no frame arrives, so the idle bound grows by the longer of the announced
+    retry delay and the server's remaining wait budget. ``resumed`` clears it.
+    """
+    if not isinstance(status_event, dict) or status_event.get("kind") != CAPACITY_WAIT_KIND:
+        return None
+    if status_event.get("phase") not in CAPACITY_WAITING_PHASES:
+        return 0.0
+    remaining = _number(status_event.get("budget_s")) - _number(status_event.get("waited_s"))
+    return max(_number(status_event.get("retry_in_s")), remaining, 0.0)
 
 
 def idle_frame_timeout() -> float | None:
@@ -96,6 +121,7 @@ class ProtocolError(RuntimeError):
         close_code: int | None = None,
         close_reason: str | None = None,
         resume_reason: str | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -111,6 +137,8 @@ class ProtocolError(RuntimeError):
         self.close_code = close_code
         self.close_reason = close_reason
         self.resume_reason = resume_reason
+        # ``provider_busy`` finals: seconds the server asks the client to wait.
+        self.retry_after_s = retry_after_s
 
     def as_event_data(self) -> dict[str, Any]:
         """Return a JSON-safe error payload for headless and MCP consumers."""
@@ -195,6 +223,8 @@ def _classify_refused_handshake(status: int, message: str) -> ErrorInfo:
 def _classify_protocol_error(exc: ProtocolError, message: str) -> ErrorInfo:
     code = exc.code or ""
     status = exc.status
+    if exc.resumable and code == PROVIDER_BUSY_CODE:
+        return ErrorInfo(PROVIDER_BUSY_CODE, message, True)
     if exc.resumable:
         return ErrorInfo("resumable", message, True)
     if code in _TIMEOUT_CODES:
@@ -654,7 +684,12 @@ class HostedChatClient:
                     attempt + 1,
                     info.message,
                 )
-                if observed or attempt == 1 or not info.retryable or info.type == "resumable":
+                if (
+                    observed
+                    or attempt == 1
+                    or not info.retryable
+                    or info.type in {"resumable", PROVIDER_BUSY_CODE}
+                ):
                     raise
                 await asyncio.sleep(0.25)
 
@@ -736,10 +771,14 @@ class HostedChatClient:
             try:
                 frame_count = 0
                 stream_bytes = 0
+                # Extra quiet time while the server waits for provider capacity.
+                capacity_hold = 0.0
                 while not saw_final:
                     timeout = (
                         self.first_frame_timeout if frame_count == 0 else self.idle_frame_timeout
                     )
+                    if capacity_hold and timeout is not None:
+                        timeout += capacity_hold
                     try:
                         raw = await asyncio.wait_for(inbox.get(), timeout)
                     except TimeoutError as exc:
@@ -816,6 +855,16 @@ class HostedChatClient:
                         yield CopperEvent(
                             EventKind.STATUS, sanitize_status(response.status_update), **metadata
                         )
+                    hold = capacity_hold_seconds(response.status_event)
+                    if hold != capacity_hold:
+                        if hold:
+                            logger.debug(
+                                "Hosted model is waiting for provider capacity; idle bound "
+                                "extended by %.0fs (turn_id=%s)",
+                                hold,
+                                metadata["turn_id"],
+                            )
+                        capacity_hold = hold or 0.0
                     if response.status_event:
                         yield CopperEvent(EventKind.STATUS_EVENT, response.status_event, **metadata)
                     usage = response.usage
@@ -866,6 +915,7 @@ class HostedChatClient:
                             if isinstance(extra.get("error_code"), str)
                             else None
                         )
+                        retry_after = extra.get("retry_after_s")
                         if response.success is False or response.error:
                             logger.warning(
                                 "Hosted turn ended unsuccessfully (turn_id=%s, error=%r, "
@@ -896,6 +946,7 @@ class HostedChatClient:
                                 "model": model,
                                 "resumable": resumable,
                                 "error_code": error_code,
+                                "retry_after_s": _number(retry_after) or None,
                             },
                             **metadata,
                         )

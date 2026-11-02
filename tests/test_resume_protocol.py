@@ -35,6 +35,7 @@ from copper_pilot_cli.copper_protocol import (
     HostedChatClient,
     ProtocolError,
     ToolRequest,
+    capacity_hold_seconds,
     classify_error,
     idle_frame_timeout,
     make_chat_start,
@@ -221,6 +222,90 @@ async def test_resumable_final_is_reported(monkeypatch) -> None:
     assert final.kind is EventKind.FINAL
     assert final.data["resumable"] is True
     assert final.data["error_code"] == "socket_rotation"
+
+
+def capacity_wait(phase: str = "retrying", retry_in_s: float = 0.2, **extra: Any) -> dict:
+    return {
+        "kind": "capacity_wait",
+        "phase": phase,
+        "model": "gemini-3.8-flash",
+        "retry_in_s": retry_in_s,
+        "waited_s": extra.pop("waited_s", 0.0),
+        "budget_s": extra.pop("budget_s", 0.0),
+        "attempt": 1,
+        "message": "CopperPilot is under high demand. Waiting to continue.",
+        **extra,
+    }
+
+
+@pytest.mark.asyncio
+async def test_capacity_wait_keeps_the_turn_alive_past_the_idle_bound(monkeypatch) -> None:
+    monkeypatch.setenv(IDLE_FRAME_TIMEOUT_ENV, "0.05")
+    socket = Socket([frame(status_event=capacity_wait(retry_in_s=1.0))])
+    install(monkeypatch, socket)
+
+    async def later() -> None:
+        # Four idle windows of silence, then the model answers.
+        await asyncio.sleep(0.2)
+        socket.push(frame(response="Routed."), frame("final", success=True))
+
+    pending = asyncio.create_task(later())
+    events = [event async for event in client().stream(request(), lambda _r: None)]
+    await pending
+    assert [event.kind for event in events] == [
+        EventKind.STATUS_EVENT,
+        EventKind.TEXT,
+        EventKind.FINAL,
+    ]
+    assert socket.closed_with is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_hold_ends_with_the_next_normal_frame(monkeypatch) -> None:
+    monkeypatch.setenv(IDLE_FRAME_TIMEOUT_ENV, "0.05")
+    socket = Socket(
+        [
+            frame(status_event=capacity_wait(retry_in_s=5)),
+            frame(status_event=capacity_wait("resumed", retry_in_s=0)),
+        ]
+    )
+    install(monkeypatch, socket)
+    with pytest.raises(ProtocolError) as caught:
+        _ = [event async for event in client().stream(request(), lambda _r: None)]
+    assert caught.value.code == "CHAT_IDLE_TIMEOUT"
+
+
+def test_capacity_hold_covers_the_server_wait_budget() -> None:
+    assert capacity_hold_seconds({"kind": "subagent"}) is None
+    assert capacity_hold_seconds(capacity_wait("resumed")) == 0
+    assert capacity_hold_seconds(capacity_wait(retry_in_s=20, waited_s=45, budget_s=600)) == 555
+    assert capacity_hold_seconds(capacity_wait("queued", retry_in_s=0)) == 0
+    assert capacity_hold_seconds(capacity_wait(retry_in_s=20)) == 20
+
+
+@pytest.mark.asyncio
+async def test_provider_busy_final_carries_retry_after(monkeypatch) -> None:
+    install(
+        monkeypatch,
+        Socket(
+            [
+                frame(
+                    "final",
+                    success=False,
+                    is_final=True,
+                    resumable=True,
+                    error_code="provider_busy",
+                    retry_after_s=45,
+                    error="CopperPilot is under high demand right now.",
+                )
+            ]
+        ),
+    )
+    (final,) = [event async for event in client().stream(request(), lambda _r: None)]
+    assert final.data["error_code"] == "provider_busy"
+    assert final.data["retry_after_s"] == 45
+    info = classify_error(ProtocolError("busy", code="provider_busy", resumable=True))
+    assert (info.type, info.retryable) == ("provider_busy", True)
 
 
 def test_resumable_protocol_errors_classify_as_resumable() -> None:
