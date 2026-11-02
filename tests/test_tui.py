@@ -1050,6 +1050,46 @@ async def test_inline_approval_tab_collects_rejection_feedback(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_outside_workspace_approval_shows_reason_and_drops_auto(tmp_path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    app = CopperPilotApp(FakeRuntime(), broker, tmp_path, "thread")
+    request = ApprovalRequest(
+        tool_call_id="shell-1",
+        tool_name="bash",
+        canonical_name="execute",
+        arguments={"command": "find / -name kicad-cli"},
+        reason="Outside the workspace: `find` searches /",
+        outside_workspace="`find` searches /",
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        broker.mode = ApprovalMode.YOLO  # set after startup skips the YOLO notice
+        await app._custom_event(
+            {
+                "type": "copper.tool_request",
+                "data": {
+                    "tool_call_id": "shell-1",
+                    "tool_name": "bash",
+                    "arguments": request.arguments,
+                },
+            }
+        )
+        decision = asyncio.create_task(app.request_approval(request))
+        await _wait_until(
+            pilot,
+            lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),
+        )
+        menu = app.query_one(ApprovalMenu)
+        scope = str(menu.query_one(".approval-scope", Static).render())
+        assert "Outside the workspace: `find` searches /" in scope
+        assert [kind for _label, kind in menu._options] == ["approve", "reject"]
+        await pilot.press("a")  # no Auto shortcut for this prompt
+        assert not decision.done()
+        await pilot.press("n")
+        assert await decision is False
+        assert broker.mode is ApprovalMode.YOLO
+
+
+@pytest.mark.asyncio
 async def test_cancelling_auto_notice_keeps_current_approval_pending(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(copper_app_module, "auto_notice_acknowledged", lambda: False)
     monkeypatch.setattr(copper_app_module, "save_approval_mode", lambda _mode: None)
