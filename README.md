@@ -180,7 +180,11 @@ That snippet is the runnable example in
 The hosted agent may request local filesystem and shell tools. Reads and
 searches run freely. Writes, edits, deletes, and shell commands are gated by
 Manual approval by default. Auto permits only deterministic routine actions;
-unknown actions still ask. YOLO must be selected explicitly.
+unknown actions still ask. YOLO must be selected explicitly. Shell commands
+that reach outside the workspace (`find /`, `grep -r ~`, other projects under
+the home directory, `docker`, `sudo`, `ssh`) ask in every mode, YOLO included,
+and are refused when nobody can approve them (headless, MCP). See
+[docs/cli.md](docs/cli.md#outside-the-workspace).
 
 Filesystem, search, edit, and shell execution use Deep Agents' native
 `FilesystemMiddleware` tools and `LocalShellBackend`; CopperPilot's adapter only

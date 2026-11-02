@@ -36,7 +36,7 @@ valid.
 | `--effort {balanced,intelligence}` | Hosted effort. Default: `balanced`; Intelligence requires a paid plan. |
 | `--model MODEL` | Intelligence model id (see below). Implies `--effort intelligence`; rejected with `--effort balanced`. |
 | `-y`, `--auto-approve` | Auto approval: routine writes and known-safe shell still run; unknown actions prompt. |
-| `--yolo` | Permit local side effects without prompting. Must be set explicitly. |
+| `--yolo` | Permit local side effects without prompting, except commands that reach outside the workspace. Must be set explicitly. |
 | `--version` | Print the package version. |
 
 Examples:
@@ -231,7 +231,8 @@ advertises a terminal auth method that runs `copper-pilot auth login`.
 | Prompt error `-32003` | A usage limit refused the turn; see below |
 
 "Allow all for this session" switches that session to YOLO until the server
-exits; it is never saved. Clarifying questions use ACP form elicitation when
+exits; it is never saved. Commands that reach outside the workspace still ask
+each time (see [Outside the workspace](#outside-the-workspace)). Clarifying questions use ACP form elicitation when
 the client supports it (T3 Code does): options become an enum, free text a
 string field. Without form elicitation, option questions are shown as
 permission choices plus Skip and free-text questions are declined with a
@@ -361,6 +362,30 @@ searches run freely. Writes, edits, deletes, and shell commands are gated:
 | YOLO | `--yolo` | Permit local side effects without prompting. |
 
 `--yolo` wins over `--auto-approve`. Saved preferences never enable YOLO.
+
+### Outside the workspace
+
+Some shell commands reach beyond the project folder, and they need explicit
+approval in every mode, Auto and YOLO included:
+
+- recursive searches rooted at `/`, a system top-level directory (`/usr`,
+  `/etc`, `/home`, ...), or your home directory: `find /`, `grep -r ... ~`,
+  `rg`, `fd`, `du`, `tree`, `ls -R`, and `locate`/`mdfind`
+- paths under your home directory outside the workspace, such as
+  `cat ~/other-project/x.kicad_sch` or `cp ~/Downloads/lib.kicad_sym .`.
+  KiCad's library and settings folders, `~/.copper-pilot` and `TMPDIR` are
+  allowed.
+- `docker`, `podman`, `kubectl`, `sudo`, `ssh`, `scp`, and similar
+
+The CLI follows `&&`/`;`/`|` chains, `cd`, `$(...)` and `sh -c`. The TUI
+prompt shows the reason and offers only yes or no. ACP clients get a
+permission request titled "Outside the workspace: ..." with the reason and no
+"Allow all for this session". Each approval covers that one call only.
+
+With nobody to ask (headless `-n`, MCP), the command is refused and the agent
+gets the tool error `blocked: outside the workspace (<reason>); ask the user
+first`. This is a heuristic, not a sandbox: in-project commands with relative
+paths (`kicad-cli sch erc board.kicad_sch`, `grep -rn VCC .`) are left alone.
 
 ## Turn durability
 
