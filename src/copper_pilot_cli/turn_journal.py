@@ -58,6 +58,7 @@ RESUME_REASONS = frozenset(
         "socket_rotation",
         "app_restart",
         "tool_result_undeliverable",
+        "provider_busy",
         "manual",
     }
 )

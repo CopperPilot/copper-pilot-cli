@@ -836,7 +836,7 @@ class HostedChatClient:
                         "sequence": response.sequence,
                         "resume_attempt": response.resume_attempt,
                     }
-                    if response.response:
+                    if response.response and not _echoes_resumable_error(frame_type, response):
                         yield CopperEvent(
                             EventKind.TEXT,
                             sanitize_status(response.response, MAX_RESPONSE_TEXT_BYTES),
@@ -971,6 +971,18 @@ class HostedChatClient:
 
 
 _MAX_BUFFERED_FRAMES = 1_000
+
+
+def _echoes_resumable_error(frame_type: Any, response: ChatResponse) -> bool:
+    """A resumable final repeats its error copy as response text; that is not answer text."""
+    if frame_type != "final" and not response.is_final:
+        return False
+    extra = response.model_extra or {}
+    return (
+        extra.get("resumable") is True
+        and bool(response.error)
+        and (response.response or "").strip() == str(response.error).strip()
+    )
 
 
 async def _read_frames(socket: Any, inbox: asyncio.Queue[Any]) -> None:

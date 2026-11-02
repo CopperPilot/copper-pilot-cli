@@ -826,3 +826,147 @@ async def test_wire_resume_after_a_drop_mid_tool(graph_env, monkeypatch) -> None
     assert "hello" in resume["tool_events"][0]["result"]
     assert runs == ["r1"]
     assert unfinished is None and values["copper_turn_journal"] is None
+
+
+# ---------------------------------------------------------- provider capacity
+
+
+def busy(retry_after_s: float | None = 45) -> CopperEvent:
+    return CopperEvent(
+        EventKind.FINAL,
+        {
+            "success": False,
+            "resumable": True,
+            "error_code": "provider_busy",
+            "retry_after_s": retry_after_s,
+            "error": "CopperPilot is under high demand right now.",
+        },
+    )
+
+
+def waiting(phase: str = "retrying", retry_in_s: float = 20) -> CopperEvent:
+    return CopperEvent(EventKind.STATUS_EVENT, capacity_wait(phase, retry_in_s, budget_s=600))
+
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    """Record the graph's waits instead of sleeping through them."""
+    recorded: list[float] = []
+    original = asyncio.sleep
+
+    async def fake(delay, *args, **kwargs):
+        recorded.append(delay)
+        await original(0)
+
+    monkeypatch.setattr(copper_graph.asyncio, "sleep", fake)
+    return recorded
+
+
+@pytest.mark.asyncio
+async def test_capacity_wait_is_shown_as_progress_not_an_error(graph_env, sleeps) -> None:
+    agent = Agent([[waiting(), waiting("resumed", 0), *DONE]])
+    events, values, _unfinished = await run_turn(agent, graph_env, FIRST)
+    waits = [e for e in events if e["type"] == copper_graph.CAPACITY_WAIT_EVENT]
+    assert [e["title"] for e in waits] == [
+        "High demand — waiting to continue (next try in 20 s)",
+        "High demand eased — continuing",
+    ]
+    assert waits[0]["data"]["phase"] == "retrying" and waits[0]["data"]["retry_in_s"] == 20
+    assert all(e["root_turn_id"] == agent.payloads[0]["turn_id"] for e in waits)
+    assert not [e for e in events if e["type"] in {"copper.error", "copper.retry"}]
+    assert not [e for e in events if e["type"] == "copper.status_event"]
+    assert len(agent.payloads) == 1 and values["copper_turn_journal"] is None
+
+
+@pytest.mark.asyncio
+async def test_provider_busy_waits_retry_after_then_resumes(graph_env, monkeypatch, sleeps) -> None:
+    # The transport budget is spent; provider-busy resumes do not use it.
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 0)
+    agent = Agent([[CopperEvent(EventKind.TEXT, "Placed U1."), *tool(), busy(45)], DONE])
+    events, values, unfinished = await run_turn(agent, graph_env, FIRST)
+
+    resume = agent.payloads[1]["resume"]
+    assert resume["reason"] == "provider_busy"
+    assert resume["attempt"] == 1
+    assert resume["assistant_text"] == "Placed U1."
+    assert resume["tool_events"][0]["status"] == "completed"
+    assert 45 * 0.8 <= sleeps[0] <= 45 * 1.2
+    (scheduled,) = [e for e in events if e["type"] == RESUME_EVENT]
+    assert scheduled["data"]["reason"] == "provider_busy"
+    assert scheduled["data"]["delay_s"] == round(sleeps[0], 3)
+    assert scheduled["data"]["will_retry"] is True
+    assert scheduled["title"].startswith("CopperPilot is under high demand; continuing in")
+    assert not [e for e in events if e["type"] in {"copper.error", "copper.retry"}]
+    # The echoed error copy is not part of the answer.
+    texts = [m.content for m in values["messages"] if isinstance(m, AIMessage)]
+    assert "high demand" not in " ".join(str(t) for t in texts)
+    assert values["copper_turn_journal"] is None and unfinished is None
+
+
+@pytest.mark.asyncio
+async def test_provider_busy_delay_has_a_floor(graph_env, sleeps) -> None:
+    agent = Agent([[busy(2)], [busy(None)], DONE])
+    await run_turn(agent, graph_env, FIRST)
+    assert sleeps[0] == copper_graph.PROVIDER_BUSY_MIN_DELAY == 15
+    default = copper_graph.PROVIDER_BUSY_DEFAULT_DELAY
+    assert default * 0.8 <= sleeps[1] <= default * 1.2
+
+
+@pytest.mark.asyncio
+async def test_provider_busy_budget_is_separate_and_exhausts_to_manual_resume(
+    graph_env, monkeypatch, sleeps
+) -> None:
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 1)
+    attempts: list[list[Any]] = [[CopperEvent(EventKind.TEXT, "Half"), DROP]]
+    attempts += [[busy()] for _ in range(copper_graph.PROVIDER_BUSY_MAX_RESUMES + 1)]
+    agent = Agent(attempts)
+    events, values, unfinished = await run_turn(agent, graph_env, FIRST)
+
+    reasons = [p["resume"]["reason"] for p in agent.payloads[1:]]
+    # One transport resume, then six provider-busy resumes, then a pause.
+    assert reasons == ["connection_lost"] + ["provider_busy"] * 6
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["type"] == "provider_busy"
+    assert error["data"]["resumable"] is True
+    assert error["data"]["message"] == copper_graph.PROVIDER_BUSY_PAUSED_MESSAGE
+    assert "ran into an error" not in error["data"]["message"]
+    final = [e for e in events if e["type"] == RESUME_EVENT][-1]
+    assert final["data"]["will_retry"] is False and final["data"]["manual_resume"] is True
+    assert final["data"]["reason"] == "provider_busy"
+    assert "high demand" in final["title"]
+    retries = [e for e in events if e["type"] == "copper.retry"]
+    assert all(e["data"]["error_type"] == "connection" for e in retries)
+    stored = values["copper_turn_journal"]
+    assert stored["status"] == "unfinished"
+    assert stored["last_error"]["type"] == "provider_busy"
+    assert unfinished is not None and unfinished.root_turn_id == stored["root_turn_id"]
+
+    agent.attempts = [DONE]
+    await run_turn(agent, graph_env, {"copper_resume": {"reason": "manual"}})
+    assert agent.payloads[-1]["resume"]["reason"] == "manual"
+    assert agent.payloads[-1]["resume"]["assistant_text"] == "Half"
+
+
+@pytest.mark.asyncio
+async def test_provider_busy_budget_resets_after_model_progress(graph_env, sleeps) -> None:
+    limit = copper_graph.PROVIDER_BUSY_MAX_RESUMES
+    attempts: list[list[Any]] = [[busy()] for _ in range(limit)]
+    attempts.append([CopperEvent(EventKind.TEXT, "Progress. "), busy()])
+    attempts += [[busy()] for _ in range(limit - 1)]
+    attempts.append(DONE)
+    agent = Agent(attempts)
+    events, values, _unfinished = await run_turn(agent, graph_env, FIRST)
+    assert len(agent.payloads) == 2 * limit + 1
+    assert not [e for e in events if e["type"] == "copper.error"]
+    assert values["copper_turn_journal"] is None
+
+
+@pytest.mark.asyncio
+async def test_provider_busy_stops_after_the_time_window(graph_env, monkeypatch, sleeps) -> None:
+    monkeypatch.setattr(copper_graph, "PROVIDER_BUSY_WINDOW_SECONDS", 0.0)
+    agent = Agent([[busy()]])
+    events, _values, unfinished = await run_turn(agent, graph_env, FIRST)
+    assert len(agent.payloads) == 1
+    (error,) = [e for e in events if e["type"] == "copper.error"]
+    assert error["data"]["type"] == "provider_busy"
+    assert unfinished is not None

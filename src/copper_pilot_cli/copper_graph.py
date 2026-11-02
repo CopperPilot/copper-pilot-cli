@@ -46,6 +46,9 @@ from langgraph.graph.message import add_messages
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from copper_pilot_cli.copper_protocol import (
+    CAPACITY_WAIT_KIND,
+    CAPACITY_WAITING_PHASES,
+    PROVIDER_BUSY_CODE,
     CopperEffort,
     CopperEvent,
     CopperMode,
@@ -88,12 +91,31 @@ IMMEDIATE_RESUME_CODES = frozenset({"server_restarting", "socket_rotation"})
 IMMEDIATE_RESUME_MAX_DELAY = 2.0
 MAX_TOTAL_RESUMES = 20
 # Before each resume the client waits for ``GET /api/heartbeat`` to answer 200.
+# ``provider_busy`` finals (the LLM provider stayed out of capacity for the
+# server's whole wait budget): wait ``retry_after_s`` (jittered, at least
+# 15 s) and resume. Their own budget per logical turn: 6 in a row or 30 min
+# since the first busy final; neither spends the transport budget above. Any
+# model progress (text, reasoning, a tool call) starts a new streak.
+PROVIDER_BUSY_MAX_RESUMES = 6
+PROVIDER_BUSY_WINDOW_SECONDS = 30 * 60.0
+PROVIDER_BUSY_MIN_DELAY = 15.0
+PROVIDER_BUSY_DEFAULT_DELAY = 30.0
+PROVIDER_BUSY_PAUSED_MESSAGE = (
+    "CopperPilot is under high demand right now, so this turn is paused. "
+    "Its progress is saved; resume it in a few minutes to continue where it left off."
+)
 HEARTBEAT_POLL_SECONDS: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 15.0)
 HEARTBEAT_MAX_WAIT_SECONDS = 30 * 60.0
 JOURNAL_SAVE_INTERVAL_SECONDS = 2.0
 RESUME_PREFIX = "Resume where we left off: "
 RETRY_EVENT = "copper.retry"
 RESUME_EVENT = "copper.resume"
+CAPACITY_WAIT_EVENT = "copper.capacity_wait"
+# Hosted events that show the model made progress; they reset the
+# provider-busy budget. Status lines and capacity waits do not.
+_PROGRESS_KINDS = frozenset(
+    {EventKind.TEXT, EventKind.REASONING, EventKind.TOOL_REQUEST, EventKind.TOOL_RESULT}
+)
 INTERRUPTED_CONTEXT = "[Turn interrupted before completion: {}]"
 CANCELLED_CONTEXT = "[Turn cancelled by the user before completion]"
 NO_UNFINISHED_TURN = "There is no unfinished turn to resume in this chat."
@@ -116,12 +138,14 @@ _MANUALLY_RESUMABLE = frozenset(
         "usage_limit",
         "authentication",
         "resumable",
+        PROVIDER_BUSY_CODE,
     }
 )
 _RESUMABLE_FINAL_REASONS = {
     "server_restarting": "server_restarting",
     "socket_rotation": "socket_rotation",
     "tool_result_timeout": "tool_result_undeliverable",
+    PROVIDER_BUSY_CODE: PROVIDER_BUSY_CODE,
 }
 
 
@@ -248,7 +272,19 @@ def resume_event(
     manual_resume: bool = False,
 ) -> dict[str, Any]:
     """Machine-readable resume progress (``copper.resume``) for every front-end."""
-    if will_retry:
+    busy = reason == PROVIDER_BUSY_CODE
+    if busy and will_retry:
+        title = (
+            f"CopperPilot is under high demand; continuing in {delay_s:.0f} s"
+            if delay_s
+            else "CopperPilot is under high demand; continuing"
+        )
+    elif busy and manual_resume:
+        title = (
+            "CopperPilot is under high demand; the turn is paused. "
+            "Send /resume or “continue” to pick it up"
+        )
+    elif will_retry:
         title = (
             f"Resuming the turn in {delay_s:.1f}s ({reason.replace('_', ' ')})"
             if delay_s
@@ -273,6 +309,16 @@ def resume_event(
         },
         "title": title,
     }
+
+
+def capacity_wait_label(data: dict[str, Any]) -> str:
+    """One-line high-demand status for a ``capacity_wait`` event (not an error)."""
+    if data.get("phase") not in CAPACITY_WAITING_PHASES:
+        return "High demand eased — continuing"
+    retry_in = data.get("retry_in_s")
+    if isinstance(retry_in, (int, float)) and retry_in >= 1:
+        return f"High demand — waiting to continue (next try in {retry_in:.0f} s)"
+    return "High demand — waiting to continue"
 
 
 def resume_reason_for(exc: BaseException) -> str:
@@ -375,6 +421,11 @@ class _TurnRun:
         self.segments = 0
         self.error_resumes = 0
         self.total_resumes = 0
+        # Provider-busy streak: resumes since the model last made progress,
+        # and when the streak's first busy final arrived.
+        self.busy_resumes = 0
+        self.busy_started: float | None = None
+        self.capacity_waits = 0
         self.recovery_seconds = 0.0
         self.observed = False
         self.manual_resume = False
@@ -419,6 +470,11 @@ class _TurnRun:
             payload["continuation"] = True
         async for event in self.agent.astream_events_raw(payload):
             self.observed = True
+            if event.kind in _PROGRESS_KINDS:
+                self._reset_busy_budget()
+            if event.kind is EventKind.STATUS_EVENT and _is_capacity_wait(event.data):
+                self._capacity_wait(event)
+                continue
             projected = {
                 "type": f"copper.{event.kind.value}",
                 "data": event.data.model_dump(mode="json")
@@ -445,6 +501,48 @@ class _TurnRun:
             self.emit(projected)
             self._track(event)
 
+    def _capacity_wait(self, event: CopperEvent) -> None:
+        """Show a hosted wait for provider capacity; the turn stays healthy."""
+        data = dict(event.data)
+        if data.get("phase") in CAPACITY_WAITING_PHASES:
+            self.capacity_waits += 1
+        else:
+            # The model call went through after waiting: that is progress.
+            self._reset_busy_budget()
+        logger.info(
+            "Provider capacity wait (root_turn_id=%s, turn_id=%s, phase=%s, model=%s, "
+            "retry_in=%ss, waited=%ss, budget=%ss, attempt=%s)",
+            self.journal.root_turn_id,
+            event.turn_id or self.journal.turn_id,
+            data.get("phase"),
+            data.get("model"),
+            data.get("retry_in_s"),
+            data.get("waited_s"),
+            data.get("budget_s"),
+            data.get("attempt"),
+        )
+        self.emit(
+            {
+                "type": CAPACITY_WAIT_EVENT,
+                "data": data,
+                "title": capacity_wait_label(data),
+                "turn_id": event.turn_id or self.journal.turn_id,
+                "sequence": event.sequence,
+                "resume_attempt": event.resume_attempt,
+            }
+        )
+
+    def _reset_busy_budget(self) -> None:
+        if self.busy_resumes or self.busy_started is not None:
+            logger.info(
+                "Provider busy budget reset after model progress (root_turn_id=%s, "
+                "busy_resumes=%s)",
+                self.journal.root_turn_id,
+                self.busy_resumes,
+            )
+        self.busy_resumes = 0
+        self.busy_started = None
+
     def _drop_echoed_error(self, message: str) -> None:
         # The hosted side echoes its error copy as response text before the
         # final; keep it out of the partial answer carried into a resume.
@@ -456,7 +554,14 @@ class _TurnRun:
         message = str(data.get("error") or "The server ended the turn so it can be resumed.")
         self._drop_echoed_error(message)
         code = str(data.get("error_code") or "server_restarting")
-        return ProtocolError(message, code=code, retryable=True, resumable=True)
+        retry_after = data.get("retry_after_s")
+        return ProtocolError(
+            message,
+            code=code,
+            retryable=True,
+            resumable=True,
+            retry_after_s=float(retry_after) if isinstance(retry_after, (int, float)) else None,
+        )
 
     def _hosted_failure(self, data: dict[str, Any], turn_id: str | None) -> ProtocolError:
         message = str(data.get("error") or "Hosted turn failed.")
@@ -655,10 +760,12 @@ class _TurnRun:
                     return False
                 if not self.observed:
                     self.recovery_seconds += elapsed
+                busy = info.type == PROVIDER_BUSY_CODE
                 plan = self._plan_resume(exc, info)
                 if plan is None and self._can_resume_again() and self._start_fresh(exc):
                     plan = (resume_reason_for(exc), 0.0, False)
                 will_retry = plan is not None
+                # Resumable finals are planned pauses, not failed attempts.
                 immediate = plan is not None and plan[2]
                 logger.warning(
                     "Hosted turn attempt %s failed (type=%s, retryable=%s, will_retry=%s): %s",
@@ -668,9 +775,19 @@ class _TurnRun:
                     will_retry,
                     info.message,
                 )
-                if not immediate:
+                if not immediate and not busy:
                     self.emit(retry_event("failed", run_attempt, error=info, will_retry=will_retry))
                 if plan is None:
+                    if busy:
+                        logger.info(
+                            "Provider busy: automatic resumes stopped (root_turn_id=%s, "
+                            "busy_resumes=%s, streak=%.0fs, total_resumes=%s)",
+                            self.journal.root_turn_id,
+                            self.busy_resumes,
+                            time.monotonic() - (self.busy_started or time.monotonic()),
+                            self.total_resumes,
+                        )
+                        info = ErrorInfo(PROVIDER_BUSY_CODE, PROVIDER_BUSY_PAUSED_MESSAGE, True)
                     self.manual_resume = self._manually_resumable(info)
                     self.emit(
                         resume_event(
@@ -683,13 +800,26 @@ class _TurnRun:
                             manual_resume=self.manual_resume,
                         )
                     )
-                    self.report_failure(self._with_history(info, run_attempt), exc)
+                    reported = info if busy else self._with_history(info, run_attempt)
+                    self.report_failure(reported, exc)
                     return False
                 self.attempt_failures.append(info)
                 self.pending_error = None
                 reason, delay, immediate = plan
                 self.total_resumes += 1
-                if not immediate:
+                if busy:
+                    self.busy_resumes += 1
+                    logger.info(
+                        "Provider busy: pausing the turn before resuming (root_turn_id=%s, "
+                        "turn_id=%s, retry_after=%ss, delay=%.1fs, busy_resume=%s/%s)",
+                        self.journal.root_turn_id,
+                        self.journal.turn_id,
+                        getattr(exc, "retry_after_s", None),
+                        delay,
+                        self.busy_resumes,
+                        PROVIDER_BUSY_MAX_RESUMES,
+                    )
+                elif not immediate:
                     self.error_resumes += 1
                     self.recovery_seconds += delay
                     self.emit(
@@ -736,7 +866,7 @@ class _TurnRun:
                 if getattr(self.agent, "cancel_requested", False):
                     self.cancelled = True
                     return False
-                if not immediate:
+                if not immediate and not busy:
                     self.emit(
                         retry_event("restarted", run_attempt + 1, error=info, will_retry=True)
                     )
@@ -753,6 +883,8 @@ class _TurnRun:
         if not info.retryable or self.total_resumes >= MAX_TOTAL_RESUMES:
             return None
         reason = resume_reason_for(exc)
+        if info.type == PROVIDER_BUSY_CODE:
+            return self._plan_busy_resume(exc, reason)
         if (
             isinstance(exc, ProtocolError)
             and exc.resumable
@@ -764,6 +896,24 @@ class _TurnRun:
             return None
         base = RETRY_BACKOFF_SECONDS[min(self.error_resumes, len(RETRY_BACKOFF_SECONDS) - 1)]
         return reason, _jitter(base), False
+
+    def _plan_busy_resume(self, exc: BaseException, reason: str) -> tuple[str, float, bool] | None:
+        """Wait out a ``provider_busy`` final on its own budget, or stop."""
+        now = time.monotonic()
+        if self.busy_started is None:
+            self.busy_started = now
+        if (
+            self.busy_resumes >= PROVIDER_BUSY_MAX_RESUMES
+            or now - self.busy_started >= PROVIDER_BUSY_WINDOW_SECONDS
+        ):
+            return None
+        retry_after = getattr(exc, "retry_after_s", None)
+        base = (
+            float(retry_after)
+            if isinstance(retry_after, (int, float)) and retry_after > 0
+            else PROVIDER_BUSY_DEFAULT_DELAY
+        )
+        return reason, max(PROVIDER_BUSY_MIN_DELAY, _jitter(base)), False
 
     def _manually_resumable(self, info: ErrorInfo) -> bool:
         return not self.tos_blocked and info.type in _MANUALLY_RESUMABLE
@@ -885,13 +1035,15 @@ class _TurnRun:
         counts = self.journal.tool_counts()
         logger.info(
             "Chat turn finished (root_turn_id=%s, outcome=%s, wall=%.1fs, attempts=%s, "
-            "resumes=%s, error_resumes=%s, tools=%s, completed=%s, failed=%s, interrupted=%s)",
+            "resumes=%s, error_resumes=%s, capacity_waits=%s, tools=%s, completed=%s, "
+            "failed=%s, interrupted=%s)",
             self.journal.root_turn_id,
             outcome,
             time.monotonic() - self.started,
             self.attempts,
             self.total_resumes,
             self.error_resumes,
+            self.capacity_waits,
             len(self.journal.tool_events),
             counts.get("completed", 0),
             counts.get("failed", 0),
@@ -1013,6 +1165,10 @@ class _TurnRun:
 def _clip(text: str, limit: int = 120) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _is_capacity_wait(data: Any) -> bool:
+    return isinstance(data, dict) and data.get("kind") == CAPACITY_WAIT_KIND
 
 
 def _final_resumable(data: Any) -> bool:
