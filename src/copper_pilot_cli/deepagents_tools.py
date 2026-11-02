@@ -21,7 +21,9 @@ from copper_pilot_cli.copper_background import (
     run_shell,
     shell_environment,
 )
+from copper_pilot_cli.copper_config import app_home
 from copper_pilot_cli.copper_protocol import ToolRequest
+from copper_pilot_cli.shell_scope import classify_outside_workspace
 
 if TYPE_CHECKING:
     # Deep Agents pulls in anthropic and langchain agents (~0.6s). Load it on the first tool call.
@@ -52,6 +54,9 @@ class ApprovalRequest:
     arguments: dict[str, Any]
     reason: str
     canonical_name: str | None = None
+    # Set when a shell command reaches outside the workspace. Front ends show
+    # it and must not offer an "always allow" for the request.
+    outside_workspace: str | None = None
 
 
 ApprovalHandler = Callable[[ApprovalRequest], Awaitable[bool]]
@@ -254,6 +259,22 @@ def dangerous_shell_command(command: object) -> bool:
     return executable in _DANGEROUS_EXECUTABLES
 
 
+def outside_workspace_reason(command: object, workspace: Path) -> str | None:
+    """Why an agent shell command reaches outside ``workspace``, or None."""
+
+    try:
+        home = Path.home()
+    except (KeyError, RuntimeError):
+        return None
+    return classify_outside_workspace(command, workspace, home, allowed=(app_home(),))
+
+
+def outside_workspace_blocked(reason: str) -> str:
+    """Tool error for an outside-the-workspace command nobody can approve."""
+
+    return f"blocked: outside the workspace ({reason}); ask the user first"
+
+
 def routine_action(
     tool_name: str,
     arguments: dict[str, Any],
@@ -350,6 +371,12 @@ class LocalToolBroker:
     async def _reject(self, _request: ApprovalRequest) -> bool:
         return False
 
+    @property
+    def has_approver(self) -> bool:
+        """False in headless and MCP runs, where nobody can answer a prompt."""
+
+        return getattr(self.approve, "__func__", None) is not LocalToolBroker._reject
+
     async def _no_question_handler(self, _question: Any) -> Any:
         raise ToolRejected(
             "Interactive clarification is unavailable in headless and MCP runs. "
@@ -399,6 +426,11 @@ class LocalToolBroker:
     ) -> None:
         if external:
             raise ToolRejected("Paths outside the workspace are not available.")
+        if canonical_name == "execute":
+            scope = outside_workspace_reason(request.arguments.get("command"), self.workspace)
+            if scope is not None:
+                await self._authorize_outside_workspace(request, canonical_name, scope)
+                return
         gated = canonical_name in _MUTATION_TOOLS or canonical_name == "execute"
         if not gated or self.mode is ApprovalMode.YOLO:
             return
@@ -423,6 +455,30 @@ class LocalToolBroker:
             )
         if not approved:
             raise ToolRejected(f"{request.tool_name} was rejected.")
+
+    async def _authorize_outside_workspace(
+        self,
+        request: ToolRequest,
+        canonical_name: str,
+        scope: str,
+    ) -> None:
+        """Ask every time, in every mode; refuse when nobody can answer."""
+
+        if not self.has_approver:
+            raise ToolRejected(outside_workspace_blocked(scope))
+        async with self._prompt_lock:
+            approved = await self.approve(
+                ApprovalRequest(
+                    tool_call_id=request.tool_call_id,
+                    tool_name=request.tool_name,
+                    arguments=request.arguments,
+                    reason=f"Outside the workspace: {scope}",
+                    canonical_name=canonical_name,
+                    outside_workspace=scope,
+                )
+            )
+        if not approved:
+            raise ToolRejected(f"blocked: outside the workspace ({scope}); the user declined")
 
     def _virtual_path(self, raw: object) -> tuple[str, bool]:
         resolved = _resolve_path(self.workspace, raw)
@@ -612,7 +668,10 @@ __all__ = [
     "LocalToolBroker",
     "ToolRejected",
     "canonical_tool_name",
+    "classify_outside_workspace",
     "dangerous_shell_command",
     "normalized_tool_names",
+    "outside_workspace_blocked",
+    "outside_workspace_reason",
     "routine_action",
 ]

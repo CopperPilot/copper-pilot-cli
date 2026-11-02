@@ -521,6 +521,15 @@ def test_review_policy_only_allows_scratch_writes_and_safe_shell(tmp_path) -> No
     assert asyncio.run(ask("execute", command="kicad-cli pcb render board/board.kicad_pcb"))
     assert not asyncio.run(ask("execute", command="rm -rf board"))
     assert not asyncio.run(ask("unknown_tool"))
+    outside = ApprovalRequest(
+        "2",
+        "execute",
+        {"command": "find / -name kicad-cli"},
+        "Outside the workspace: `find` searches /",
+        canonical_name="execute",
+        outside_workspace="`find` searches /",
+    )
+    assert not asyncio.run(policy(outside))
 
 
 @pytest.mark.asyncio
