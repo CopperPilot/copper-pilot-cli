@@ -70,6 +70,19 @@ service's own retry counter) appear when the hosted frame carried them.
 `resume` events report each resume:
 `{"attempt", "reason", "delay_s", "will_retry", "root_turn_id", "previous_turn_id",
 "error_type", "error_message", "manual_resume"}`.
+`capacity_wait` events report the hosted model waiting for LLM provider
+capacity (a healthy turn, not an error). Their fields also appear at the top
+level of the line:
+
+```json
+{"type": "capacity_wait", "phase": "retrying", "model": "gemini-3.8-flash",
+ "retry_in_s": 20.0, "waited_s": 45.0, "budget_s": 600.0, "attempt": 2,
+ "message": "CopperPilot is under high demand. …", "data": {…},
+ "title": "High demand — waiting to continue (next try in 20 s)",
+ "turn_id": "…", "root_turn_id": "…", "resume_attempt": 0, "ts": 1793500000.123}
+```
+
+`phase` is `queued`, `retrying` or `resumed` (the wait is over).
 
 ### Side questions (`/btw`)
 
@@ -375,6 +388,17 @@ turn when its socket closes, so the resume state lives only on this device.
 - **Server restarts and socket rotation.** A `final` with `resumable: true`
   (`server_restarting`, `socket_rotation`) resumes after 0–2 s and does not
   count against the error budget (the hard cap is 20 resumes per turn).
+- **High demand (LLM rate limits).** While the hosted model waits for provider
+  capacity the server sends `capacity_wait` events; the CLI shows "High
+  demand — waiting to continue (next try in N s)" and the idle bound grows by
+  the server's remaining wait budget, so the wait is never mistaken for a
+  stall. When the server's wait budget runs out the turn ends with a
+  resumable `provider_busy` final: the CLI waits its `retry_after_s` (±20%,
+  at least 15 s) and resumes with reason `provider_busy`. These resumes have
+  their own budget, 6 in a row or 30 minutes per logical turn, and do not
+  spend the error budget; any model output starts a new count. When they run
+  out the turn stays resumable and says CopperPilot is under high demand
+  rather than reporting an error.
 - **Fail fast.** Authentication, usage limits, invalid or oversized requests,
   content-policy blocks and user cancellation are not retried.
 - **Liveness.** The socket pings every 15 s and closes when no pong arrives
@@ -399,10 +423,12 @@ turn when its socket closes, so the resume state lives only on this device.
     transcript.
 - **Visibility.** The TUI status bar and notifications, yellow lines in
   headless text mode, MCP progress and ACP agent thoughts show resumes
-  (`Retrying (1/8) in 1s: …`). `--json` emits `retry` and `resume` events. The
-  log file (`~/.copper-pilot/.state/logs/copper-pilot.log`) records each drop
-  (close code, reason, attempt, elapsed time), each resume start and success,
-  and each finished turn (wall time, attempts, tool counts), without content.
+  (`Retrying (1/8) in 1s: …`) and high-demand waits (the TUI counts down).
+  `--json` emits `retry`, `resume` and `capacity_wait` events. The log file
+  (`~/.copper-pilot/.state/logs/copper-pilot.log`) records each drop (close
+  code, reason, attempt, elapsed time), each resume start and success, each
+  capacity wait and provider-busy pause, and each finished turn (wall time,
+  attempts, capacity waits, tool counts), without content.
 - **Rollback.** `COPPER_PILOT_TURN_RESUME=0` turns off structured resume for a
   hosted service without `turn_resume_v1`: retries then re-prompt with the
   partial transcript and `Resume where we left off: <original message>`.

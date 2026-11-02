@@ -72,7 +72,9 @@ copper-pilot -n -r          # resume the most recent thread's unfinished turn
 copper-pilot --mode plan --effort intelligence -m "Survey and plan this board"
 ```
 
-Long turns survive dropped connections and server restarts: the CLI keeps a
+Long turns survive dropped connections, server restarts and LLM provider rate
+limits (the CLI shows "High demand — waiting to continue" and resumes on its
+own): the CLI keeps a
 journal of the turn on your machine and resumes it automatically. If a turn
 still does not finish (or the CLI was closed mid-turn), type `/resume` in the
 TUI, run `copper-pilot -n -r`, or send "continue"; the turn picks up where it
