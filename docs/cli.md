@@ -393,8 +393,8 @@ turn when its socket closes, so the resume state lives only on this device.
   demand — waiting to continue (next try in N s)" and the idle bound grows by
   the server's remaining wait budget, so the wait is never mistaken for a
   stall. When the server's wait budget runs out the turn ends with a
-  resumable `provider_busy` final: the CLI waits its `retry_after_s` (±20%,
-  at least 15 s) and resumes with reason `provider_busy`. These resumes have
+  resumable `provider_busy` final: the CLI waits its `retry_after_s` (plus
+  up to 20% jitter, at least 15 s) and resumes with reason `provider_busy`. These resumes have
   their own budget, 6 in a row or 30 minutes per logical turn, and do not
   spend the error budget; any model output starts a new count. When they run
   out the turn stays resumable and says CopperPilot is under high demand

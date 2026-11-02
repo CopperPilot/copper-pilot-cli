@@ -890,7 +890,7 @@ async def test_provider_busy_waits_retry_after_then_resumes(graph_env, monkeypat
     assert resume["attempt"] == 1
     assert resume["assistant_text"] == "Placed U1."
     assert resume["tool_events"][0]["status"] == "completed"
-    assert 45 * 0.8 <= sleeps[0] <= 45 * 1.2
+    assert 45 <= sleeps[0] <= 45 * 1.2
     (scheduled,) = [e for e in events if e["type"] == RESUME_EVENT]
     assert scheduled["data"]["reason"] == "provider_busy"
     assert scheduled["data"]["delay_s"] == round(sleeps[0], 3)
@@ -909,7 +909,7 @@ async def test_provider_busy_delay_has_a_floor(graph_env, sleeps) -> None:
     await run_turn(agent, graph_env, FIRST)
     assert sleeps[0] == copper_graph.PROVIDER_BUSY_MIN_DELAY == 15
     default = copper_graph.PROVIDER_BUSY_DEFAULT_DELAY
-    assert default * 0.8 <= sleeps[1] <= default * 1.2
+    assert default <= sleeps[1] <= default * 1.2
 
 
 @pytest.mark.asyncio
@@ -1011,4 +1011,4 @@ async def test_headless_json_capacity_wait_event_shape(graph_env, capsys, sleeps
     assert wait["resume_attempt"] == 0 and isinstance(wait["ts"], float)
     (resume,) = [line for line in lines if line["type"] == "resume"]
     assert resume["data"]["reason"] == "provider_busy"
-    assert resume["data"]["delay_s"] >= 24
+    assert resume["data"]["delay_s"] >= 30

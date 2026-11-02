@@ -92,8 +92,8 @@ IMMEDIATE_RESUME_MAX_DELAY = 2.0
 MAX_TOTAL_RESUMES = 20
 # Before each resume the client waits for ``GET /api/heartbeat`` to answer 200.
 # ``provider_busy`` finals (the LLM provider stayed out of capacity for the
-# server's whole wait budget): wait ``retry_after_s`` (jittered, at least
-# 15 s) and resume. Their own budget per logical turn: 6 in a row or 30 min
+# server's whole wait budget): wait ``retry_after_s`` (up to 20% more, at
+# least 15 s) and resume. Their own budget per logical turn: 6 in a row or 30 min
 # since the first busy final; neither spends the transport budget above. Any
 # model progress (text, reasoning, a tool call) starts a new streak.
 PROVIDER_BUSY_MAX_RESUMES = 6
@@ -765,7 +765,6 @@ class _TurnRun:
                 if plan is None and self._can_resume_again() and self._start_fresh(exc):
                     plan = (resume_reason_for(exc), 0.0, False)
                 will_retry = plan is not None
-                # Resumable finals are planned pauses, not failed attempts.
                 immediate = plan is not None and plan[2]
                 logger.warning(
                     "Hosted turn attempt %s failed (type=%s, retryable=%s, will_retry=%s): %s",
@@ -913,7 +912,10 @@ class _TurnRun:
             if isinstance(retry_after, (int, float)) and retry_after > 0
             else PROVIDER_BUSY_DEFAULT_DELAY
         )
-        return reason, max(PROVIDER_BUSY_MIN_DELAY, _jitter(base)), False
+        # Never earlier than the server asked; the jitter spreads clients that
+        # were paused together over the next 20%.
+        delay = base * random.uniform(1.0, 1.0 + RETRY_JITTER)  # noqa: S311
+        return reason, max(PROVIDER_BUSY_MIN_DELAY, delay), False
 
     def _manually_resumable(self, info: ErrorInfo) -> bool:
         return not self.tos_blocked and info.type in _MANUALLY_RESUMABLE
