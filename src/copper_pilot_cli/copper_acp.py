@@ -1355,28 +1355,45 @@ class CopperAcpAgent:
         self, session: AcpSession
     ) -> Callable[[ApprovalRequest], Awaitable[bool]]:
         async def approve(request: ApprovalRequest) -> bool:
+            title = tool_title(request.tool_name, request.arguments)
+            options = [
+                PermissionOption(option_id=OPTION_ALLOW, name="Allow", kind="allow_once"),
+                PermissionOption(
+                    option_id=OPTION_ALLOW_SESSION,
+                    name="Allow all for this session",
+                    kind="allow_always",
+                ),
+                PermissionOption(option_id=OPTION_REJECT, name="Reject", kind="reject_once"),
+            ]
+            content = None
+            scope = request.outside_workspace
+            if scope:
+                # Asked every time, even in YOLO; no session-wide allow.
+                title = f"Outside the workspace: {title}"
+                options = [option for option in options if option.kind != "allow_always"]
+                content = [
+                    tool_content(
+                        text_block(
+                            f"Outside the workspace: {scope}. This command reaches beyond "
+                            "the project folder; allow it only if you expect that."
+                        )
+                    )
+                ]
             response = await self.conn.request_permission(
                 session_id=session.session_id,
                 tool_call=ToolCallUpdate(
                     tool_call_id=request.tool_call_id,
-                    title=tool_title(request.tool_name, request.arguments),
+                    title=title,
                     kind=tool_kind(request.tool_name),
                     status="pending",
+                    content=content,
                     locations=tool_locations(request.arguments),
                     raw_input=request.arguments,
                 ),
-                options=[
-                    PermissionOption(option_id=OPTION_ALLOW, name="Allow", kind="allow_once"),
-                    PermissionOption(
-                        option_id=OPTION_ALLOW_SESSION,
-                        name="Allow all for this session",
-                        kind="allow_always",
-                    ),
-                    PermissionOption(option_id=OPTION_REJECT, name="Reject", kind="reject_once"),
-                ],
+                options=options,
             )
             choice = _selected_option(response)
-            if choice == OPTION_ALLOW_SESSION:
+            if choice == OPTION_ALLOW_SESSION and not scope:
                 session.broker.mode = ApprovalMode.YOLO
                 return True
             return choice == OPTION_ALLOW

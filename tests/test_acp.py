@@ -85,7 +85,13 @@ from copper_pilot_cli.copper_models import (
     FALLBACK_CATALOG,
     MODEL_FALLBACK_GENERIC_NOTICE,
 )
-from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ErrorInfo, ProtocolError
+from copper_pilot_cli.copper_protocol import (
+    CopperEffort,
+    CopperMode,
+    ErrorInfo,
+    ProtocolError,
+    ToolRequest,
+)
 from copper_pilot_cli.copper_status_events import SubagentStatus
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, ToolRejected
 
@@ -1260,6 +1266,54 @@ async def test_approval_handler_outcomes(tmp_path, monkeypatch) -> None:
         "allow_always",
         "reject_once",
     ]
+
+
+async def test_outside_workspace_permission_carries_reason(tmp_path, monkeypatch) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, responses=[selected(OPTION_ALLOW), selected(OPTION_ALLOW_SESSION)]
+    )
+    broker = agent.sessions[session_id].broker
+    broker.mode = ApprovalMode.YOLO
+    request = ApprovalRequest(
+        tool_call_id="shell-1",
+        tool_name="bash",
+        arguments={"command": "find / -name kicad-cli"},
+        reason="Outside the workspace: `find` searches /",
+        canonical_name="execute",
+        outside_workspace="`find` searches /",
+    )
+    assert await broker.approve(request) is True
+    permission = conn.permissions[0]
+    tool_call = permission["tool_call"]
+    assert tool_call.title.startswith("Outside the workspace: ")
+    assert "`find` searches /" in tool_call.content[0].content.text
+    assert [option.kind for option in permission["options"]] == ["allow_once", "reject_once"]
+    # A stray session-wide allow never switches the session or approves.
+    assert await broker.approve(request) is False
+    assert broker.mode is ApprovalMode.YOLO
+
+
+async def test_acp_yolo_session_still_asks_for_outside_workspace_shell(
+    tmp_path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    workspace = home / "board"
+    workspace.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    agent, conn, _runtime, session_id = await _connected_agent(
+        workspace, monkeypatch, responses=[selected(OPTION_REJECT)]
+    )
+    broker = agent.sessions[session_id].broker
+    broker.mode = ApprovalMode.YOLO
+    with pytest.raises(ToolRejected, match="the user declined"):
+        await broker.execute(
+            ToolRequest(
+                tool_call_id="shell-2",
+                tool_name="bash",
+                arguments={"command": 'grep -rn "VCC" ~'},
+            )
+        )
+    assert "`grep -r` searches ~" in conn.permissions[0]["tool_call"].content[0].content.text
 
 
 async def test_question_handler_maps_options_onto_permissions(tmp_path, monkeypatch) -> None:
