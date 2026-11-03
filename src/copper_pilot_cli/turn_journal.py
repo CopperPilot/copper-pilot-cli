@@ -40,6 +40,8 @@ TURN_RESUME_CAPABILITY = "turn_resume_v1"
 TURN_RESUME_ENV = "COPPER_PILOT_TURN_RESUME"
 JOURNAL_VERSION = 1
 MAX_TOOL_EVENTS = 200
+# Subagents a turn can report on resume (the server caps spawns at 16).
+MAX_SUBAGENTS = 32
 MAX_TOOL_RESULT_BYTES = 4 * 1024
 MAX_ARGUMENT_BYTES = 4 * 1024
 MAX_ASSISTANT_TEXT_BYTES = 256 * 1024
@@ -169,6 +171,7 @@ class TurnJournal:
     reason: str | None = None
     assistant_text: str = ""
     tool_events: list[dict[str, Any]] = field(default_factory=list)
+    subagents: list[dict[str, Any]] = field(default_factory=list)
     status: str = STATUS_RUNNING
     last_error: dict[str, Any] | None = None
     started_at: float = field(default_factory=time.time)
@@ -218,6 +221,27 @@ class TurnJournal:
         event["result"] = _clip_text(_result_text(result), MAX_TOOL_RESULT_BYTES)
         self.updated_at = time.time()
 
+    def record_subagent(self, event: dict[str, Any]) -> None:
+        """Latest status of one subagent chip; the workspace manifest stays
+        the authoritative record."""
+        unit = event.get("unit")
+        status = str(event.get("state") or event.get("status") or "")
+        if event.get("kind") != "subagent" or not unit or status in ("", "keepalive"):
+            return
+        entry = {
+            "unit": str(unit),
+            "status": status,
+            "scratch_path": str(event["scratch_path"]) if event.get("scratch_path") else None,
+        }
+        for index, item in enumerate(self.subagents):
+            if item.get("unit") == entry["unit"]:
+                self.subagents[index] = entry
+                break
+        else:
+            if len(self.subagents) < MAX_SUBAGENTS:
+                self.subagents.append(entry)
+        self.updated_at = time.time()
+
     def settle_pending(self, status: str = INTERRUPTED) -> None:
         """Mark requests whose outcome never arrived (process killed, tool cancelled)."""
         for event in self.tool_events:
@@ -261,6 +285,8 @@ class TurnJournal:
             "assistant_text": self.assistant_text,
             "tool_events": events[-MAX_TOOL_EVENTS:],
         }
+        if self.subagents:
+            payload["subagents"] = list(self.subagents)
         # Oldest results go first; the newest are what the model needs most.
         index = 0
         while _size(payload) > MAX_RESUME_PAYLOAD_BYTES and index < len(payload["tool_events"]):
@@ -293,6 +319,9 @@ class TurnJournal:
             event
             for event in journal.tool_events
             if isinstance(event, dict) and "tool_call_id" in event and "status" in event
+        ]
+        journal.subagents = [
+            item for item in journal.subagents if isinstance(item, dict) and item.get("unit")
         ]
         return journal
 
