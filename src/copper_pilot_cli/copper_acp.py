@@ -12,6 +12,7 @@ import base64
 import binascii
 import logging
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -67,6 +68,22 @@ from langchain_core.messages import HumanMessage
 from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.chat_context import (
+    COMPACTION_EVENT,
+    CONTEXT_COMPACTED_KIND,
+    CONTEXT_USAGE_KIND,
+    USAGE_KEY,
+    NothingToCompact,
+    auto_compact_threshold,
+    compact_history,
+    compaction_notice,
+    context_limit,
+    count_context,
+    current_compaction,
+    describe_context,
+    parse_context_usage,
+    stored_usage,
+)
 from copper_pilot_cli.copper_api import (
     format_token_limits,
     is_usage_block,
@@ -95,6 +112,7 @@ from copper_pilot_cli.copper_models import (
     model_fallback_notice,
     model_selector_enabled,
     normalize_model_id,
+    turn_model,
 )
 from copper_pilot_cli.copper_preferences import shell_auto_allow_settings
 from copper_pilot_cli.copper_protocol import (
@@ -145,6 +163,15 @@ MODEL_CONFIG_ID = "model"
 EFFORT_COMMAND = "effort"
 MODEL_COMMAND = "model"
 USAGE_COMMAND = "usage"
+COMPACT_COMMAND = "compact"
+CONTEXT_COMMAND = "context"
+COMPACTING_MESSAGE = "Compacting context…"
+COMPACTED_NOTE = (
+    "This chat was compacted earlier: the model sees a summary of the older "
+    "messages plus the recent ones. The full transcript stays on this device."
+)
+# Live ``context_usage`` events become usage updates at most this often.
+USAGE_UPDATE_INTERVAL_SECONDS = 2.0
 RESUME_COMMAND = "resume"
 UNFINISHED_TURN_MESSAGE = (
     "The turn stopped before it finished ({error}). Its progress is saved on this "
@@ -172,6 +199,8 @@ _MODEL_COMMAND = re.compile(r"^/model(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _LIMITS_TIMEOUT_SECONDS = 5.0
 _USAGE_COMMAND = re.compile(r"^/usage\s*$", re.IGNORECASE)
 _RESUME_COMMAND = re.compile(r"^/resume\s*$", re.IGNORECASE)
+_COMPACT_COMMAND = re.compile(r"^/compact(?:\s+(.*\S))?\s*$", re.IGNORECASE | re.DOTALL)
+_CONTEXT_COMMAND = re.compile(r"^/context\s*$", re.IGNORECASE)
 _USER_REQUEST = re.compile(r"<user_request>\s*(.*?)\s*</user_request>", re.DOTALL)
 _PLAN_ARTIFACT = re.compile(
     r"(?:^|[\\/])\.copperpilot[\\/]plans[\\/][^\\/]+\.plan\.md$", re.IGNORECASE
@@ -246,6 +275,10 @@ class AcpSession:
     unfinished: bool = False
     # The unfinished turn paused because the LLM provider stayed out of capacity.
     provider_busy: bool = False
+    # Chat context protocol v1: the latest context size and when it was last
+    # sent as a usage update (live updates are throttled).
+    context_usage: dict[str, Any] | None = None
+    usage_sent_at: float = 0.0
 
     @property
     def busy(self) -> bool:
@@ -506,6 +539,21 @@ def available_commands() -> list[AvailableCommand]:
     )
     commands.append(
         AvailableCommand(
+            name=COMPACT_COMMAND,
+            description=(
+                "Summarize older messages to free context; the full transcript stays local."
+            ),
+            input=UnstructuredCommandInput(hint="optional focus"),
+        )
+    )
+    commands.append(
+        AvailableCommand(
+            name=CONTEXT_COMMAND,
+            description="Show how full the model context is and when it auto-compacts.",
+        )
+    )
+    commands.append(
+        AvailableCommand(
             name=RESUME_COMMAND,
             description="Resume the unfinished turn where it left off (also: “continue”).",
         )
@@ -552,12 +600,43 @@ def usage_command(message: str) -> bool:
     return _USAGE_COMMAND.match(user_request_text(message).strip()) is not None
 
 
-def usage_update(payload: Any) -> UsageUpdate | None:
+def compact_command(message: str) -> tuple[bool, str | None]:
+    """Return ``(is_compact_command, focus)`` for a prompt."""
+    match = _COMPACT_COMMAND.match(user_request_text(message).strip())
+    if match is None:
+        return False, None
+    return True, match.group(1)
+
+
+def context_command(message: str) -> bool:
+    """Return whether a prompt is the ``/context`` command."""
+    return _CONTEXT_COMMAND.match(user_request_text(message).strip()) is not None
+
+
+def context_usage_update(usage: Any, limit: int | None = None) -> UsageUpdate | None:
+    """``usage_update{used: context_tokens, size: context_limit}``; ``None`` without a size."""
+    parsed = parse_context_usage(usage)
+    if parsed is None:
+        return None
+    size = parsed.get("context_limit") or limit
+    if not size:
+        return None
+    return UsageUpdate(
+        session_update="usage_update",
+        used=parsed["context_tokens"],
+        size=int(size),
+        field_meta=parsed,
+    )
+
+
+def usage_update(payload: Any, limit: int | None = None) -> UsageUpdate | None:
     """Map hosted per-turn token counts onto an ACP usage update.
 
-    The hosted service reports the prompt tokens a turn consumed but not the
-    model's context window, so ``size`` is 0 (unknown); clients such as T3 Code
-    then show the count alone. The raw counts ride along in ``_meta``.
+    Only for a hosted service without context usage (chat context protocol
+    v1 sends ``context_usage`` instead, see ``context_usage_update``). The
+    count is the prompt tokens a turn consumed; ``size`` is the model's
+    window when the catalog knows it, else 0 (unknown), so clients such as
+    T3 Code show the count alone. The raw counts ride along in ``_meta``.
     """
     if not isinstance(payload, dict):
         return None
@@ -567,7 +646,9 @@ def usage_update(payload: Any) -> UsageUpdate | None:
     )
     if not isinstance(used, int) or isinstance(used, bool) or used < 0:
         return None
-    return UsageUpdate(session_update="usage_update", used=used, size=0, field_meta=dict(payload))
+    return UsageUpdate(
+        session_update="usage_update", used=used, size=limit or 0, field_meta=dict(payload)
+    )
 
 
 def is_plan_artifact(path: str) -> bool:
@@ -863,6 +944,12 @@ class CopperAcpAgent:
         )
         for update in replay_updates(messages):
             await self.conn.session_update(session_id=session_id, update=update)
+        if current_compaction(values) is not None:
+            await self.conn.session_update(
+                session_id=session_id,
+                update=update_agent_message_text(f"\n\n*{COMPACTED_NOTE}*\n\n"),
+            )
+        await self._send_stored_usage(session, values)
         await self._announce_commands(session)
         return LoadSessionResponse(
             modes=mode_state(session.mode),
@@ -931,6 +1018,13 @@ class CopperAcpAgent:
             return PromptResponse(stop_reason="end_turn")
         if usage_command(first_block):
             await self._answer_usage_command(session, credential)
+            return PromptResponse(stop_reason="end_turn")
+        is_command, focus = compact_command(first_block)
+        if is_command:
+            await self._compact_command(session, credential, focus)
+            return PromptResponse(stop_reason="end_turn")
+        if context_command(first_block):
+            await self._context_command(session, credential)
             return PromptResponse(stop_reason="end_turn")
         attachments = save_attachments(images, session.workspace)
         session.cancelled = False
@@ -1089,6 +1183,7 @@ class CopperAcpAgent:
                 failure = await self._emit(session, data) or failure
             state = await runtime.aget_state(config)
         values = getattr(state, "values", None) or {}
+        await self._send_stored_usage(session, values)
         new_mode = _coerce_mode(values.get("copper_mode"), session.mode)
         if new_mode is not session.mode:
             session.mode = new_mode
@@ -1217,6 +1312,134 @@ class CopperAcpAgent:
             session_id=session.session_id, update=update_agent_message_text(text)
         )
 
+    def _new_agent(self, session: AcpSession, credential: DeviceCredential) -> Any:
+        return CopperPilotAgent(
+            session.workspace,
+            credential=credential,
+            conversation_id=session.session_id,
+            mode=session.mode,
+            effort=session.effort,
+            model=session.model,
+            tool_broker=session.broker,
+        )
+
+    def _context_limit(self, session: AcpSession) -> int | None:
+        usage = session.context_usage or {}
+        return usage.get("context_limit") or self.catalog.context_window(
+            session.effort, session.model
+        )
+
+    async def _send_context_usage(
+        self, session: AcpSession, usage: Any, *, throttle: bool = False
+    ) -> None:
+        """Publish the context size as ``usage_update{used, size}``."""
+        parsed = parse_context_usage(usage)
+        if parsed is None:
+            return
+        session.context_usage = {**(session.context_usage or {}), **parsed}
+        now = time.monotonic()
+        if throttle and now - session.usage_sent_at < USAGE_UPDATE_INTERVAL_SECONDS:
+            return
+        update = context_usage_update(session.context_usage, self._context_limit(session))
+        if update is None:
+            return
+        session.usage_sent_at = now
+        await self.conn.session_update(session_id=session.session_id, update=update)
+
+    async def _send_stored_usage(self, session: AcpSession, values: dict[str, Any]) -> None:
+        usage = stored_usage(values)
+        if usage is not None and usage != session.context_usage:
+            await self._send_context_usage(session, usage)
+
+    async def _say(self, session: AcpSession, text: str) -> None:
+        await self.conn.session_update(
+            session_id=session.session_id, update=update_agent_message_text(text)
+        )
+
+    async def _compact_command(
+        self, session: AcpSession, credential: DeviceCredential, focus: str | None
+    ) -> None:
+        """Answer ``/compact [focus]`` without a hosted chat turn."""
+        agent = self._new_agent(session, credential)
+        async with create_copper_graph(agent) as runtime:
+            config = runtime.config(session.session_id, session.workspace)
+            if await runtime.unfinished_turn(config) is not None:
+                await self._say(
+                    session,
+                    "This chat has an unfinished turn. Send “continue” (or /resume) to "
+                    "finish it before compacting.",
+                )
+                return
+            state = await runtime.aget_state(config)
+            values = dict(getattr(state, "values", None) or {})
+            await self._say(session, COMPACTING_MESSAGE + "\n\n")
+            try:
+                result = await compact_history(
+                    agent,
+                    values,
+                    trigger="manual",
+                    model=turn_model(self.catalog, session.effort, session.model),
+                    instructions=focus,
+                    workspace=session.workspace,
+                    policy=self.catalog.context_policy,
+                )
+            except NothingToCompact as exc:
+                await self._say(session, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001 - reported to the user, history unchanged
+                logger.warning("Compaction failed (%s): %s", type(exc).__name__, exc)
+                await self._say(session, f"Could not compact the context: {exc}")
+                return
+            await runtime.aupdate_state(config, result.updates, as_node="copper_pilot")
+        await self._say(session, compaction_notice(result.record))
+        await self._send_context_usage(session, result.updates.get(USAGE_KEY))
+
+    async def _context_command(self, session: AcpSession, credential: DeviceCredential) -> None:
+        """Answer ``/context``: size, auto-compaction point, compaction and breakdown."""
+        agent = self._new_agent(session, credential)
+        breakdown: dict[str, Any] | None = None
+        async with create_copper_graph(agent) as runtime:
+            state = await runtime.aget_state(runtime.config(session.session_id, session.workspace))
+            values = dict(getattr(state, "values", None) or {})
+            usage = stored_usage(values)
+            model = turn_model(self.catalog, session.effort, session.model)
+            used = usage.get("context_tokens") if usage else None
+            estimated = False
+            if usage is None or (usage.get("model") and usage.get("model") != model):
+                # No fresh measurement (new chat, or the model changed): count it.
+                try:
+                    counted = await count_context(
+                        agent, values, model=model, workspace=session.workspace
+                    )
+                except Exception as exc:  # noqa: BLE001 - the stored numbers still answer
+                    logger.info("Context count unavailable (%s)", type(exc).__name__)
+                else:
+                    used = parse_context_usage({"context_tokens": counted.get("estimated_tokens")})
+                    used = used["context_tokens"] if used else None
+                    estimated = used is not None
+                    raw = counted.get("breakdown")
+                    breakdown = raw if isinstance(raw, dict) else None
+                    if isinstance(counted.get("context_limit"), int):
+                        values.setdefault(
+                            USAGE_KEY,
+                            {
+                                "context_tokens": used or 0,
+                                "context_limit": counted["context_limit"],
+                                "auto_compact_at": counted.get("auto_compact_at"),
+                            },
+                        )
+        lines = describe_context(
+            used=used,
+            limit=context_limit(values, self.catalog, session.effort, session.model),
+            auto_compact_at=auto_compact_threshold(
+                values, self.catalog, session.effort, session.model
+            ),
+            record=current_compaction(values),
+            breakdown=breakdown,
+            estimated=estimated,
+        )
+        await self._say(session, "\n".join(f"- {line}" for line in lines))
+
     async def _emit_plan_artifact(self, session: AcpSession, path: str) -> None:
         """Publish the todos of a freshly written plan file as an ACP plan."""
         try:
@@ -1243,7 +1466,16 @@ class CopperAcpAgent:
             if payload:
                 await send(session_id=session_id, update=update_agent_thought_text(str(payload)))
         elif kind == EventKind.STATUS_EVENT.value and isinstance(payload, dict):
-            if payload.get("kind") == "subagent":
+            if payload.get("kind") == CONTEXT_USAGE_KIND:
+                await self._send_context_usage(session, payload, throttle=True)
+            elif payload.get("kind") == CONTEXT_COMPACTED_KIND:
+                compaction = payload.get("compaction")
+                record = compaction if isinstance(compaction, dict) else None
+                await send(
+                    session_id=session_id,
+                    update=update_agent_message_text(f"\n\n*{compaction_notice(record)}*\n\n"),
+                )
+            elif payload.get("kind") == "subagent":
                 identifier = str(payload.get("id") or "")
                 previous = session.subagents.get(identifier)
                 status = normalize_subagent_status(payload, previous)
@@ -1269,7 +1501,12 @@ class CopperAcpAgent:
                     session_id=session_id, update=update_agent_message_text(f"\n\n*{notice}*\n\n")
                 )
         elif kind == EventKind.USAGE.value and isinstance(payload, dict):
-            update = usage_update(payload)
+            # Once the server reports context usage, billing counts are not a meter.
+            update = (
+                None
+                if session.context_usage is not None
+                else usage_update(payload, self._context_limit(session))
+            )
             if update is not None and payload != session.last_usage:
                 session.last_usage = dict(payload)
                 await send(session_id=session_id, update=update)
@@ -1309,6 +1546,23 @@ class CopperAcpAgent:
         elif kind == EventKind.ERROR.value:
             session.failure = payload
             return error_message(payload)
+        elif event.get("type") == COMPACTION_EVENT and isinstance(payload, dict):
+            stage = payload.get("stage")
+            if stage == "started":
+                await send(
+                    session_id=session_id,
+                    update=update_agent_message_text(f"*{COMPACTING_MESSAGE}*\n\n"),
+                )
+            elif stage in {"completed", "failed"}:
+                title = str(event.get("title") or compaction_notice(None))
+                await send(
+                    session_id=session_id, update=update_agent_message_text(f"*{title}*\n\n")
+                )
+                record = payload.get("record")
+                if stage == "completed" and isinstance(record, dict):
+                    post = record.get("post_tokens")
+                    if isinstance(post, int):
+                        await self._send_context_usage(session, {"context_tokens": post})
         elif event.get("type") == CAPACITY_WAIT_EVENT:
             # Progress, not an error: the hosted model is waiting for capacity.
             label = str(event.get("title") or "High demand — waiting to continue")
@@ -1341,6 +1595,8 @@ class CopperAcpAgent:
             # Thought chunks are concatenated by clients; keep each retry line separate.
             await send(session_id=session_id, update=update_agent_thought_text(f"{label}\n"))
         elif kind == EventKind.FINAL.value and isinstance(payload, dict):
+            if payload.get("context_usage"):
+                await self._send_context_usage(session, payload.get("context_usage"))
             if payload.get("success") is False or payload.get("error"):
                 message = str(payload.get("error") or "hosted failure")
                 # The hosted copy is generic; the turn id lets the service
