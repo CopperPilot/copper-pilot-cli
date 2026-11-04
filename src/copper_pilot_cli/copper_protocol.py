@@ -67,6 +67,13 @@ PING_TIMEOUT_SECONDS = 20.0
 # Close code the client sends when the server goes quiet for the idle window.
 CLIENT_LIVENESS_CLOSE_CODE = 4000
 HEARTBEAT_PATH = "/api/heartbeat"
+# Chat context protocol v1 (see ``chat_context``): stateless compaction and
+# token counting, and the client-executed ``search_chat_history`` tool.
+COMPACT_PATH = "/api/copperpilot/analyze/compact"
+CONTEXT_COUNT_PATH = "/api/copperpilot/analyze/context/count"
+CHAT_HISTORY_SEARCH_CAPABILITY = "chat_history_search"
+COMPACT_TIMEOUT_SECONDS = 300.0
+CONTEXT_COUNT_TIMEOUT_SECONDS = 15.0
 # Provider capacity (LLM rate limits). While the hosted model waits for
 # capacity the server sends ``status_event.kind == "capacity_wait"``; when its
 # wait budget runs out the turn ends with a resumable ``provider_busy`` final.
@@ -338,6 +345,9 @@ class ChatRequest(BaseModel):
     turn_id: str | None = None
     # ``request.resume`` (turn resume protocol v1); only on resume attempts.
     resume: dict[str, Any] | None = None
+    # Pinned session state (chat context protocol v1): the compaction summary,
+    # question answers, todos and plan, snapshotted once per logical turn.
+    session_state: dict[str, Any] | None = None
 
     @field_validator("effort", mode="before")
     @classmethod
@@ -433,6 +443,9 @@ def _truncate_utf8(text: str, limit: int) -> str:
     return encoded[:limit].decode(errors="ignore") + "\n[truncated]"
 
 
+_OMITTED_NOTE = re.compile(r"\[\d+ older messages omitted\]")
+
+
 def bound_context(
     messages: Sequence[ChatMessage],
     *,
@@ -461,23 +474,42 @@ def bound_context(
     return bounded
 
 
-def client_capabilities() -> list[str]:
+def omitted_messages(original: Sequence[ChatMessage], bounded: Sequence[ChatMessage]) -> int:
+    """How many of ``original`` messages ``bound_context`` dropped."""
+    kept = len(bounded)
+    if kept and bounded[0].role == "system" and _OMITTED_NOTE.fullmatch(bounded[0].content):
+        kept -= 1
+    return max(len(original) - kept, 0)
+
+
+def client_capabilities(*, history_search: bool = False) -> list[str]:
     """Capabilities advertised in ``chat_start``.
 
     ``turn_resume_v1`` is advertised on every turn, not only on resumes: it
     also tells the server this client handles resumable finals, so it may
     rotate or drain the socket instead of failing the turn.
+    ``chat_history_search`` is advertised for checkpointed chats, which can
+    answer ``search_chat_history`` from the local transcript.
     """
     capabilities = []
     if parallel_tools_enabled():
         capabilities.append(PARALLEL_TOOL_REQUESTS_CAPABILITY)
     if turn_resume_enabled():
         capabilities.append(TURN_RESUME_CAPABILITY)
+    if history_search:
+        capabilities.append(CHAT_HISTORY_SEARCH_CAPABILITY)
     return capabilities
 
 
 def make_chat_start(request: ChatRequest) -> dict[str, Any]:
-    """Serialize a protocol-v1 frame, progressively shrinking chat history."""
+    """Serialize a protocol-v1 frame, progressively shrinking chat history.
+
+    A request with ``session_state`` comes from a checkpointed chat: any
+    history the ladder still has to drop is reported in
+    ``session_state.history_omitted`` (besides the system note), and the chat
+    advertises ``chat_history_search``. The same request always yields the
+    same frame, so a resumed attempt resends an identical ``session_state``.
+    """
     attempts = (
         (MAX_CONTEXT_MESSAGE_BYTES, MAX_CONTEXT_TOTAL_BYTES, MAX_CHAT_START_BYTES),
         (MAX_CONTEXT_MESSAGE_BYTES // 2, MAX_CONTEXT_TOTAL_BYTES // 2, STRICT_CHAT_START_BYTES),
@@ -486,21 +518,24 @@ def make_chat_start(request: ChatRequest) -> dict[str, Any]:
     )
     last_size = 0
     for max_message_bytes, max_total_bytes, frame_limit in attempts:
-        payload = request.model_copy(
-            update={
-                "context": bound_context(
-                    request.context,
-                    max_message_bytes=max_message_bytes,
-                    max_total_bytes=max_total_bytes,
-                )
-            }
+        context = bound_context(
+            request.context,
+            max_message_bytes=max_message_bytes,
+            max_total_bytes=max_total_bytes,
         )
+        update: dict[str, Any] = {"context": context}
+        if request.session_state is not None:
+            update["session_state"] = {
+                **request.session_state,
+                "history_omitted": {"messages": omitted_messages(request.context, context)},
+            }
+        payload = request.model_copy(update=update)
         frame: dict[str, Any] = {
             "type": "chat_start",
             "protocol_version": 1,
             "request": payload.model_dump(mode="json", exclude_none=True),
         }
-        capabilities = client_capabilities()
+        capabilities = client_capabilities(history_search=request.session_state is not None)
         if capabilities:
             frame["capabilities"] = capabilities
         last_size = len(json.dumps(frame, separators=(",", ":")).encode())
@@ -652,6 +687,76 @@ class HostedChatClient:
             logger.info("Heartbeat failed (%s)", type(exc).__name__)
             return False
         return response.status_code == 200
+
+    def _rest_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": f"CopperPilot CLI/{__version__}",
+            "X-CopperPilot-Fingerprint": self.fingerprint,
+        }
+
+    async def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        request_timeout: float,
+        feature: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> dict[str, Any]:
+        """POST one stateless request; map HTTP failures onto ``ProtocolError``."""
+        try:
+            async with httpx.AsyncClient(timeout=request_timeout, transport=transport) as client:
+                response = await client.post(
+                    f"{self.base_url}{path}", headers=self._rest_headers(), json=payload
+                )
+        except (httpx.HTTPError, OSError) as exc:
+            raise ProtocolError(
+                f"Could not reach CopperPilot for {feature} ({type(exc).__name__}).",
+                code="CHAT_CONNECTION_ERROR",
+                retryable=True,
+            ) from exc
+        if response.status_code == 200:
+            try:
+                value = response.json()
+            except ValueError as exc:
+                raise ProtocolError(f"CopperPilot returned an invalid {feature} reply.") from exc
+            if not isinstance(value, dict):
+                raise ProtocolError(f"CopperPilot returned an invalid {feature} reply.")
+            return value
+        raise _http_error(response, feature)
+
+    async def compact(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_timeout: float = COMPACT_TIMEOUT_SECONDS,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> dict[str, Any]:
+        """``POST /analyze/compact``: summarize a chat's history (billed like a turn)."""
+        return await self._post_json(
+            COMPACT_PATH,
+            payload,
+            request_timeout=request_timeout,
+            feature="context compaction",
+            transport=transport,
+        )
+
+    async def count_context(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_timeout: float = CONTEXT_COUNT_TIMEOUT_SECONDS,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> dict[str, Any]:
+        """``POST /analyze/context/count``: estimate a request's tokens (no LLM call)."""
+        return await self._post_json(
+            CONTEXT_COUNT_PATH,
+            payload,
+            request_timeout=request_timeout,
+            feature="context counting",
+            transport=transport,
+        )
 
     async def stream(
         self,
@@ -1015,6 +1120,12 @@ class HostedChatClient:
                                 "resumable": resumable,
                                 "error_code": error_code,
                                 "retry_after_s": _number(retry_after) or None,
+                                "context_usage": extra.get("context_usage")
+                                if isinstance(extra.get("context_usage"), dict)
+                                else None,
+                                "compaction": extra.get("compaction")
+                                if isinstance(extra.get("compaction"), dict)
+                                else None,
                             },
                             **metadata,
                         )
@@ -1046,6 +1157,50 @@ class HostedChatClient:
 
 
 _MAX_BUFFERED_FRAMES = 1_000
+
+
+def _http_error(response: httpx.Response, feature: str) -> ProtocolError:
+    """A clear ``ProtocolError`` for a refused stateless request.
+
+    A 404 or 405 means the deployment predates the endpoint; usage limits keep
+    the same fields as chat errors so every front-end explains them alike.
+    """
+    status = response.status_code
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    detail: dict[str, Any] = {}
+    if isinstance(body, dict):
+        nested = body.get("detail")
+        detail = nested if isinstance(nested, dict) else body
+    code = detail.get("code") or detail.get("error_code") or detail.get("error")
+    message = detail.get("public_message") or detail.get("message")
+    if (
+        not isinstance(message, str)
+        and isinstance(body, dict)
+        and isinstance(body.get("detail"), str)
+    ):
+        message = body["detail"]
+    if status in {404, 405}:
+        return ProtocolError(
+            f"This CopperPilot server does not support {feature} yet.",
+            code="feature_unavailable",
+            status=status,
+            retryable=False,
+        )
+    text = sanitize_status(str(message)) if isinstance(message, str) and message else None
+    return ProtocolError(
+        text or f"CopperPilot {feature} failed (HTTP {status}).",
+        code=str(code) if isinstance(code, str) else None,
+        status=status,
+        block_reason=str(detail["block_reason"]) if detail.get("block_reason") else None,
+        can_purchase_overage=detail.get("can_purchase_overage")
+        if isinstance(detail.get("can_purchase_overage"), bool)
+        else None,
+        retryable=status >= 500 or status == 429,
+        resets_at=usage_reset_time(detail),
+    )
 
 
 def _echoes_resumable_error(frame_type: Any, response: ChatResponse) -> bool:

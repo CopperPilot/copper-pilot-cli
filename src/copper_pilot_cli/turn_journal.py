@@ -177,6 +177,11 @@ class TurnJournal:
     subagents: list[dict[str, Any]] = field(default_factory=list)
     status: str = STATUS_RUNNING
     last_error: dict[str, Any] | None = None
+    # Chat context protocol v1: the ``session_state`` snapshotted when the
+    # turn started and the id of the last history message left out of
+    # ``context`` (the compaction cut). Every attempt resends both unchanged.
+    session_state: dict[str, Any] | None = None
+    context_cut: str | None = None
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     version: int = JOURNAL_VERSION

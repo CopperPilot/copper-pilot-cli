@@ -20,6 +20,11 @@ from rich.console import Console
 from rich.prompt import Confirm
 
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.chat_context import (
+    COMPACTION_EVENT,
+    CONTEXT_COMPACTED_KIND,
+    compaction_notice,
+)
 from copper_pilot_cli.copper_app import CopperPilotApp
 from copper_pilot_cli.copper_auth import (
     AuthenticationError,
@@ -510,6 +515,8 @@ async def _headless(
             console.print(f"\n{data.get('title')}", style="yellow", markup=False, highlight=False)
         elif not args.quiet and data.get("type") == CAPACITY_WAIT_EVENT:
             console.print(f"\n{data.get('title')}", style="yellow", markup=False, highlight=False)
+        elif not args.quiet and data.get("type") == COMPACTION_EVENT:
+            console.print(f"\n{data.get('title')}", style="dim", markup=False, highlight=False)
         elif data.get("type") == RESUME_EVENT and isinstance(payload, dict):
             busy = payload.get("reason") == PROVIDER_BUSY_CODE
             if busy and payload.get("manual_resume") and not payload.get("will_retry"):
@@ -547,6 +554,13 @@ async def _headless(
                         markup=False,
                         highlight=False,
                     )
+            elif payload.get("kind") == CONTEXT_COMPACTED_KIND:
+                console.print(
+                    f"\n{compaction_notice(payload.get('compaction'))}",
+                    style="dim",
+                    markup=False,
+                    highlight=False,
+                )
             elif payload.get("kind") == "plan_mode_switch":
                 console.print(
                     "\nSwitched to Plan mode",

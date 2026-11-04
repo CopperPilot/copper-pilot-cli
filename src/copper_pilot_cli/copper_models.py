@@ -47,6 +47,39 @@ class ChatModel:
     vendor: str
     input_usd_per_mtok: float = 0.0
     output_usd_per_mtok: float = 0.0
+    # Context window and output cap from the server catalog; ``None`` when the
+    # deployment does not publish them (the bundled list never guesses).
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPolicy:
+    """When chats compact, from the catalog's ``context_policy`` block.
+
+    The defaults mirror the server's; the server always has the last word
+    because every final frame carries its own ``auto_compact_at``.
+    """
+
+    auto_compact_fraction: float = 0.8
+    auto_compact_max_tokens: int | None = None
+    reserve_output_tokens: int = 32_000
+    warn_fraction: float = 0.75
+    keep_recent_fraction: float = 0.15
+    user_messages_budget_tokens: int = 20_000
+
+    def auto_compact_at(self, context_window: int | None) -> int | None:
+        """``floor(fraction * (window - reserve))``, capped; ``None`` without a window."""
+        if not context_window or context_window <= 0:
+            return None
+        usable = max(context_window - self.reserve_output_tokens, 0)
+        threshold = int(self.auto_compact_fraction * usable)
+        if self.auto_compact_max_tokens:
+            threshold = min(threshold, self.auto_compact_max_tokens)
+        return threshold if threshold > 0 else None
+
+
+DEFAULT_CONTEXT_POLICY = ContextPolicy()
 
 
 # Picker order mirrors the desktop client: Gemini first, then Anthropic, then OpenAI.
@@ -70,6 +103,8 @@ class ChatModelCatalog:
     default_intelligence_model: str = DEFAULT_INTELLIGENCE_MODEL
     balanced_model: str = BALANCED_MODEL
     from_server: bool = False
+    balanced_context_window: int | None = None
+    context_policy: ContextPolicy = DEFAULT_CONTEXT_POLICY
     _by_id: dict[str, ChatModel] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -93,6 +128,16 @@ class ChatModelCatalog:
         if normalize_effort(effort) is not CopperEffort.INTELLIGENCE:
             return self.balanced_model
         return self.normalize(model_id)
+
+    def context_window(self, effort: Any, model_id: Any) -> int | None:
+        """Context window of the model a turn runs on; ``None`` when unknown."""
+        effective = self.effective_model(effort, model_id)
+        model = self.get(effective)
+        if model is not None and model.context_window:
+            return model.context_window
+        if effective == self.balanced_model:
+            return self.balanced_context_window
+        return None
 
     def label(self, model_id: Any) -> str:
         """Human label for an id; falls back to the raw id."""
@@ -149,6 +194,11 @@ def request_model(effort: Any, model_id: Any) -> str | None:
     return normalize_model_id(model_id) or None
 
 
+def turn_model(catalog: ChatModelCatalog, effort: Any, model_id: Any) -> str:
+    """Model id a chat's turns run on, as compaction and counting requests name it."""
+    return request_model(effort, model_id) or catalog.effective_model(effort, model_id)
+
+
 def _short_label(label: str, vendor: str) -> str:
     prefix = f"{vendor.strip()} "
     return label[len(prefix) :] if vendor.strip() and label.startswith(prefix) else label
@@ -181,6 +231,8 @@ def catalog_from_payload(payload: Any) -> ChatModelCatalog | None:
                 vendor=vendor,
                 input_usd_per_mtok=_price(entry.get("input_usd_per_mtok")),
                 output_usd_per_mtok=_price(entry.get("output_usd_per_mtok")),
+                context_window=_tokens(entry.get("context_window")),
+                max_output_tokens=_tokens(entry.get("max_output_tokens")),
             )
         )
     if not models:
@@ -195,7 +247,40 @@ def catalog_from_payload(payload: Any) -> ChatModelCatalog | None:
         default_intelligence_model=default,
         balanced_model=balanced,
         from_server=True,
+        balanced_context_window=_tokens(payload.get("balanced_context_window")),
+        context_policy=context_policy_from_payload(payload.get("context_policy")),
     )
+
+
+def context_policy_from_payload(value: Any) -> ContextPolicy:
+    """Parse ``context_policy``; missing or invalid fields keep the defaults."""
+    if not isinstance(value, dict):
+        return DEFAULT_CONTEXT_POLICY
+    base = DEFAULT_CONTEXT_POLICY
+
+    def fraction(key: str, default: float) -> float:
+        raw = value.get(key)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and 0 < raw <= 1:
+            return float(raw)
+        return default
+
+    return ContextPolicy(
+        auto_compact_fraction=fraction("auto_compact_fraction", base.auto_compact_fraction),
+        auto_compact_max_tokens=_tokens(value.get("auto_compact_max_tokens")),
+        reserve_output_tokens=_tokens(value.get("reserve_output_tokens"))
+        or base.reserve_output_tokens,
+        warn_fraction=fraction("warn_fraction", base.warn_fraction),
+        keep_recent_fraction=fraction("keep_recent_fraction", base.keep_recent_fraction),
+        user_messages_budget_tokens=_tokens(value.get("user_messages_budget_tokens"))
+        or base.user_messages_budget_tokens,
+    )
+
+
+def _tokens(value: Any) -> int | None:
+    """A positive token count, else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if value > 0 else None
 
 
 def _is_default(raw_models: list[Any], model_id: str) -> bool:

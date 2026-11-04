@@ -61,6 +61,9 @@ class ApprovalRequest:
 
 ApprovalHandler = Callable[[ApprovalRequest], Awaitable[bool]]
 QuestionHandler = Callable[[Any], Awaitable[Any]]
+# Answers ``search_chat_history`` from the chat's local transcript.
+HistorySearchHandler = Callable[[dict[str, Any]], Any]
+SEARCH_CHAT_HISTORY_TOOL = "search_chat_history"
 
 _ALIASES = {
     "read": "read_file",
@@ -321,6 +324,8 @@ class LocalToolBroker:
         self._middleware: FilesystemMiddleware[Any, Any] | None = None
         self._native_backend: LocalShellBackend | None = None
         self._native_tools: dict[str, BaseTool] | None = None
+        # Set by the chat graph for the duration of a turn (chat context protocol v1).
+        self.history_search: HistorySearchHandler | None = None
 
     @property
     def _tools(self) -> dict[str, BaseTool]:
@@ -569,6 +574,11 @@ class LocalToolBroker:
         if request.tool_name == "ask_user_question":
             async with self._prompt_lock:
                 return await self.ask_user(request.arguments)
+        if request.tool_name == SEARCH_CHAT_HISTORY_TOOL:
+            # Read-only and local: it searches this chat's own transcript.
+            if self.history_search is None:
+                raise ToolRejected("Chat history search is unavailable in this session.")
+            return self.history_search(dict(request.arguments))
 
         canonical_name = canonical_tool_name(request.tool_name)
         arguments, external = self._normalize_arguments(request, canonical_name)

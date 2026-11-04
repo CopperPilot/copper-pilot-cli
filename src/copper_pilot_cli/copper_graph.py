@@ -22,6 +22,13 @@ v1, see ``turn_journal``):
 * shell commands that moved to the background are reported after the final
   frame, including ones that already exited while the model was still
   working, and their results are fed back in a continuation turn.
+
+It also owns the chat's context (chat context protocol v1, see
+``chat_context``): before a new turn it auto-compacts a chat whose estimated
+size reached ``auto_compact_at`` (never while a turn is unfinished), pins the
+turn's ``session_state`` and compaction cut in the journal so every attempt
+resends them unchanged, answers ``search_chat_history`` from the transcript,
+and stores the context size and any in-turn compaction the server reports.
 """
 
 from __future__ import annotations
@@ -45,6 +52,31 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
+from copper_pilot_cli.chat_context import (
+    COMPACTION_KEY,
+    CONTEXT_COMPACTED_KIND,
+    CONTEXT_USAGE_KIND,
+    SUPERSEDED_KEY,
+    USAGE_KEY,
+    NothingToCompact,
+    auto_compact_threshold,
+    build_session_state,
+    compact_history,
+    compaction_event,
+    compaction_record,
+    compaction_updates,
+    context_cut,
+    context_estimate,
+    parse_context_usage,
+    search_history,
+    should_auto_compact,
+    usage_record,
+)
+from copper_pilot_cli.copper_models import (
+    cached_chat_model_catalog,
+    load_chat_model_catalog,
+    turn_model,
+)
 from copper_pilot_cli.copper_protocol import (
     CAPACITY_WAIT_KIND,
     CAPACITY_WAITING_PHASES,
@@ -160,6 +192,11 @@ class CopperState(TypedDict, total=False):
     # Input only: ``{"reason": "manual" | "app_restart"}`` asks the node to
     # resume the unfinished turn instead of starting a new one.
     copper_resume: dict[str, Any] | None
+    # Chat context protocol v1 (``chat_context``): the current compaction
+    # record, the ones it superseded (audit only) and the last measured size.
+    copper_compaction: dict[str, Any] | None
+    copper_compaction_superseded: list[dict[str, Any]]
+    copper_context_usage: dict[str, Any] | None
 
 
 class CopperGraphRuntime:
@@ -430,6 +467,10 @@ class _TurnRun:
         self.observed = False
         self.manual_resume = False
         self.tos_blocked = False
+        # Chat context protocol v1: the newest ``context_usage`` and any
+        # compaction the server ran inside this turn.
+        self.context_usage: dict[str, Any] | None = None
+        self.compaction: dict[str, Any] | None = None
         self.started = time.monotonic()
         self._last_save = 0.0
 
@@ -464,6 +505,10 @@ class _TurnRun:
     ) -> None:
         """Stream one hosted attempt into the accumulated transcript."""
         payload: dict[str, Any] = {"messages": messages, "turn_id": self.journal.turn_id}
+        if self.journal.session_state is not None:
+            payload["session_state"] = self.journal.session_state
+        if self.journal.context_cut is not None:
+            payload["context_cut"] = self.journal.context_cut
         if resume is not None:
             payload["resume"] = resume
         if continuation:
@@ -592,8 +637,29 @@ class _TurnRun:
             self.text.append(str(event.data))
             self.journal.record_text(str(event.data))
             self.persist()
+        elif event.kind is EventKind.FINAL and isinstance(event.data, dict):
+            usage = parse_context_usage(event.data.get("context_usage"))
+            if usage is not None:
+                self.context_usage = usage
+            if isinstance(event.data.get("compaction"), dict) and self.compaction is None:
+                # Only the final carried it; tell the front-ends once.
+                self.compaction = event.data["compaction"]
+                self.emit(
+                    {
+                        "type": "copper.status_event",
+                        "data": {"kind": CONTEXT_COMPACTED_KIND, "compaction": self.compaction},
+                        "title": None,
+                    }
+                )
         elif event.kind is EventKind.STATUS_EVENT and isinstance(event.data, dict):
-            if event.data.get("kind") == "plan_mode_switch":
+            if event.data.get("kind") == CONTEXT_USAGE_KIND:
+                usage = parse_context_usage(event.data)
+                if usage is not None:
+                    self.context_usage = usage
+            elif event.data.get("kind") == CONTEXT_COMPACTED_KIND:
+                if isinstance(event.data.get("compaction"), dict):
+                    self.compaction = event.data["compaction"]
+            elif event.data.get("kind") == "plan_mode_switch":
                 self.switched_to_plan = True
                 self.agent.mode = CopperMode.PLAN
             else:
@@ -1266,6 +1332,99 @@ def _thread_id(config: RunnableConfig | dict[str, Any] | None) -> str | None:
     return str(value) if value else None
 
 
+def _session_state(agent: Any, values: dict[str, Any]) -> dict[str, Any]:
+    workspace = getattr(agent, "workspace", None)
+    return build_session_state(
+        values,
+        workspace=Path(workspace) if workspace is not None else None,
+        plan_context=getattr(agent, "plan_context", None),
+        policy=cached_chat_model_catalog().context_policy,
+    )
+
+
+async def _auto_compact(agent: Any, run: _TurnRun, values: dict[str, Any]) -> dict[str, Any]:
+    """Compact before a new turn when its estimated size reached ``auto_compact_at``.
+
+    Only called when no turn is unfinished. Returns the checkpoint updates
+    (empty when nothing ran). A failure is logged, shown as a one-line notice,
+    and the turn is sent unchanged.
+    """
+    if not hasattr(agent, "acompact"):
+        return {}
+    estimate = context_estimate(values)
+    if estimate is None:
+        return {}
+    effort, model = getattr(agent, "effort", None), getattr(agent, "model", None)
+    catalog = cached_chat_model_catalog()
+    threshold = auto_compact_threshold(values, catalog, effort, model)
+    credential = getattr(agent, "credential", None)
+    if threshold is None and credential is not None:
+        catalog = await load_chat_model_catalog(credential)
+        threshold = auto_compact_threshold(values, catalog, effort, model)
+    if not should_auto_compact(estimate, threshold, unfinished=False):
+        return {}
+    logger.info("Auto-compacting the chat context (estimate=%s, threshold=%s)", estimate, threshold)
+    run.emit(compaction_event("started", trigger="auto", estimate=estimate, threshold=threshold))
+    workspace = getattr(agent, "workspace", None)
+    # The message about to be sent is the query, not history to summarize.
+    history = {**values, "messages": list(values.get("messages") or [])[:-1]}
+    try:
+        compacted = await compact_history(
+            agent,
+            history,
+            trigger="auto",
+            model=turn_model(catalog, effort, model),
+            workspace=Path(workspace) if workspace is not None else None,
+            policy=catalog.context_policy,
+        )
+    except asyncio.CancelledError:
+        raise
+    except NothingToCompact:
+        run.emit(compaction_event("skipped", trigger="auto", message="Nothing to compact yet."))
+        return {}
+    except Exception as exc:  # noqa: BLE001 - the turn goes ahead uncompacted
+        logger.warning("Auto-compaction failed (%s): %s", type(exc).__name__, exc)
+        run.emit(
+            compaction_event(
+                "failed",
+                trigger="auto",
+                message=f"Could not compact the context ({_clip(str(exc) or type(exc).__name__)}); "
+                "sending the chat unchanged.",
+            )
+        )
+        return {}
+    updates = dict(compacted.updates)
+    # Emitted (and recorded) through the run, so they are not added twice.
+    for event in updates.pop("copper_events", []):
+        run.emit(event)
+    return updates
+
+
+def _context_result(
+    run: _TurnRun,
+    original: list[Any],
+    values: dict[str, Any],
+    compacted: dict[str, Any],
+) -> dict[str, Any]:
+    """Checkpoint updates for the chat's context after a turn."""
+    updates = dict(compacted)
+    if run.context_usage is not None:
+        updates[USAGE_KEY] = usage_record(run.context_usage, measured_at=len(original))
+    if run.compaction is not None:
+        # The server summarized inside the turn: the record covers every
+        # history message sent with it (everything before the query).
+        last = getattr(original[-2], "id", None) if len(original) >= 2 else None
+        record = compaction_record(
+            run.compaction, last_message_id=last or context_cut(values), trigger="in_turn"
+        )
+        if record is not None:
+            updates.update(compaction_updates(values, record))
+    return {key: value for key, value in updates.items() if key in _CONTEXT_KEYS}
+
+
+_CONTEXT_KEYS = frozenset({COMPACTION_KEY, SUPERSEDED_KEY, USAGE_KEY})
+
+
 @asynccontextmanager
 async def create_copper_graph(agent: CopperPilotAgent) -> Any:
     """Compile a one-node, no-local-model graph using dcode's checkpointer."""
@@ -1312,6 +1471,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
             return {"copper_resume": None, "copper_events": [event]}
         reason: str | None = None
         seed_text = ""
+        previous: TurnJournal | None = None
         if journal is not None:
             requested_reason = (requested or {}).get("reason")
             reason = (
@@ -1365,7 +1525,27 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
         run = _TurnRun(agent, writer, original, journal=journal, store=store if thread_id else None)
         if seed_text:
             run.additions.append(AIMessage(content=seed_text))
+        # The chat's context as this turn sees it, with a pre-turn compaction applied.
+        context_values: dict[str, Any] = dict(state)
+        compacted: dict[str, Any] = {}
+        broker = getattr(agent, "tool_broker", None)
+        searchable = broker is not None and hasattr(broker, "history_search")
+        if searchable:
+            broker.history_search = lambda arguments: search_history(
+                [*messages, *run.additions], arguments
+            )
         try:
+            if reason is None:
+                if previous is None:
+                    compacted = await _auto_compact(agent, run, context_values)
+                    context_values.update(compacted)
+                journal.session_state = _session_state(agent, context_values)
+                journal.context_cut = context_cut(context_values)
+            elif journal.session_state is None:
+                # A journal from before chat context v1: pin a snapshot now so
+                # every later attempt sends the same one. Its cut stays unset,
+                # like the original attempt that sent the whole history.
+                journal.session_state = _session_state(agent, context_values)
             completed = await run.run_with_retry(
                 journal.query, first_messages=original, resume_reason=reason
             )
@@ -1377,11 +1557,15 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
             run.mark_interrupted()
             raise
         finally:
+            if searchable:
+                broker.history_search = None
             if run.failure is not None or run.cancelled:
                 manager = _background_manager(agent)
                 if manager is not None:
                     await manager.kill_all()
-        return run.result()
+        result = run.result()
+        result.update(_context_result(run, original, context_values, compacted))
+        return result
 
     graph = StateGraph(CopperState)  # ty: ignore[invalid-argument-type]
     graph.add_node("copper_pilot", hosted_node)
