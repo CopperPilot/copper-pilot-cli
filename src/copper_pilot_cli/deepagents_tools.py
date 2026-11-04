@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import mimetypes
 import re
 import shlex
@@ -22,7 +23,7 @@ from copper_pilot_cli.copper_background import (
     shell_environment,
 )
 from copper_pilot_cli.copper_config import app_home
-from copper_pilot_cli.copper_protocol import ToolRequest
+from copper_pilot_cli.copper_protocol import MAX_TOOL_RESULT_BYTES, ToolRequest
 from copper_pilot_cli.shell_scope import classify_outside_workspace
 
 if TYPE_CHECKING:
@@ -31,6 +32,23 @@ if TYPE_CHECKING:
     from deepagents.middleware.filesystem import FilesystemMiddleware
     from langchain.tools import ToolRuntime
     from langchain_core.tools import BaseTool
+
+
+# Server-internal KiCad bootstrap reads want the whole file, raw (no status
+# header, no 100-line window), as the desktop harness returns it.
+RAW_KICAD_READ_PURPOSES = frozenset(
+    {
+        "kicad_workspace_schematic",
+        "kicad_workspace_pcb",
+        "kicad_workspace_symbol_library",
+        "kicad_workspace_footprint",
+    }
+)
+# Files outside the workspace the hosted agent may read (never write): KiCad
+# symbol / footprint libraries and 3D models, e.g. the stock libraries.
+EXTERNAL_KICAD_LIBRARY_SUFFIXES = frozenset({".kicad_sym", ".kicad_mod", ".step", ".stp", ".wrl"})
+# Headroom under the frame limit for the frame envelope and JSON escaping.
+_DIRECT_READ_MAX_BYTES = MAX_TOOL_RESULT_BYTES - 64 * 1024
 
 
 class ApprovalMode(StrEnum):
@@ -430,6 +448,8 @@ class LocalToolBroker:
         external: bool = False,
     ) -> None:
         if external:
+            if self._is_external_kicad_library_read(request, canonical_name):
+                return
             raise ToolRejected("Paths outside the workspace are not available.")
         if canonical_name == "execute":
             scope = outside_workspace_reason(request.arguments.get("command"), self.workspace)
@@ -585,7 +605,14 @@ class LocalToolBroker:
         await self._authorized(request, canonical_name, external=external)
 
         if canonical_name == "read_binary_file":
-            return await self._read_binary(arguments["file_path"])
+            return await self._read_binary(arguments["file_path"], external=external)
+        if canonical_name == "read_file" and (
+            external or request.arguments.get("purpose") in RAW_KICAD_READ_PURPOSES
+        ):
+            direct = self._read_text_direct(self._disk_path(arguments["file_path"], external))
+            if direct is not None:
+                return direct
+            # Too big for one frame: the native read pages it, with a status header.
         if canonical_name == "write_binary_file":
             return await self._write_binary(arguments)
         if canonical_name == "execute":
@@ -618,23 +645,58 @@ class LocalToolBroker:
             description=str(arguments.get("description") or ""),
         )
 
-    async def _read_binary(self, file_path: str) -> dict[str, Any]:
-        assert self._backend is not None
-        result = await self._backend.aread(file_path)
-        if result.error:
-            return {"error": result.error}
-        if result.file_data is None:
-            return {"error": f"No data returned for {file_path}"}
-        content = result.file_data["content"]
-        encoding = result.file_data.get("encoding", "utf-8")
-        if encoding != "base64":
-            content = base64.b64encode(content.encode()).decode()
+    @staticmethod
+    def _is_external_kicad_library_read(request: ToolRequest, canonical_name: str) -> bool:
+        """Only flagged, read-only requests for KiCad library files leave the workspace."""
+        if canonical_name not in {"read_file", "read_binary_file"}:
+            return False
+        if request.arguments.get("external") is not True:
+            return False
+        suffix = PurePosixPath(str(request.arguments.get("file_path") or "")).suffix.lower()
+        return suffix in EXTERNAL_KICAD_LIBRARY_SUFFIXES
+
+    def _disk_path(self, file_path: str, external: bool) -> Path:
+        """Map a normalized path (absolute when external, else "/rel") to disk."""
+        if external:
+            return Path(file_path)
+        return self.workspace / file_path.lstrip("/")
+
+    @staticmethod
+    def _read_text_direct(path: Path) -> dict[str, Any] | None:
+        """The whole file as raw text, or None when it would not fit one frame."""
+        try:
+            if path.stat().st_size > _DIRECT_READ_MAX_BYTES:
+                return None
+            text = path.read_bytes().decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            return {"error": f"Error: File '{path}' not found"}
+        except OSError as exc:
+            return {"error": f"Error reading {path}: {exc}"}
+        if len(json.dumps(text)) > _DIRECT_READ_MAX_BYTES:
+            return None
+        return {"result": text}
+
+    async def _read_binary(self, file_path: str, *, external: bool = False) -> dict[str, Any]:
+        # Read bytes from disk: the native read is a text window (2000 lines by
+        # default), which silently cut text files and mangled unknown binaries.
+        path = self._disk_path(file_path, external)
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return {"error": f"Error: File '{file_path}' not found"}
+        except OSError as exc:
+            return {"error": f"Error reading {file_path}: {exc}"}
+        if (len(data) + 2) // 3 * 4 > _DIRECT_READ_MAX_BYTES:
+            return {
+                "error": f"{file_path} is too large to send ({len(data)} bytes; "
+                f"limit is about {_DIRECT_READ_MAX_BYTES * 3 // 4} bytes)."
+            }
         mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         return {
-            "result": f"data:{mime_type};base64,{content}",
+            "result": f"data:{mime_type};base64,{base64.b64encode(data).decode()}",
             "encoding": "base64",
             "mime_type": mime_type,
-            "byte_length": len(base64.b64decode(content)),
+            "byte_length": len(data),
         }
 
     async def _write_binary(self, arguments: dict[str, Any]) -> dict[str, Any]:
