@@ -68,6 +68,7 @@ from copper_pilot_cli.chat_context import (
     compaction_updates,
     context_cut,
     context_estimate,
+    estimate_tokens,
     has_facts,
     journal_facts,
     merge_facts,
@@ -477,11 +478,10 @@ class _TurnRun:
         # Chat context protocol v1: the newest ``context_usage`` and any
         # compaction the server ran inside this turn.
         self.context_usage: dict[str, Any] | None = None
-        # Where the measurement sits: whether a final carried it, and how much
-        # assistant text had streamed by then (later text is new context).
+        # Where the measurement sits: whether a final carried it, and the
+        # assistant text streamed after it (new context for the next turn).
         self.usage_final = False
-        self.usage_text_chars = 0
-        self.text_chars = 0
+        self.text_since_usage: list[str] = []
         # Messages in the checkpoint when the node started (for a resume, more
         # than ``original``: the "continue" messages sent since).
         self.state_len = len(original)
@@ -650,7 +650,7 @@ class _TurnRun:
     def _track(self, event: CopperEvent) -> None:
         if event.kind is EventKind.TEXT:
             self.text.append(str(event.data))
-            self.text_chars += len(str(event.data))
+            self.text_since_usage.append(str(event.data))
             self.journal.record_text(str(event.data))
             self.persist()
         elif event.kind is EventKind.FINAL and isinstance(event.data, dict):
@@ -724,7 +724,7 @@ class _TurnRun:
     def _note_usage(self, usage: dict[str, Any], *, final: bool = False) -> None:
         self.context_usage = usage
         self.usage_final = final
-        self.usage_text_chars = self.text_chars
+        self.text_since_usage = []
         # Journaled for an interrupted turn, whose messages never reach the
         # checkpoint: the next turn's estimate counts only what comes after
         # the messages that were there when this turn started.
@@ -1456,7 +1456,7 @@ def _context_result(
         updates[USAGE_KEY] = usage_record(
             run.context_usage,
             measured_at=run.state_len + len(run.additions),
-            pending_chars=0 if run.usage_final else run.text_chars - run.usage_text_chars,
+            pending_tokens=0 if run.usage_final else estimate_tokens("".join(run.text_since_usage)),
         )
     if run.compaction is not None:
         # The server summarized inside the turn: the record covers every

@@ -87,6 +87,11 @@ SEARCH_SNIPPET_CHARS = 600
 DEFAULT_SEARCH_RESULTS = 10
 MAX_SEARCH_RESULTS = 20
 
+# Inline images (a visualizer's <img src="data:image/png;base64,...">): a fixed
+# per-image cost in estimates, and never raw base64 in compaction or search.
+IMAGE_TOKENS = 1600
+IMAGE_PLACEHOLDER = "[image]"
+_DATA_IMAGE = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+")
 _PLAN_PATH = re.compile(r"(?:^|[\\/])\.copperpilot[\\/]plans[\\/][^\\/]+\.plan\.md$", re.IGNORECASE)
 _PLAN_WRITERS = frozenset({"write_file", "edit_file", "write", "edit"})
 _PATH_KEYS = ("file_path", "path")
@@ -120,9 +125,22 @@ class CompactionResult:
 # --------------------------------------------------------------------- tokens
 
 
+def strip_images(text: str) -> str:
+    """Replace inline ``data:image/...;base64,...`` URIs with ``[image]``."""
+    return _DATA_IMAGE.sub(IMAGE_PLACEHOLDER, text) if "data:image/" in text else text
+
+
 def estimate_tokens(text: str) -> int:
-    """The protocol's estimate: ``ceil(chars / 4)``."""
-    return math.ceil(len(text) / 4) if text else 0
+    """The protocol's estimate: ``ceil(chars / 4)``, each inline image a fixed cost.
+
+    The model gets an inline base64 image as an image block, not as text, so
+    its characters (often hundreds of KB) would overstate it ~50x.
+    """
+    if not text:
+        return 0
+    images = len(_DATA_IMAGE.findall(text)) if "data:image/" in text else 0
+    rest = _DATA_IMAGE.sub("", text) if images else text
+    return math.ceil(len(rest) / 4) + images * IMAGE_TOKENS
 
 
 def format_tokens(value: int | float | None) -> str:
@@ -200,17 +218,17 @@ def parse_context_usage(value: Any) -> dict[str, Any] | None:
 
 
 def usage_record(
-    usage: dict[str, Any], *, measured_at: int, source: str = "turn", pending_chars: int = 0
+    usage: dict[str, Any], *, measured_at: int, source: str = "turn", pending_tokens: int = 0
 ) -> dict[str, Any]:
     """The stored measurement.
 
-    ``measured_at`` is the message count it already covers; ``pending_chars``
-    is assistant text inside those messages that came after a mid-turn
+    ``measured_at`` is the message count it already covers; ``pending_tokens``
+    estimates assistant text inside those messages that came after a mid-turn
     measurement, so it is not in the measured size yet.
     """
     record = {**usage, "measured_at": measured_at, "source": source, "recorded_at": time.time()}
-    if pending_chars > 0:
-        record["pending_chars"] = pending_chars
+    if pending_tokens > 0:
+        record["pending_tokens"] = pending_tokens
     return record
 
 
@@ -256,7 +274,7 @@ def context_estimate(values: dict[str, Any] | None) -> int | None:
     # would cost without the turn's tool results, a better base than the size
     # of the turn's last model call.
     base = _int(usage.get("next_turn_tokens")) or int(usage["context_tokens"])
-    pending = math.ceil((_int(usage.get("pending_chars")) or 0) / 4)
+    pending = _int(usage.get("pending_tokens")) or 0
     return base + pending + added
 
 
@@ -477,7 +495,9 @@ def tool_digest(call: dict[str, Any], result: Any) -> dict[str, Any]:
         "status": _tool_status(result),
     }
     if result is not None:
-        excerpt, _clipped = _clip_bytes(_text(result.content), MAX_DIGEST_EXCERPT_BYTES)
+        excerpt, _clipped = _clip_bytes(
+            strip_images(_text(result.content)), MAX_DIGEST_EXCERPT_BYTES
+        )
         if excerpt:
             digest["excerpt"] = excerpt
     return digest
@@ -512,7 +532,9 @@ def compaction_context(messages: Sequence[Any]) -> tuple[list[dict[str, Any]], l
         kind = getattr(message, "type", None)
         if kind == "human":
             flush()
-            content, _ = _clip_bytes(_text(message.content), MAX_CONTEXT_MESSAGE_BYTES)
+            content, _ = _clip_bytes(
+                strip_images(_text(message.content)), MAX_CONTEXT_MESSAGE_BYTES
+            )
             entries.append({"role": "user", "content": content})
             ids.append(getattr(message, "id", None))
         elif kind == "ai":
@@ -522,7 +544,7 @@ def compaction_context(messages: Sequence[Any]) -> tuple[list[dict[str, Any]], l
             text = _assistant_text(message)
             if not text.strip():
                 continue
-            content, _ = _clip_bytes(text, MAX_CONTEXT_MESSAGE_BYTES)
+            content, _ = _clip_bytes(strip_images(text), MAX_CONTEXT_MESSAGE_BYTES)
             entry: dict[str, Any] = {"role": "assistant", "content": content}
             if pending:
                 entry["tool_digest"] = pending[-MAX_TOOL_DIGESTS:]
@@ -545,11 +567,13 @@ def interrupted_entry(journal: Any) -> dict[str, Any] | None:
             "args": _short_args(event.get("arguments") or {}),
             "status": status,
         }
-        excerpt = _clip_bytes(str(event.get("result") or ""), MAX_DIGEST_EXCERPT_BYTES)[0]
+        excerpt = _clip_bytes(
+            strip_images(str(event.get("result") or "")), MAX_DIGEST_EXCERPT_BYTES
+        )[0]
         if excerpt:
             digest["excerpt"] = excerpt
         digests.append(digest)
-    text = str(getattr(journal, "assistant_text", "") or "").strip()
+    text = strip_images(str(getattr(journal, "assistant_text", "") or "")).strip()
     if not text and not digests:
         return None
     entry: dict[str, Any] = {
@@ -837,7 +861,9 @@ def earlier_user_messages(
         message = messages[index]
         if getattr(message, "type", None) != "human":
             continue
-        text, truncated = _clip_bytes(_text(message.content), MAX_EARLIER_MESSAGE_BYTES)
+        text, truncated = _clip_bytes(
+            strip_images(_text(message.content)), MAX_EARLIER_MESSAGE_BYTES
+        )
         size = len(text.encode())
         if size > budget:
             if budget < 64:
@@ -937,7 +963,10 @@ async def compact_history(
     history_len = len(entries)
     if pending_query:
         entries.append(
-            {"role": "user", "content": _clip_bytes(pending_query, MAX_CONTEXT_MESSAGE_BYTES)[0]}
+            {
+                "role": "user",
+                "content": _clip_bytes(strip_images(pending_query), MAX_CONTEXT_MESSAGE_BYTES)[0],
+            }
         )
     effort = getattr(agent, "effort", None)
     payload: dict[str, Any] = {
@@ -1110,7 +1139,7 @@ def search_history(messages: Sequence[Any], arguments: dict[str, Any]) -> dict[s
             role = {"human": "user", "ai": "assistant", "tool": "tool"}.get(str(kind))
             if role is None:
                 continue
-            text = _search_text(message)
+            text = strip_images(_search_text(message))
             folded = text.casefold()
             if not all(term in folded for term in terms):
                 continue
@@ -1161,6 +1190,7 @@ __all__ = [
     "describe_context",
     "earlier_user_messages",
     "estimate_tokens",
+    "strip_images",
     "format_tokens",
     "has_facts",
     "journal_facts",

@@ -1181,3 +1181,65 @@ async def test_estimate_after_a_live_measurement_adds_later_assistant_text(
     assert values["copper_turn_journal"] is not None  # ended unfinished, but returned
     # Only the 400 chars streamed after the measurement are new (100 tokens).
     assert context_estimate(with_message(values, "z" * 28)) == 1_000 + 100 + 7
+
+
+# -------------------------------------------------------------- inline images
+
+PNG = "data:image/png;base64," + "iVBORw0KGgo" * 30_000
+
+
+def test_inline_images_cost_a_fixed_amount_and_never_travel_as_base64() -> None:
+    from copper_pilot_cli.chat_context import IMAGE_TOKENS, estimate_tokens, strip_images
+
+    answer = f'Schematic:\n<img src="{PNG}">\nDone.'
+    assert estimate_tokens(answer) == IMAGE_TOKENS + estimate_tokens(
+        'Schematic:\n<img src="">\nDone.'
+    )
+    assert strip_images(answer) == 'Schematic:\n<img src="[image]">\nDone.'
+    messages = [
+        HumanMessage(content=f"Look at this {PNG}", id="h1"),
+        AIMessage(
+            content=answer,
+            id="a1",
+            tool_calls=[{"id": "v1", "name": "visualize", "args": {}, "type": "tool_call"}],
+        ),
+        ToolMessage(content=f"rendered {PNG}", tool_call_id="v1", name="visualize"),
+        HumanMessage(content="Schematic is fine", id="h2"),
+    ]
+    entries, _ids = compaction_context(messages)
+    dumped = json.dumps(entries)
+    assert "base64" not in dumped and "[image]" in dumped
+    assert entries[1]["tool_digest"][0]["excerpt"] == "rendered [image]"
+    earlier = earlier_user_messages(messages, "a1")
+    assert earlier == [{"index": 0, "text": "Look at this [image]"}]
+    results = search_history(messages, {"query": "schematic"})["results"]
+    assert results and all("base64" not in item["snippet"] for item in results)
+    assert search_history(messages, {"query": "iVBORw0KGgo"})["results"] == []
+    values = {
+        "messages": [*messages, HumanMessage(content="z" * 28)],
+        USAGE_KEY: {"context_tokens": 5_000, "measured_at": 4},
+    }
+    assert context_estimate(values) == 5_007
+
+
+@pytest.mark.asyncio
+async def test_live_measurement_counts_a_later_image_at_the_fixed_cost(
+    graph_env, monkeypatch
+) -> None:
+    from copper_pilot_cli.chat_context import IMAGE_TOKENS
+
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 0)
+    agent = GraphAgent(
+        [
+            [
+                CopperEvent(EventKind.STATUS_EVENT, {"kind": "context_usage", **usage(1_000)}),
+                CopperEvent(EventKind.TEXT, f'<img src="{PNG[:200_000]}'),
+                CopperEvent(EventKind.TEXT, f'{PNG[200_000:]}">'),
+                DROP,
+            ]
+        ],
+        workspace=graph_env,
+    )
+    _events, values = await turn(agent, graph_env, say("Show the schematic"))
+    pending = values[USAGE_KEY]["pending_tokens"]
+    assert pending == IMAGE_TOKENS + 3  # '<img src="">' is 12 chars
