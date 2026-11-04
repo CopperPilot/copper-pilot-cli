@@ -53,6 +53,12 @@ SESSION_STATE_VERSION = 1
 COMPACTION_KEY = "copper_compaction"
 SUPERSEDED_KEY = "copper_compaction_superseded"
 USAGE_KEY = "copper_context_usage"
+# Facts from turns that were interrupted (Ctrl-C, SIGINT, a killed process).
+# Such a turn never returns from the graph node, so its messages and events
+# never reach the checkpoint; only its turn journal survives. The next turn
+# lifts the facts out of that journal (``journal_facts``), carries them in
+# its own journal until it completes, then stores them under this key.
+FACTS_KEY = "copper_interrupted_facts"
 # Graph event for compaction progress (``data.stage``: started, completed,
 # failed). Manual compactions append a ``completed`` one to ``copper_events``
 # so a reopened chat shows where it was compacted.
@@ -200,11 +206,27 @@ def usage_record(
     return {**usage, "measured_at": measured_at, "source": source, "recorded_at": time.time()}
 
 
-def stored_usage(values: dict[str, Any] | None) -> dict[str, Any] | None:
-    usage = (values or {}).get(USAGE_KEY)
+def _valid_usage(usage: Any) -> dict[str, Any] | None:
     return (
         usage if isinstance(usage, dict) and _int(usage.get("context_tokens")) is not None else None
     )
+
+
+def stored_usage(values: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The newest measurement: the checkpoint's, or an interrupted turn's if later."""
+    values = values or {}
+    usage = _valid_usage(values.get(USAGE_KEY))
+    facts = values.get(FACTS_KEY)
+    later = _valid_usage(facts.get("context_usage")) if isinstance(facts, dict) else None
+    if later is not None and (
+        usage is None or _ts(later.get("recorded_at")) > _ts(usage.get("recorded_at"))
+    ):
+        return later
+    return usage
+
+
+def _ts(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
 def context_estimate(values: dict[str, Any] | None) -> int | None:
@@ -507,11 +529,11 @@ def history_context(messages: Sequence[Any]) -> list[dict[str, str]]:
 # ------------------------------------------------------------- session state
 
 
-def ask_answers(messages: Sequence[Any]) -> list[dict[str, str]]:
-    """Every answered or skipped ``ask_user_question``, oldest first, up to 50."""
+def _indexed_answers(messages: Sequence[Any]) -> list[tuple[int, str, dict[str, str]]]:
+    """``(transcript index, id, answer)`` for every question in the checkpoint messages."""
     calls: dict[str, dict[str, Any]] = {}
-    answers: list[dict[str, str]] = []
-    for message in messages:
+    answers: list[tuple[int, str, dict[str, str]]] = []
+    for index, message in enumerate(messages):
         if isinstance(message, AIMessage):
             for call in message.tool_calls or []:
                 if call.get("name") == ASK_TOOL and call.get("id"):
@@ -521,14 +543,35 @@ def ask_answers(messages: Sequence[Any]) -> list[dict[str, str]]:
             call_id = str(message.tool_call_id or "")
             if call_id not in calls and message.name != ASK_TOOL:
                 continue
-            answers.extend(_answers_from(calls.get(call_id, {}), message))
-    return answers[-MAX_ASK_ANSWERS:]
+            content = message.content if isinstance(message.content, str) else None
+            for row, answer in enumerate(_answers_from(calls.get(call_id, {}), content)):
+                answers.append((index, f"{call_id}#{row}", answer))
+    return answers
 
 
-def _answers_from(arguments: dict[str, Any], message: ToolMessage) -> list[dict[str, str]]:
+def ask_answers(
+    messages: Sequence[Any], facts: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
+    """Every answered or skipped ``ask_user_question``, oldest first, up to 50.
+
+    Questions of interrupted turns come from ``facts`` (see ``journal_facts``)
+    and are placed at their turn's position in the transcript.
+    """
+    rows = _indexed_answers(messages)
+    seen = {identifier for _index, identifier, _answer in rows}
+    for item in (facts or {}).get("ask_answers") or []:
+        if not isinstance(item, dict) or item.get("id") in seen:
+            continue
+        answer = {key: str(item.get(key) or "") for key in ("question", "answer", "status")}
+        rows.append((_int(item.get("at")) or 0, str(item.get("id")), answer))
+    rows.sort(key=lambda row: row[0])
+    return [answer for _index, _identifier, answer in rows][-MAX_ASK_ANSWERS:]
+
+
+def _answers_from(arguments: dict[str, Any], content: str | None) -> list[dict[str, str]]:
     question = str(arguments.get("question") or arguments.get("prompt") or "").strip()
     try:
-        result = json.loads(message.content) if isinstance(message.content, str) else None
+        result = json.loads(content) if content else None
     except (json.JSONDecodeError, TypeError):
         result = None
     if not isinstance(result, dict):
@@ -564,40 +607,120 @@ def _answer(question: str, answer: str, status: str) -> dict[str, str]:
     }
 
 
-def latest_todos(events: Sequence[Any]) -> dict[str, Any] | None:
-    """The latest hosted ``todo_list`` (from ``copper_events``), else ``None``."""
+def todo_items(payload: Any) -> dict[str, Any]:
+    """``{"items": [...]}`` from a hosted ``todo_list`` status event."""
+    items = []
+    for item in (payload or {}).get("items") or [] if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            status = _TODO_STATUSES.get(str(item.get("status") or "").lower(), "pending")
+            items.append({"content": content, "status": status})
+    return {"items": items[:MAX_TODOS]}
+
+
+def latest_todos(
+    events: Sequence[Any], facts: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """The latest hosted ``todo_list``: from ``copper_events`` or an interrupted turn."""
+    latest: dict[str, Any] | None = None
+    stamp = 0.0
     for event in reversed(events):
         if not isinstance(event, dict) or event.get("type") != "copper.status_event":
             continue
         data = event.get("data")
         if not isinstance(data, dict) or data.get("kind") != "todo_list":
             continue
-        items = []
-        for item in data.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content") or "").strip()
-            if content:
-                status = _TODO_STATUSES.get(str(item.get("status") or "").lower(), "pending")
-                items.append({"content": content, "status": status})
-        return {"items": items[:MAX_TODOS]}
-    return None
+        latest, stamp = todo_items(data), _ts(event.get("ts"))
+        break
+    interrupted = (facts or {}).get("todos")
+    if isinstance(interrupted, dict) and (latest is None or _ts(interrupted.get("ts")) > stamp):
+        return {"items": list(interrupted.get("items") or [])[:MAX_TODOS]}
+    return latest
 
 
-def _plan_paths(messages: Sequence[Any]) -> list[str]:
+def _plan_paths(messages: Sequence[Any], facts: dict[str, Any] | None = None) -> list[str]:
     """Plan files this chat touched, newest first: writes before mere references."""
-    written: list[str] = []
-    referenced: list[str] = []
-    for message in reversed(messages):
+    found: list[tuple[bool, int, str]] = []
+    for index, message in enumerate(messages):
         for call in getattr(message, "tool_calls", None) or []:
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
             path = next((str(args[key]) for key in _PATH_KEYS if args.get(key)), "")
-            if not path or not _PLAN_PATH.search(path):
-                continue
-            target = written if call.get("name") in _PLAN_WRITERS else referenced
-            if path not in target:
-                target.append(path)
-    return [*written, *(path for path in referenced if path not in written)]
+            if path and _PLAN_PATH.search(path):
+                found.append((call.get("name") in _PLAN_WRITERS, index, path))
+    for item in (facts or {}).get("plan_writes") or []:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            found.append((True, _int(item.get("at")) or 0, item["path"]))
+    found.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    paths: list[str] = []
+    for _write, _index, path in found:
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def journal_facts(journal: Any) -> dict[str, Any]:
+    """What an interrupted turn's journal knows that the checkpoint never got.
+
+    Its question answers (rejected, unanswered or interrupted ones count as
+    skipped), the plan files it wrote, its latest todo list and context size,
+    plus whatever it carried from earlier interrupted turns.
+    """
+    at = max(int(getattr(journal, "original_len", 1) or 1) - 1, 0)
+    own: dict[str, Any] = {"ask_answers": [], "plan_writes": []}
+    for event in getattr(journal, "tool_events", None) or []:
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("tool_name") or "")
+        arguments = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+        call_id = str(event.get("tool_call_id") or "")
+        if name == ASK_TOOL:
+            content = event.get("result") if event.get("status") == "completed" else None
+            for row, answer in enumerate(_answers_from(arguments, content)):
+                own["ask_answers"].append({**answer, "id": f"{call_id}#{row}", "at": at})
+        elif name in _PLAN_WRITERS and event.get("status") == "completed":
+            path = next((str(arguments[key]) for key in _PATH_KEYS if arguments.get(key)), "")
+            if path and _PLAN_PATH.search(path):
+                own["plan_writes"].append({"path": path, "at": at})
+    todos = getattr(journal, "todos", None)
+    if isinstance(todos, dict):
+        own["todos"] = todos
+    usage = _valid_usage(getattr(journal, "context_usage", None))
+    if usage is not None:
+        own["context_usage"] = usage
+    carried = getattr(journal, "carried", None)
+    return merge_facts(carried if isinstance(carried, dict) else None, own)
+
+
+def merge_facts(*parts: dict[str, Any] | None) -> dict[str, Any]:
+    """Combine interrupted-turn facts; later parts win for todos and context size."""
+    merged: dict[str, Any] = {"ask_answers": [], "plan_writes": []}
+    ids: set[str] = set()
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        for item in part.get("ask_answers") or []:
+            if isinstance(item, dict) and item.get("id") not in ids:
+                ids.add(str(item.get("id")))
+                merged["ask_answers"].append(item)
+        for item in part.get("plan_writes") or []:
+            if isinstance(item, dict) and item not in merged["plan_writes"]:
+                merged["plan_writes"].append(item)
+        for key, stamp in (("todos", "ts"), ("context_usage", "recorded_at")):
+            value = part.get(key)
+            current = merged.get(key)
+            if isinstance(value, dict) and (
+                current is None or _ts(value.get(stamp)) >= _ts(current.get(stamp))
+            ):
+                merged[key] = value
+    merged["ask_answers"] = merged["ask_answers"][-MAX_ASK_ANSWERS:]
+    merged["plan_writes"] = merged["plan_writes"][-MAX_ASK_ANSWERS:]
+    return merged
+
+
+def has_facts(facts: dict[str, Any] | None) -> bool:
+    return isinstance(facts, dict) and any(facts.get(key) for key in facts)
 
 
 def _plan_file(path: str, workspace: Path) -> Path:
@@ -612,7 +735,10 @@ def _plan_file(path: str, workspace: Path) -> Path:
 
 
 def plan_state(
-    messages: Sequence[Any], workspace: Path | None, plan_context: PlanContext | None = None
+    messages: Sequence[Any],
+    workspace: Path | None,
+    plan_context: PlanContext | None = None,
+    facts: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The plan the chat is working on: a ``/build`` plan, else the latest plan file written."""
     plan: PlanContext | None = plan_context
@@ -620,7 +746,7 @@ def plan_state(
         from copper_pilot_cli.copper_features import parse_plan
 
         root = workspace.resolve()
-        for path in _plan_paths(messages):
+        for path in _plan_paths(messages, facts):
             try:
                 plan = parse_plan(_plan_file(path, root), root)
             except (OSError, ValueError, UnicodeDecodeError) as exc:
@@ -709,13 +835,14 @@ def build_session_state(
         )
         if earlier:
             state["earlier_user_messages"] = earlier
-    answers = ask_answers(messages)
+    facts = values.get(FACTS_KEY) if isinstance(values.get(FACTS_KEY), dict) else None
+    answers = ask_answers(messages, facts)
     if answers:
         state["ask_answers"] = answers
-    todos = latest_todos(list(values.get("copper_events") or []))
+    todos = latest_todos(list(values.get("copper_events") or []), facts)
     if todos is not None:
         state["todos"] = todos
-    plan = plan_state(messages, workspace, plan_context)
+    plan = plan_state(messages, workspace, plan_context, facts)
     if plan is not None:
         state["plan"] = plan
     return state
@@ -943,6 +1070,7 @@ def search_history(messages: Sequence[Any], arguments: dict[str, Any]) -> dict[s
 __all__ = [
     "COMPACTION_EVENT",
     "COMPACTION_KEY",
+    "FACTS_KEY",
     "CONTEXT_COMPACTED_KIND",
     "CONTEXT_USAGE_KIND",
     "CompactionFailed",
@@ -969,9 +1097,12 @@ __all__ = [
     "earlier_user_messages",
     "estimate_tokens",
     "format_tokens",
+    "has_facts",
+    "journal_facts",
     "latest_todos",
     "meter_level",
     "meter_text",
+    "merge_facts",
     "parse_context_usage",
     "plan_state",
     "search_history",

@@ -182,6 +182,12 @@ class TurnJournal:
     # ``context`` (the compaction cut). Every attempt resends both unchanged.
     session_state: dict[str, Any] | None = None
     context_cut: str | None = None
+    # What an interrupted turn knows that never reaches the checkpoint (the
+    # node never returns): its latest todo list and context size, and facts
+    # carried from earlier interrupted turns (see ``chat_context.journal_facts``).
+    todos: dict[str, Any] | None = None
+    context_usage: dict[str, Any] | None = None
+    carried: dict[str, Any] | None = None
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     version: int = JOURNAL_VERSION

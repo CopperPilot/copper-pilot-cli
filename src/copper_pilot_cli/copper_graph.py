@@ -56,6 +56,7 @@ from copper_pilot_cli.chat_context import (
     COMPACTION_KEY,
     CONTEXT_COMPACTED_KIND,
     CONTEXT_USAGE_KIND,
+    FACTS_KEY,
     SUPERSEDED_KEY,
     USAGE_KEY,
     NothingToCompact,
@@ -67,9 +68,13 @@ from copper_pilot_cli.chat_context import (
     compaction_updates,
     context_cut,
     context_estimate,
+    has_facts,
+    journal_facts,
+    merge_facts,
     parse_context_usage,
     search_history,
     should_auto_compact,
+    todo_items,
     usage_record,
 )
 from copper_pilot_cli.copper_models import (
@@ -197,6 +202,8 @@ class CopperState(TypedDict, total=False):
     copper_compaction: dict[str, Any] | None
     copper_compaction_superseded: list[dict[str, Any]]
     copper_context_usage: dict[str, Any] | None
+    # Facts of interrupted turns, which never reach ``messages``/``copper_events``.
+    copper_interrupted_facts: dict[str, Any] | None
 
 
 class CopperGraphRuntime:
@@ -640,7 +647,7 @@ class _TurnRun:
         elif event.kind is EventKind.FINAL and isinstance(event.data, dict):
             usage = parse_context_usage(event.data.get("context_usage"))
             if usage is not None:
-                self.context_usage = usage
+                self._note_usage(usage)
             if isinstance(event.data.get("compaction"), dict) and self.compaction is None:
                 # Only the final carried it; tell the front-ends once.
                 self.compaction = event.data["compaction"]
@@ -655,7 +662,11 @@ class _TurnRun:
             if event.data.get("kind") == CONTEXT_USAGE_KIND:
                 usage = parse_context_usage(event.data)
                 if usage is not None:
-                    self.context_usage = usage
+                    self._note_usage(usage)
+            elif event.data.get("kind") == "todo_list":
+                # Journaled: an interrupted turn's events never reach the checkpoint.
+                self.journal.todos = {**todo_items(event.data), "ts": time.time()}
+                self.persist()
             elif event.data.get("kind") == CONTEXT_COMPACTED_KIND:
                 if isinstance(event.data.get("compaction"), dict):
                     self.compaction = event.data["compaction"]
@@ -700,6 +711,11 @@ class _TurnRun:
                 payload["tool_call_id"], payload["tool_name"], payload["result"]
             )
             self.persist(force=True)
+
+    def _note_usage(self, usage: dict[str, Any]) -> None:
+        self.context_usage = usage
+        self.journal.context_usage = usage_record(usage, measured_at=self.journal.original_len)
+        self.persist()
 
     def settle_pending_tools(self, reason: str) -> None:
         for tool_id, tool_name in self.pending_tools.items():
@@ -1539,6 +1555,11 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 if previous is None:
                     compacted = await _auto_compact(agent, run, context_values)
                     context_values.update(compacted)
+                else:
+                    # The previous turn was interrupted: its answers, todos,
+                    # plan writes and context size survive only in its journal.
+                    journal.carried = journal_facts(previous)
+                    context_values[FACTS_KEY] = merge_facts(state.get(FACTS_KEY), journal.carried)
                 journal.session_state = _session_state(agent, context_values)
                 journal.context_cut = context_cut(context_values)
             elif journal.session_state is None:
@@ -1565,6 +1586,8 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                     await manager.kill_all()
         result = run.result()
         result.update(_context_result(run, original, context_values, compacted))
+        if has_facts(journal.carried):
+            result[FACTS_KEY] = merge_facts(state.get(FACTS_KEY), journal.carried)
         return result
 
     graph = StateGraph(CopperState)  # ty: ignore[invalid-argument-type]

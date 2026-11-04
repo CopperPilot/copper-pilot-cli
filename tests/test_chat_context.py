@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +15,7 @@ from copper_pilot_cli import copper_graph, copper_models
 from copper_pilot_cli.chat_context import (
     COMPACTION_EVENT,
     COMPACTION_KEY,
+    FACTS_KEY,
     SUPERSEDED_KEY,
     USAGE_KEY,
     NothingToCompact,
@@ -590,10 +592,15 @@ class GraphAgent:
     plan_context: Any = None
     payloads: list[dict[str, Any]] = field(default_factory=list)
     compact_requests: list[dict[str, Any]] = field(default_factory=list)
+    hanging: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def astream_events_raw(self, value):
         self.payloads.append(dict(value))
         for item in self.attempts.pop(0):
+            if item is HANG:
+                # Wait like a long hosted turn until the test interrupts it.
+                self.hanging.set()
+                await asyncio.Event().wait()
             if isinstance(item, BaseException):
                 raise item
             if callable(item):
@@ -615,6 +622,7 @@ class GraphAgent:
         self.cancel_requested = True
 
 
+HANG = object()
 DROP = ProtocolError("dropped", code="STREAM_ENDED_WITHOUT_FINAL", retryable=True)
 
 
@@ -839,3 +847,158 @@ async def test_in_turn_compaction_from_the_final_covers_the_sent_history(graph_e
         "Second.",
     ]
     assert payload["session_state"]["compaction"]["trigger"] == "in_turn"
+
+
+# --------------------------------------------------------- interrupted turns
+
+
+REJECTED = {
+    "error": "ToolRejected: Interactive clarification is unavailable in headless and MCP runs.",
+    "rejected": True,
+}
+
+
+def ask(call_id: str, question: str, result: Any) -> list[CopperEvent]:
+    return [
+        CopperEvent(
+            EventKind.TOOL_REQUEST,
+            ToolRequest(
+                tool_call_id=call_id,
+                tool_name="ask_user_question",
+                arguments={"question": question, "options": ["A", "B"]},
+            ),
+        ),
+        CopperEvent(
+            EventKind.TOOL_RESULT,
+            {"tool_call_id": call_id, "tool_name": "ask_user_question", "result": result},
+        ),
+    ]
+
+
+def plan_write(call_id: str = "w1") -> list[CopperEvent]:
+    arguments = {"file_path": "/.copperpilot/plans/esp32.plan.md", "content": PLAN}
+    return [
+        CopperEvent(
+            EventKind.TOOL_REQUEST,
+            ToolRequest(tool_call_id=call_id, tool_name="write_file", arguments=arguments),
+        ),
+        CopperEvent(
+            EventKind.TOOL_RESULT,
+            {"tool_call_id": call_id, "tool_name": "write_file", "result": "Updated file"},
+        ),
+    ]
+
+
+interrupt = HANG
+
+
+async def interrupted_turn(agent, workspace, values) -> None:
+    """A turn cut off by Ctrl-C/SIGINT: the task is cancelled and the node never returns."""
+    agent.hanging.clear()
+    task = asyncio.create_task(turn(agent, workspace, values))
+    await asyncio.wait_for(agent.hanging.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_interrupted_turn_facts_reach_the_next_session_state(graph_env) -> None:
+    plans = graph_env / ".copperpilot" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "esp32.plan.md").write_text(PLAN, encoding="utf-8")
+    todo = {"kind": "todo_list", "items": [{"content": "Route USB", "status": "pending"}]}
+    agent = GraphAgent(
+        [
+            [
+                *ask("q1", "Which ESP32 module?", REJECTED),
+                *ask("q2", "Which LDO?", {"status": "answered", "answer": "AMS1117"}),
+                *plan_write(),
+                CopperEvent(EventKind.STATUS_EVENT, todo),
+                CopperEvent(EventKind.STATUS_EVENT, {"kind": "context_usage", **usage(61_000)}),
+                CopperEvent(EventKind.STATUS_EVENT, {"kind": "plan_mode_switch"}),
+                interrupt,
+            ],
+            [CopperEvent(EventKind.TEXT, "Continuing."), final()],
+            [CopperEvent(EventKind.TEXT, "Third."), final()],
+        ],
+        workspace=graph_env,
+    )
+    await interrupted_turn(agent, graph_env, say("Build me an ESP32 dev board"))
+    # Only the user's message reached the checkpoint; the rest lives in the journal.
+    async with create_copper_graph(agent) as runtime:
+        state = await runtime.aget_state(runtime.config("t", graph_env))
+    assert [m.type for m in state.values["messages"]] == ["human"]
+
+    _events, values = await turn(agent, graph_env, say("Use a USB-C connector"))
+    expected_answers = [
+        {"question": "Which ESP32 module?", "answer": "", "status": "skipped"},
+        {"question": "Which LDO?", "answer": "AMS1117", "status": "answered"},
+    ]
+    state = agent.payloads[1]["session_state"]
+    assert state["ask_answers"] == expected_answers
+    assert state["todos"] == {"items": [{"content": "Route USB", "status": "pending"}]}
+    assert state["plan"]["file_path"] == ".copperpilot/plans/esp32.plan.md"
+    # The interrupted turn's context size is the newest measurement.
+    assert values[FACTS_KEY]["context_usage"]["context_tokens"] == 61_000
+
+    # Once the next turn completed, the facts are in the checkpoint for good,
+    # even though the interrupted turn's journal is gone.
+    await turn(agent, graph_env, say("Now route it"))
+    later = agent.payloads[2]["session_state"]
+    assert later["ask_answers"] == expected_answers
+    assert later["todos"] == state["todos"] and later["plan"] == state["plan"]
+
+
+@pytest.mark.asyncio
+async def test_facts_chain_through_consecutive_interrupted_turns(graph_env) -> None:
+    agent = GraphAgent(
+        [
+            [*ask("q1", "Which module?", REJECTED), interrupt],
+            [*ask("q2", "Which LDO?", {"status": "answered", "answer": "AP2112"}), interrupt],
+            [CopperEvent(EventKind.TEXT, "ok"), final()],
+        ],
+        workspace=graph_env,
+    )
+    await interrupted_turn(agent, graph_env, say("one"))
+    await interrupted_turn(agent, graph_env, say("two"))
+    await turn(agent, graph_env, say("three"))
+    assert agent.payloads[2]["session_state"]["ask_answers"] == [
+        {"question": "Which module?", "answer": "", "status": "skipped"},
+        {"question": "Which LDO?", "answer": "AP2112", "status": "answered"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_only_a_rejected_question_records_it_as_skipped(graph_env) -> None:
+    agent = GraphAgent(
+        [
+            [*ask("q1", "Which module?", REJECTED), CopperEvent(EventKind.TEXT, "ok"), final()],
+            [CopperEvent(EventKind.TEXT, "ok"), final()],
+        ],
+        workspace=graph_env,
+    )
+    await turn(agent, graph_env, say("one"))
+    await turn(agent, graph_env, say("two"))
+    assert agent.payloads[1]["session_state"]["ask_answers"] == [
+        {"question": "Which module?", "answer": "", "status": "skipped"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unfinished_turn_in_the_checkpoint_is_not_counted_twice(
+    graph_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 0)
+    agent = GraphAgent(
+        [
+            [*ask("q1", "Which module?", {"status": "answered", "answer": "S3"}), DROP],
+            [CopperEvent(EventKind.TEXT, "ok"), final()],
+        ],
+        workspace=graph_env,
+    )
+    await turn(agent, graph_env, say("one"))
+    await turn(agent, graph_env, say("two"))
+    assert agent.payloads[1]["session_state"]["ask_answers"] == [
+        {"question": "Which module?", "answer": "S3", "status": "answered"}
+    ]
