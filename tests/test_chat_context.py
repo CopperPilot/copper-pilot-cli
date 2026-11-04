@@ -694,7 +694,8 @@ async def test_turns_store_usage_send_session_state_and_answer_history_search(
     )
     _events, values = await turn(agent, graph_env, say("Pick a regulator"))
     assert values[USAGE_KEY]["context_tokens"] == 500
-    assert values[USAGE_KEY]["measured_at"] == 1
+    # The final covers the whole turn, its answer included.
+    assert values[USAGE_KEY]["measured_at"] == len(values["messages"]) == 2
     assert agent.payloads[0]["session_state"] == {"version": 1}
     assert "context_cut" not in agent.payloads[0]
 
@@ -709,7 +710,7 @@ async def test_turns_store_usage_send_session_state_and_answer_history_search(
     agent.astream_events_raw = searching  # type: ignore[method-assign]
     _events, values = await turn(agent, graph_env, say("Why that one?"))
     assert found[0]["results"][0]["snippet"] == "Use an LDO."
-    assert values[USAGE_KEY]["context_tokens"] == 800 and values[USAGE_KEY]["measured_at"] == 3
+    assert values[USAGE_KEY]["context_tokens"] == 800 and values[USAGE_KEY]["measured_at"] == 4
     assert broker.history_search is None
 
 
@@ -1112,3 +1113,71 @@ async def test_history_after_interrupted_turns_new_message_versus_continue(graph
     assert resumed["resume"]["reason"] == "manual"
     assert resumed["messages"][-1].content == "Add a USB-C connector"
     assert len(_context(resumed["messages"], resumed.get("context_cut"))) == 2
+
+
+# ------------------------------------------------------------------ estimate
+
+
+def with_message(values: dict[str, Any], text: str) -> dict[str, Any]:
+    return {**values, "messages": [*values["messages"], HumanMessage(content=text)]}
+
+
+@pytest.mark.asyncio
+async def test_estimate_after_a_final_counts_only_the_new_message(graph_env) -> None:
+    """cli-forced-2: next_turn_tokens covers the turn's answer; tool results are not resent."""
+    tools = [
+        event
+        for index in range(84)
+        for event in tool_call(f"r{index}", "read_file", {"file_path": f"f{index}"}, "x" * 1000)
+    ]
+    measured = {**usage(135_458, at=150_000), "next_turn_tokens": 149_173}
+    agent = GraphAgent(
+        [
+            [
+                *tools,
+                CopperEvent(EventKind.TEXT, "y" * 339_375),
+                final(context_usage=measured),
+            ]
+        ],
+        workspace=graph_env,
+    )
+    _events, values = await turn(agent, graph_env, say("Build me an ESP32 Dev board"))
+    assert context_estimate(with_message(values, "z" * 28)) == 149_180
+
+
+@pytest.mark.asyncio
+async def test_estimate_after_a_resumed_turn_skips_its_continue_message(graph_env) -> None:
+    agent = GraphAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Surveying."), HANG],
+            [CopperEvent(EventKind.TEXT, "y" * 40_000), final(context_usage=usage(9_000))],
+        ],
+        workspace=graph_env,
+    )
+    await interrupted_turn(agent, graph_env, say("Build me an ESP32 Dev board"))
+    _events, values = await turn(agent, graph_env, say("Continue where you left off."))
+    assert agent.payloads[-1]["resume"]["reason"] == "manual"
+    assert context_estimate(with_message(values, "z" * 28)) == 9_007
+
+
+@pytest.mark.asyncio
+async def test_estimate_after_a_live_measurement_adds_later_assistant_text(
+    graph_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 0)
+    agent = GraphAgent(
+        [
+            [
+                CopperEvent(EventKind.TEXT, "a" * 400),
+                CopperEvent(EventKind.STATUS_EVENT, {"kind": "context_usage", **usage(1_000)}),
+                *tool_call("r1", "read_file", {"file_path": "f"}, "x" * 50_000),
+                CopperEvent(EventKind.TEXT, "b" * 400),
+                DROP,
+            ]
+        ],
+        workspace=graph_env,
+    )
+    _events, values = await turn(agent, graph_env, say("Build me an ESP32 Dev board"))
+    assert values["copper_turn_journal"] is not None  # ended unfinished, but returned
+    # Only the 400 chars streamed after the measurement are new (100 tokens).
+    assert context_estimate(with_message(values, "z" * 28)) == 1_000 + 100 + 7

@@ -477,6 +477,14 @@ class _TurnRun:
         # Chat context protocol v1: the newest ``context_usage`` and any
         # compaction the server ran inside this turn.
         self.context_usage: dict[str, Any] | None = None
+        # Where the measurement sits: whether a final carried it, and how much
+        # assistant text had streamed by then (later text is new context).
+        self.usage_final = False
+        self.usage_text_chars = 0
+        self.text_chars = 0
+        # Messages in the checkpoint when the node started (for a resume, more
+        # than ``original``: the "continue" messages sent since).
+        self.state_len = len(original)
         self.compaction: dict[str, Any] | None = None
         self.started = time.monotonic()
         self._last_save = 0.0
@@ -642,12 +650,13 @@ class _TurnRun:
     def _track(self, event: CopperEvent) -> None:
         if event.kind is EventKind.TEXT:
             self.text.append(str(event.data))
+            self.text_chars += len(str(event.data))
             self.journal.record_text(str(event.data))
             self.persist()
         elif event.kind is EventKind.FINAL and isinstance(event.data, dict):
             usage = parse_context_usage(event.data.get("context_usage"))
             if usage is not None:
-                self._note_usage(usage)
+                self._note_usage(usage, final=True)
             if isinstance(event.data.get("compaction"), dict) and self.compaction is None:
                 # Only the final carried it; tell the front-ends once.
                 self.compaction = event.data["compaction"]
@@ -712,9 +721,14 @@ class _TurnRun:
             )
             self.persist(force=True)
 
-    def _note_usage(self, usage: dict[str, Any]) -> None:
+    def _note_usage(self, usage: dict[str, Any], *, final: bool = False) -> None:
         self.context_usage = usage
-        self.journal.context_usage = usage_record(usage, measured_at=self.journal.original_len)
+        self.usage_final = final
+        self.usage_text_chars = self.text_chars
+        # Journaled for an interrupted turn, whose messages never reach the
+        # checkpoint: the next turn's estimate counts only what comes after
+        # the messages that were there when this turn started.
+        self.journal.context_usage = usage_record(usage, measured_at=self.state_len)
         self.persist()
 
     def settle_pending_tools(self, reason: str) -> None:
@@ -1437,7 +1451,13 @@ def _context_result(
     """Checkpoint updates for the chat's context after a turn."""
     updates = dict(compacted)
     if run.context_usage is not None:
-        updates[USAGE_KEY] = usage_record(run.context_usage, measured_at=len(original))
+        # Everything up to the end of this turn is in the measurement, except
+        # assistant text streamed after a live (mid-turn) measurement.
+        updates[USAGE_KEY] = usage_record(
+            run.context_usage,
+            measured_at=run.state_len + len(run.additions),
+            pending_chars=0 if run.usage_final else run.text_chars - run.usage_text_chars,
+        )
     if run.compaction is not None:
         # The server summarized inside the turn: the record covers every
         # history message sent with it (everything before the query).
@@ -1551,6 +1571,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 model=getattr(agent, "model", None),
             )
         run = _TurnRun(agent, writer, original, journal=journal, store=store if thread_id else None)
+        run.state_len = len(messages)
         if seed_text:
             run.additions.append(AIMessage(content=seed_text))
         # The chat's context as this turn sees it, with a pre-turn compaction applied.

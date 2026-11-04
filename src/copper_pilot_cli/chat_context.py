@@ -200,10 +200,18 @@ def parse_context_usage(value: Any) -> dict[str, Any] | None:
 
 
 def usage_record(
-    usage: dict[str, Any], *, measured_at: int, source: str = "turn"
+    usage: dict[str, Any], *, measured_at: int, source: str = "turn", pending_chars: int = 0
 ) -> dict[str, Any]:
-    """The stored measurement; ``measured_at`` is the message count it already covers."""
-    return {**usage, "measured_at": measured_at, "source": source, "recorded_at": time.time()}
+    """The stored measurement.
+
+    ``measured_at`` is the message count it already covers; ``pending_chars``
+    is assistant text inside those messages that came after a mid-turn
+    measurement, so it is not in the measured size yet.
+    """
+    record = {**usage, "measured_at": measured_at, "source": source, "recorded_at": time.time()}
+    if pending_chars > 0:
+        record["pending_chars"] = pending_chars
+    return record
 
 
 def _valid_usage(usage: Any) -> dict[str, Any] | None:
@@ -232,9 +240,11 @@ def _ts(value: Any) -> float:
 def context_estimate(values: dict[str, Any] | None) -> int | None:
     """Pre-send estimate: the last measured size plus ``chars / 4`` of what is new.
 
-    New means every human and assistant message the measurement did not
-    cover, which includes the message about to be sent. ``None`` without a
-    measurement (an older chat or a server without context usage).
+    New means the human and assistant prose after the messages the
+    measurement covers (the message about to be sent included), plus any
+    assistant text streamed after a mid-turn measurement. Tool messages are
+    never counted: they are not resent. ``None`` without a measurement (an
+    older chat or a server without context usage).
     """
     usage = stored_usage(values)
     if usage is None:
@@ -246,7 +256,8 @@ def context_estimate(values: dict[str, Any] | None) -> int | None:
     # would cost without the turn's tool results, a better base than the size
     # of the turn's last model call.
     base = _int(usage.get("next_turn_tokens")) or int(usage["context_tokens"])
-    return base + added
+    pending = math.ceil((_int(usage.get("pending_chars")) or 0) / 4)
+    return base + pending + added
 
 
 def auto_compact_threshold(
