@@ -188,7 +188,7 @@ def parse_context_usage(value: Any) -> dict[str, Any] | None:
     if tokens is None:
         return None
     usage: dict[str, Any] = {"context_tokens": tokens}
-    for key in ("context_limit", "auto_compact_at", "peak_context_tokens"):
+    for key in ("context_limit", "auto_compact_at", "peak_context_tokens", "next_turn_tokens"):
         number = _int(value.get(key))
         if number:
             usage[key] = number
@@ -242,7 +242,11 @@ def context_estimate(values: dict[str, Any] | None) -> int | None:
     messages = list((values or {}).get("messages") or [])
     start = _int(usage.get("measured_at")) or 0
     added = sum(estimate_tokens(text) for _role, text in _prose(messages[start:]))
-    return int(usage["context_tokens"]) + added
+    # ``next_turn_tokens`` (when the server sends it) is what the next request
+    # would cost without the turn's tool results, a better base than the size
+    # of the turn's last model call.
+    base = _int(usage.get("next_turn_tokens")) or int(usage["context_tokens"])
+    return base + added
 
 
 def auto_compact_threshold(
@@ -516,6 +520,37 @@ def compaction_context(messages: Sequence[Any]) -> tuple[list[dict[str, Any]], l
             pending, pending_id = [], None
     flush()
     return entries, ids
+
+
+def interrupted_entry(journal: Any) -> dict[str, Any] | None:
+    """The work of an interrupted turn (from its journal) as one assistant entry."""
+    digests = []
+    for event in list(getattr(journal, "tool_events", None) or [])[-MAX_TOOL_DIGESTS:]:
+        if not isinstance(event, dict):
+            continue
+        status = {"completed": "ok", "failed": "error"}.get(str(event.get("status")), "interrupted")
+        digest: dict[str, Any] = {
+            "name": str(event.get("tool_name") or "tool"),
+            "args": _short_args(event.get("arguments") or {}),
+            "status": status,
+        }
+        excerpt = _clip_bytes(str(event.get("result") or ""), MAX_DIGEST_EXCERPT_BYTES)[0]
+        if excerpt:
+            digest["excerpt"] = excerpt
+        digests.append(digest)
+    text = str(getattr(journal, "assistant_text", "") or "").strip()
+    if not text and not digests:
+        return None
+    entry: dict[str, Any] = {
+        "role": "assistant",
+        "content": _clip_bytes(
+            f"{text}\n[Turn interrupted before completion]" if text else TOOL_ACTIVITY_TEXT,
+            MAX_CONTEXT_MESSAGE_BYTES,
+        )[0],
+    }
+    if digests:
+        entry["tool_digest"] = digests
+    return entry
 
 
 def history_context(messages: Sequence[Any]) -> list[dict[str, str]]:
@@ -860,6 +895,8 @@ async def compact_history(
     instructions: str | None = None,
     workspace: Path | None = None,
     policy: ContextPolicy = DEFAULT_CONTEXT_POLICY,
+    interrupted: Any = None,
+    pending_query: str | None = None,
 ) -> CompactionResult:
     """Summarize the history after the current cut (``POST /analyze/compact``).
 
@@ -867,13 +904,30 @@ async def compact_history(
     new summary is anchored on it. Raises ``NothingToCompact``,
     ``CompactionFailed`` or the client's ``ProtocolError``; the checkpoint is
     untouched until the caller applies ``CompactionResult.updates``.
+
+    Before a new turn, ``interrupted`` is the journal of a superseded
+    interrupted turn whose work never reached the checkpoint (it becomes one
+    assistant entry with tool digests, so the summary can keep it), and
+    ``pending_query`` is the message about to be sent: it ends the context so
+    the server's cut keeps it, and it is never summarized itself.
     """
     values = values or {}
     messages = list(values.get("messages") or [])
     visible = after_cut(messages, context_cut(values))
     entries, ids = compaction_context(visible)
+    if interrupted is not None and entries:
+        work = interrupted_entry(interrupted)
+        if work is not None:
+            # Covered by the interrupted turn's own (last) message id.
+            entries.append(work)
+            ids.append(ids[-1])
     if len(entries) < 2:
         raise NothingToCompact("There is not enough conversation to compact yet.")
+    history_len = len(entries)
+    if pending_query:
+        entries.append(
+            {"role": "user", "content": _clip_bytes(pending_query, MAX_CONTEXT_MESSAGE_BYTES)[0]}
+        )
     effort = getattr(agent, "effort", None)
     payload: dict[str, Any] = {
         "conversation_id": str(getattr(agent, "conversation_id", "") or ""),
@@ -898,7 +952,7 @@ async def compact_history(
         keep = _int(compaction.get("messages_summarized"))
     if not keep:
         raise CompactionFailed("The compaction reply covered no messages.")
-    keep = min(keep, len(entries))
+    keep = min(keep, history_len)
     record = compaction_record(compaction, last_message_id=ids[keep - 1], trigger=trigger)
     if record is None or not record["last_message_id"]:
         raise CompactionFailed("The compaction reply had no usable summary.")

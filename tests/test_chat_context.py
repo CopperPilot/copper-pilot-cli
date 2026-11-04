@@ -728,7 +728,7 @@ async def test_auto_compaction_runs_before_a_large_turn_and_cuts_history(graph_e
 
     (request,) = agent.compact_requests
     assert request["trigger"] == "auto"
-    assert [entry["role"] for entry in request["context"]] == ["user", "assistant"]
+    assert [entry["role"] for entry in request["context"]] == ["user", "assistant", "user"]
     stages = [e["data"]["stage"] for e in events if e["type"] == COMPACTION_EVENT]
     assert stages == ["started", "completed"]
     payload = agent.payloads[-1]
@@ -768,25 +768,84 @@ async def test_auto_compaction_failure_sends_the_turn_unchanged(graph_env) -> No
 
 
 @pytest.mark.asyncio
-async def test_never_auto_compacts_while_a_turn_is_unfinished(graph_env, monkeypatch) -> None:
+async def test_resume_attempts_never_auto_compact(graph_env, monkeypatch) -> None:
     monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 0)
     agent = GraphAgent(
         [
             [CopperEvent(EventKind.TEXT, "First."), final(context_usage=usage(2000))],
             [CopperEvent(EventKind.TEXT, "Half"), DROP],
-            [CopperEvent(EventKind.TEXT, "New topic."), final()],
+            [CopperEvent(EventKind.TEXT, "Still half"), DROP],
+            [CopperEvent(EventKind.TEXT, "Done."), final()],
         ],
-        compactions=[reply(2)],
+        compactions=[ProtocolError("unavailable")],
         workspace=graph_env,
     )
     await turn(agent, graph_env, say("one"))
     # The second turn: auto-compaction runs (no unfinished turn yet), then the turn drops.
-    agent.compactions = [ProtocolError("unavailable")]
     await turn(agent, graph_env, say("two"))
     assert len(agent.compact_requests) == 1
-    # The third message starts a new turn while the second is unfinished: no compaction.
-    await turn(agent, graph_env, say("three"))
+    # Resuming that turn, by /resume or a "continue" message, never compacts.
+    await turn(agent, graph_env, {"copper_resume": {"reason": "manual"}})
+    await turn(agent, graph_env, say("Continue where you left off."))
     assert len(agent.compact_requests) == 1
+    assert [p.get("resume", {}).get("reason") for p in agent.payloads[2:]] == ["manual", "manual"]
+    assert agent.payloads[2]["session_state"] == agent.payloads[3]["session_state"]
+
+
+@pytest.mark.asyncio
+async def test_new_message_after_an_interrupted_turn_auto_compacts_first(graph_env) -> None:
+    """u1 is interrupted at 153K (threshold 120K); a new message compacts before it is sent."""
+    big = {**usage(153_131, at=120_000), "next_turn_tokens": 130_000}
+    agent = GraphAgent(
+        [
+            [
+                CopperEvent(EventKind.TEXT, "Surveying the board."),
+                *ask("q1", "Which module?", REJECTED),
+                *tool_call("r1", "read_file", {"file_path": "board.kicad_sch"}, "(kicad_sch)"),
+                CopperEvent(EventKind.STATUS_EVENT, {"kind": "context_usage", **big}),
+                HANG,
+            ],
+            [CopperEvent(EventKind.TEXT, "Placed."), final(context_usage=usage(40_000))],
+        ],
+        compactions=[reply(2, trigger="auto", pre_tokens=153_131, post_tokens=9_000)],
+        workspace=graph_env,
+    )
+    await interrupted_turn(agent, graph_env, say("Build me an ESP32 Dev board"))
+    events, values = await turn(agent, graph_env, say("Decisions: 2-layer, 50x30 mm"))
+
+    (request,) = agent.compact_requests
+    assert request["trigger"] == "auto"
+    # The interrupted turn's work comes from its journal; the new message ends the context.
+    assert [entry["role"] for entry in request["context"]] == ["user", "assistant", "user"]
+    work = request["context"][1]
+    assert work["content"].startswith("Surveying the board.")
+    assert [digest["name"] for digest in work["tool_digest"]] == ["ask_user_question", "read_file"]
+    assert request["context"][2]["content"] == "Decisions: 2-layer, 50x30 mm"
+    stages = [e["data"]["stage"] for e in events if e["type"] == COMPACTION_EVENT]
+    assert stages == ["started", "completed"]
+
+    payload = agent.payloads[-1]
+    assert payload["context_cut"] == values["messages"][0].id
+    assert _context(payload["messages"], payload["context_cut"]) == []
+    state = payload["session_state"]
+    assert state["compaction"]["post_tokens"] == 9_000
+    assert state["earlier_user_messages"] == [{"index": 0, "text": "Build me an ESP32 Dev board"}]
+    # The carried facts of the interrupted turn are still pinned.
+    assert state["ask_answers"] == [
+        {"question": "Which module?", "answer": "", "status": "skipped"}
+    ]
+    assert values[COMPACTION_KEY]["trigger"] == "auto"
+
+
+def test_estimate_prefers_next_turn_tokens() -> None:
+    values = {
+        "messages": [HumanMessage(content="x" * 40)],
+        USAGE_KEY: {"context_tokens": 153_131, "next_turn_tokens": 30_000, "measured_at": 0},
+    }
+    assert context_estimate(values) == 30_010
+    assert (
+        parse_context_usage({"context_tokens": 5, "next_turn_tokens": 3})["next_turn_tokens"] == 3
+    )
 
 
 @pytest.mark.asyncio
@@ -871,6 +930,18 @@ def ask(call_id: str, question: str, result: Any) -> list[CopperEvent]:
         CopperEvent(
             EventKind.TOOL_RESULT,
             {"tool_call_id": call_id, "tool_name": "ask_user_question", "result": result},
+        ),
+    ]
+
+
+def tool_call(call_id: str, name: str, arguments: dict[str, Any], result: Any) -> list[CopperEvent]:
+    return [
+        CopperEvent(
+            EventKind.TOOL_REQUEST,
+            ToolRequest(tool_call_id=call_id, tool_name=name, arguments=arguments),
+        ),
+        CopperEvent(
+            EventKind.TOOL_RESULT, {"tool_call_id": call_id, "tool_name": name, "result": result}
         ),
     ]
 

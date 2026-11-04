@@ -1363,10 +1363,13 @@ def _session_state(agent: Any, values: dict[str, Any]) -> dict[str, Any]:
         return {"version": 1}
 
 
-async def _auto_compact(agent: Any, run: _TurnRun, values: dict[str, Any]) -> dict[str, Any]:
+async def _auto_compact(
+    agent: Any, run: _TurnRun, values: dict[str, Any], *, interrupted: Any = None
+) -> dict[str, Any]:
     """Compact before a new turn when its estimated size reached ``auto_compact_at``.
 
-    Only called when no turn is unfinished. Returns the checkpoint updates
+    Only called for a new turn, never for a resume attempt. ``interrupted`` is
+    a superseded interrupted turn whose work is only in its journal. Returns the checkpoint updates
     (empty when nothing ran). A failure is logged, shown as a one-line notice,
     and the turn is sent unchanged.
     """
@@ -1388,7 +1391,9 @@ async def _auto_compact(agent: Any, run: _TurnRun, values: dict[str, Any]) -> di
     run.emit(compaction_event("started", trigger="auto", estimate=estimate, threshold=threshold))
     workspace = getattr(agent, "workspace", None)
     # The message about to be sent is the query, not history to summarize.
-    history = {**values, "messages": list(values.get("messages") or [])[:-1]}
+    messages = list(values.get("messages") or [])
+    history = {**values, "messages": messages[:-1]}
+    query = getattr(messages[-1], "content", None) if messages else None
     try:
         compacted = await compact_history(
             agent,
@@ -1397,6 +1402,8 @@ async def _auto_compact(agent: Any, run: _TurnRun, values: dict[str, Any]) -> di
             model=turn_model(catalog, effort, model),
             workspace=Path(workspace) if workspace is not None else None,
             policy=catalog.context_policy,
+            interrupted=interrupted,
+            pending_query=query if isinstance(query, str) else None,
         )
     except asyncio.CancelledError:
         raise
@@ -1563,8 +1570,17 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 else:
                     # The previous turn was interrupted: its answers, todos,
                     # plan writes and context size survive only in its journal.
+                    # This new turn supersedes it (it is no longer resumable),
+                    # so the chat may compact, measured by the carried size.
                     journal.carried = journal_facts(previous)
                     context_values[FACTS_KEY] = merge_facts(state.get(FACTS_KEY), journal.carried)
+                    lost = not any(
+                        isinstance(item, AIMessage) for item in messages[previous.original_len :]
+                    )
+                    compacted = await _auto_compact(
+                        agent, run, context_values, interrupted=previous if lost else None
+                    )
+                    context_values.update(compacted)
                 journal.session_state = _session_state(agent, context_values)
                 journal.context_cut = context_cut(context_values)
             elif journal.session_state is None:
