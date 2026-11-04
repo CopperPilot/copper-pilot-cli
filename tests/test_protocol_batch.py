@@ -259,3 +259,61 @@ async def test_approval_prompts_are_not_raced(tmp_path) -> None:
     assert all(not isinstance(outcome, BaseException) for outcome in outcomes)
     for index in range(3):
         assert (tmp_path / f"file{index}.txt").read_text() == str(index)
+
+
+@pytest.mark.asyncio
+async def test_tagged_requests_run_one_lane_per_agent(monkeypatch) -> None:
+    """Subagent requests (agent_id) overlap across agents, stay ordered per agent."""
+
+    def tagged(call_id: str, agent: str) -> dict:
+        return {**read(call_id, f"{call_id}.txt"), "agent_id": agent}
+
+    socket = FakeSocket(
+        [
+            event(tool_request=tagged("usb-1", "usb"), turn_id="turn-1"),
+            event(tool_request=tagged("hdmi-1", "hdmi"), turn_id="turn-1"),
+            event(tool_request=tagged("usb-2", "usb"), turn_id="turn-1"),
+            final(),
+        ]
+    )
+    install(monkeypatch, socket)
+    spans: dict[str, tuple[float, float]] = {}
+
+    async def execute(tool_request):
+        started_at = time.perf_counter()
+        await asyncio.sleep(0.2)
+        spans[tool_request.tool_call_id] = (started_at, time.perf_counter())
+        return {"result": "ok"}
+
+    events = [item async for item in client().stream(request(), execute)]
+
+    # Different agents overlap; one agent's requests never do.
+    assert spans["hdmi-1"][0] < spans["usb-1"][1]
+    assert spans["usb-2"][0] >= spans["usb-1"][1]
+    results = [item for item in events if item.kind is EventKind.TOOL_RESULT]
+    assert {item.data["tool_call_id"] for item in results} == {"usb-1", "hdmi-1", "usb-2"}
+    # Every result is reported before the final.
+    assert events[-1].kind is EventKind.FINAL
+    assert [frame["tool_call_id"] for frame in socket.sent if frame["type"] == "tool_result"]
+
+
+@pytest.mark.asyncio
+async def test_untagged_requests_still_run_inline(monkeypatch) -> None:
+    socket = FakeSocket(
+        [
+            event(tool_request=read("a", "a.txt")),
+            event(tool_request=read("b", "b.txt")),
+            final(),
+        ]
+    )
+    install(monkeypatch, socket)
+    spans: dict[str, tuple[float, float]] = {}
+
+    async def execute(tool_request):
+        started_at = time.perf_counter()
+        await asyncio.sleep(0.1)
+        spans[tool_request.tool_call_id] = (started_at, time.perf_counter())
+        return {"result": "ok"}
+
+    [item async for item in client().stream(request(), execute)]
+    assert spans["b"][0] >= spans["a"][1]
