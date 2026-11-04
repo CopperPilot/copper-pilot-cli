@@ -1349,13 +1349,18 @@ def _thread_id(config: RunnableConfig | dict[str, Any] | None) -> str | None:
 
 
 def _session_state(agent: Any, values: dict[str, Any]) -> dict[str, Any]:
+    """Pinned state for this turn; a failure to build it never fails the turn."""
     workspace = getattr(agent, "workspace", None)
-    return build_session_state(
-        values,
-        workspace=Path(workspace) if workspace is not None else None,
-        plan_context=getattr(agent, "plan_context", None),
-        policy=cached_chat_model_catalog().context_policy,
-    )
+    try:
+        return build_session_state(
+            values,
+            workspace=Path(workspace) if workspace is not None else None,
+            plan_context=getattr(agent, "plan_context", None),
+            policy=cached_chat_model_catalog().context_policy,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not build session_state; sending none", exc_info=True)
+        return {"version": 1}
 
 
 async def _auto_compact(agent: Any, run: _TurnRun, values: dict[str, Any]) -> dict[str, Any]:

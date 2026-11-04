@@ -749,7 +749,7 @@ def plan_state(
         for path in _plan_paths(messages, facts):
             try:
                 plan = parse_plan(_plan_file(path, root), root)
-            except (OSError, ValueError, UnicodeDecodeError) as exc:
+            except Exception as exc:  # noqa: BLE001 - agent-written YAML may not parse
                 logger.debug("Plan %s not pinned: %s", path, type(exc).__name__)
                 continue
             break

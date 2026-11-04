@@ -64,6 +64,32 @@ Check all rails.
     assert plan.file_path == ".copperpilot/plans/review.plan.md"
 
 
+def test_parse_plan_tolerates_unquoted_colons_in_values(tmp_path) -> None:
+    # Agent-written plans often put ": " inside unquoted todo text.
+    path = tmp_path / ".copperpilot/plans/esp32.plan.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """---
+name: ESP32 board
+overview: USB-C power: AMS1117-3.3 regulator
+todos:
+  - id: unit-1
+    content: Capture Unit 1 (usb_power_ldo): USB-C receptacle (J1), it's 5.1k CC
+    status: running
+overall_status: running
+---
+Body
+"""
+    )
+    plan = parse_plan(path, tmp_path)
+    assert plan.overview == "USB-C power: AMS1117-3.3 regulator"
+    assert plan.todos[0].content == (
+        "Capture Unit 1 (usb_power_ldo): USB-C receptacle (J1), it's 5.1k CC"
+    )
+    assert plan.todos[0].status == "running"
+    assert plan.overall_status == "running"
+
+
 @pytest.mark.parametrize(
     ("value", "valid"),
     [

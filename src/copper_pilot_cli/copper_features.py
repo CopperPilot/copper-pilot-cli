@@ -173,6 +173,29 @@ async def resolve_skill_manifest(
         return response.json()
 
 
+_PLAIN_VALUE = re.compile(r"^(\s*(?:- )?[A-Za-z_][\w-]*: )(?![\"'|>\[{])(.*\S.*)$")
+
+
+def _load_frontmatter(text: str) -> Any:
+    """Load plan frontmatter, tolerating unquoted values that contain ``: ``.
+
+    Agent-written plans often have todo text like ``content: Unit 1 (power): ...``,
+    which is not valid YAML. On a parse error every plain scalar value is
+    quoted and the frontmatter is parsed again; a second failure is raised.
+    """
+    try:
+        return yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        quoted = []
+        for line in text.splitlines():
+            plain = _PLAIN_VALUE.match(line)
+            if plain:
+                value = plain.group(2).replace("'", "''")
+                line = f"{plain.group(1)}'{value}'"
+            quoted.append(line)
+        return yaml.safe_load("\n".join(quoted)) or {}
+
+
 def parse_plan(path: Path, workspace: Path) -> PlanContext:
     """Parse a `.copperpilot/plans/*.plan.md` artifact."""
     resolved = path.resolve()
@@ -183,7 +206,7 @@ def parse_plan(path: Path, workspace: Path) -> PlanContext:
     match = FRONTMATTER.match(text)
     metadata: dict[str, Any] = {}
     if match:
-        loaded = yaml.safe_load(match.group(1)) or {}
+        loaded = _load_frontmatter(match.group(1))
         metadata = loaded if isinstance(loaded, dict) else {}
     body = text[match.end() :].strip() if match else text.strip()
     todos: list[PlanTodo] = []

@@ -1002,3 +1002,12 @@ async def test_unfinished_turn_in_the_checkpoint_is_not_counted_twice(
     assert agent.payloads[1]["session_state"]["ask_answers"] == [
         {"question": "Which module?", "answer": "S3", "status": "answered"}
     ]
+
+
+def test_session_state_failure_never_fails_the_turn(monkeypatch) -> None:
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("bad plan")
+
+    monkeypatch.setattr(copper_graph, "build_session_state", broken)
+    agent = type("Agent", (), {"workspace": None, "plan_context": None})()
+    assert copper_graph._session_state(agent, {"messages": []}) == {"version": 1}
