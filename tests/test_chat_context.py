@@ -1011,3 +1011,33 @@ def test_session_state_failure_never_fails_the_turn(monkeypatch) -> None:
     monkeypatch.setattr(copper_graph, "build_session_state", broken)
     agent = type("Agent", (), {"workspace": None, "plan_context": None})()
     assert copper_graph._session_state(agent, {"messages": []}) == {"version": 1}
+
+
+@pytest.mark.asyncio
+async def test_history_after_interrupted_turns_new_message_versus_continue(graph_env) -> None:
+    """New messages after interrupted turns send all earlier user messages; a
+    "continue …" message instead resumes the unfinished turn by resending its
+    original request (query = that turn's message, context = history before it)."""
+    agent = GraphAgent(
+        [
+            [HANG],
+            [HANG],
+            [HANG],
+            [CopperEvent(EventKind.TEXT, "Resumed."), final()],
+        ],
+        workspace=graph_env,
+    )
+    await interrupted_turn(agent, graph_env, say("Build me an ESP32 Dev board"))
+    await interrupted_turn(agent, graph_env, say("Decisions: 2-layer, 50x30 mm"))
+    await interrupted_turn(agent, graph_env, say("Add a USB-C connector"))
+    sent = [_context(p["messages"], p.get("context_cut")) for p in agent.payloads]
+    assert [len(context) for context in sent] == [0, 1, 2]
+    assert [m.content for m in sent[2]] == [
+        "Build me an ESP32 Dev board",
+        "Decisions: 2-layer, 50x30 mm",
+    ]
+    await turn(agent, graph_env, say("Continue with the build."))
+    resumed = agent.payloads[-1]
+    assert resumed["resume"]["reason"] == "manual"
+    assert resumed["messages"][-1].content == "Add a USB-C connector"
+    assert len(_context(resumed["messages"], resumed.get("context_cut"))) == 2
