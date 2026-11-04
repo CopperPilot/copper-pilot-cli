@@ -24,6 +24,7 @@ from copper_pilot_cli.validate.config import (
     load_config,
 )
 from copper_pilot_cli.validate.design import input_hashes
+from copper_pilot_cli.validate.report import skipped_notice
 from copper_pilot_cli.validate.runner import (
     EXIT_ENVIRONMENT,
     EXIT_INTERRUPTED,
@@ -265,6 +266,9 @@ def _print_outcome(outcome: RunOutcome, *, as_json: bool) -> None:
     counts = {"FAIL": 0, "ERROR": 0, "WARN": 0, "PASS": 0, "SKIPPED": 0}
     for result in outcome.results:
         counts[result.status.value] += 1
+    notice = skipped_notice(outcome.results)
+    if notice:
+        print(notice)
     print(
         f"{outcome.verdict}: {counts['PASS']} pass, {counts['WARN']} warn, {counts['FAIL']} fail, "
         f"{counts['ERROR']} error, {counts['SKIPPED']} skipped"

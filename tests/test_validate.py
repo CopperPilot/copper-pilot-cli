@@ -1983,3 +1983,23 @@ def test_default_graph_marks_pcb_geometry_checks_ungated() -> None:
         assert check.kind == "builtin" and check.ungated and check.requires == []
     footprints = config.check("parts.footprints").prompt or ""
     assert "3D model is P3" not in footprints and "pcb.models_3d" in footprints
+
+
+def test_cli_names_skipped_checks_in_a_loud_incomplete_line(tmp_path, capsys) -> None:
+    """--skip used to look like a pass: the agent skipped pcb.drc and said so."""
+    make_project(tmp_path)
+    run_command(
+        parse_args([str(tmp_path), "--skip", "sch.erc"]),
+        turn=FakeTurn(),
+        kicad_finder=lambda: FakeKicad(),
+        credential_loader=lambda: CREDENTIAL,
+    )
+    out = capsys.readouterr().out
+    notice = next(line for line in out.splitlines() if "check(s) skipped" in line)
+    assert notice.startswith("INCOMPLETE:")
+    assert "sch.erc" in notice
+    assert "do not report it as passing" in notice
+    report_path = next(
+        line.split(": ", 1)[1] for line in out.splitlines() if line.startswith("report: ")
+    )
+    assert "check(s) skipped" in Path(report_path).read_text()
