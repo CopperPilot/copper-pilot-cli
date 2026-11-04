@@ -370,6 +370,8 @@ class StatusBar(Static):
         self._flash: str | None = None
         self._flash_until = 0.0
         self._flash_timer = None
+        self._meter_text: str | None = None
+        self._meter_level = "normal"
 
     def on_mount(self) -> None:
         self._redraw()
@@ -390,9 +392,13 @@ class StatusBar(Static):
         self.session_effort = effort or "balanced"
         self._redraw()
 
-    def set_context_percent(self, percent: int | None) -> None:
-        """Context percentage is not shown; the CLI only has it on some turns."""
-        del percent
+    def set_context(self, text: str | None, level: str = "normal") -> None:
+        """The context meter (``ctx 45% · 470K/1M``); ``None`` hides it."""
+        if (text, level) == (self._meter_text, self._meter_level):
+            return
+        self._meter_text = text
+        self._meter_level = level
+        self._redraw()
 
     def set_status(self, status: str) -> None:
         """Activity text belongs on the working line, not this footer."""
@@ -428,6 +434,8 @@ class StatusBar(Static):
                 flash=flash,
                 mode=mode,
                 ascii=ascii_mode(),
+                context=self._meter_text,
+                context_level=self._meter_level,
             )
         )
 
