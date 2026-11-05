@@ -40,6 +40,8 @@ TURN_RESUME_CAPABILITY = "turn_resume_v1"
 TURN_RESUME_ENV = "COPPER_PILOT_TURN_RESUME"
 JOURNAL_VERSION = 1
 MAX_TOOL_EVENTS = 200
+# Subagents a turn can report on resume (the server caps spawns at 16).
+MAX_SUBAGENTS = 32
 MAX_TOOL_RESULT_BYTES = 4 * 1024
 MAX_ARGUMENT_BYTES = 4 * 1024
 MAX_ASSISTANT_TEXT_BYTES = 256 * 1024
@@ -74,8 +76,12 @@ PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_UNFINISHED = "unfinished"
 
-_RESUME_REQUEST = re.compile(r"^\s*/?(?:resume|continue)\b", re.IGNORECASE)
-_MAX_RESUME_REQUEST_CHARS = 200
+# Only a bare resume intent resumes the unfinished turn; a message with any
+# extra instruction ("continue, but use 0603 resistors") starts a new turn so
+# the instruction is not dropped. Compared after lowercasing, dropping a
+# leading "/" and punctuation, and collapsing spaces.
+_RESUME_INTENTS = frozenset({"continue", "resume", "continue where you left off"})
+_NOT_WORD = re.compile(r"[^a-z0-9]+")
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -90,16 +96,15 @@ def turn_resume_enabled() -> bool:
 
 
 def is_resume_request(text: Any) -> bool:
-    """Whether a short user message asks to continue the unfinished turn.
+    """Whether a user message is a bare request to continue the unfinished turn.
 
-    Matches ``resume``, ``/resume``, ``continue`` and phrases that start with
-    them, such as "Continue where you left off with the plan.md".
+    Matches ``continue``, ``resume``, ``/resume`` and "continue where you left
+    off", ignoring case and punctuation. Anything with more text is a new
+    instruction and starts a new turn.
     """
-    return (
-        isinstance(text, str)
-        and len(text) <= _MAX_RESUME_REQUEST_CHARS
-        and bool(_RESUME_REQUEST.match(text))
-    )
+    if not isinstance(text, str) or len(text) > 200:
+        return False
+    return " ".join(_NOT_WORD.split(text.lower())).strip() in _RESUME_INTENTS
 
 
 def _clip_text(text: str, limit: int) -> str:
@@ -169,6 +174,7 @@ class TurnJournal:
     reason: str | None = None
     assistant_text: str = ""
     tool_events: list[dict[str, Any]] = field(default_factory=list)
+    subagents: list[dict[str, Any]] = field(default_factory=list)
     status: str = STATUS_RUNNING
     last_error: dict[str, Any] | None = None
     started_at: float = field(default_factory=time.time)
@@ -218,6 +224,27 @@ class TurnJournal:
         event["result"] = _clip_text(_result_text(result), MAX_TOOL_RESULT_BYTES)
         self.updated_at = time.time()
 
+    def record_subagent(self, event: dict[str, Any]) -> None:
+        """Latest status of one subagent chip; the workspace manifest stays
+        the authoritative record."""
+        unit = event.get("unit")
+        status = str(event.get("state") or event.get("status") or "")
+        if event.get("kind") != "subagent" or not unit or status in ("", "keepalive"):
+            return
+        entry = {
+            "unit": str(unit),
+            "status": status,
+            "scratch_path": str(event["scratch_path"]) if event.get("scratch_path") else None,
+        }
+        for index, item in enumerate(self.subagents):
+            if item.get("unit") == entry["unit"]:
+                self.subagents[index] = entry
+                break
+        else:
+            if len(self.subagents) < MAX_SUBAGENTS:
+                self.subagents.append(entry)
+        self.updated_at = time.time()
+
     def settle_pending(self, status: str = INTERRUPTED) -> None:
         """Mark requests whose outcome never arrived (process killed, tool cancelled)."""
         for event in self.tool_events:
@@ -261,6 +288,8 @@ class TurnJournal:
             "assistant_text": self.assistant_text,
             "tool_events": events[-MAX_TOOL_EVENTS:],
         }
+        if self.subagents:
+            payload["subagents"] = list(self.subagents)
         # Oldest results go first; the newest are what the model needs most.
         index = 0
         while _size(payload) > MAX_RESUME_PAYLOAD_BYTES and index < len(payload["tool_events"]):
@@ -293,6 +322,9 @@ class TurnJournal:
             event
             for event in journal.tool_events
             if isinstance(event, dict) and "tool_call_id" in event and "status" in event
+        ]
+        journal.subagents = [
+            item for item in journal.subagents if isinstance(item, dict) and item.get("unit")
         ]
         return journal
 

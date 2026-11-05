@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import numbers
 import re
+from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
 from typing import Any, cast
 
@@ -27,11 +29,25 @@ def redact(value: object) -> str:
     return text[:2_000]
 
 
+def _redact_arg(value: object) -> object:
+    """Numbers (and None) pass through so %d / %.1f still format; anything
+    else is redacted as text."""
+    if value is None or isinstance(value, numbers.Number):
+        return value
+    return redact(value)
+
+
 class RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         copied = logging.makeLogRecord(record.__dict__.copy())
         copied.msg = redact(copied.msg)
-        copied.args = tuple(redact(item) for item in copied.args) if copied.args else ()
+        args = copied.args
+        if isinstance(args, Mapping):
+            copied.args = {key: _redact_arg(value) for key, value in args.items()}
+        elif args:
+            copied.args = tuple(_redact_arg(item) for item in args)
+        else:
+            copied.args = ()
         return super().format(copied)
 
 

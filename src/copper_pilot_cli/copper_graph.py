@@ -601,6 +601,9 @@ class _TurnRun:
                 status = normalize_subagent_status(event.data, self.subagents.get(identifier))
                 if status is not None:
                     self.subagents[status.id] = status
+                if event.data.get("kind") == "subagent" and event.data.get("unit"):
+                    self.journal.record_subagent(event.data)
+                    self.persist()
         elif event.kind is EventKind.TOOL_REQUEST:
             tool = event.data
             call = {

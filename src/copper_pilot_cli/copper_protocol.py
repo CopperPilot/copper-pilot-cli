@@ -365,6 +365,9 @@ class ToolRequest(BaseModel):
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     timeout_ms: int | None = None
+    # "main" or a subagent id (Intelligence subagents); None from older servers.
+    agent_id: str | None = None
+    agent_title: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -767,6 +770,59 @@ class HostedChatClient:
                     payload["delivered"] = False
                 return CopperEvent(EventKind.TOOL_RESULT, payload, **metadata)
 
+            # Tool requests tagged with agent_id run on one lane per agent:
+            # each agent's requests in order, different agents concurrently
+            # (awaiting each one made parallel subagents queue behind one
+            # another). Lane results come back through lane_done.
+            lane_done: asyncio.Queue[CopperEvent] = asyncio.Queue()
+            lanes: dict[str, asyncio.Task[None]] = {}
+            frame_get: asyncio.Task[Any] | None = None
+
+            def submit_to_lane(tool_request: ToolRequest, event_metadata: dict[str, Any]) -> None:
+                agent = tool_request.agent_id or "main"
+                previous = lanes.get(agent)
+
+                async def run() -> None:
+                    if previous is not None:
+                        await asyncio.gather(previous, return_exceptions=True)
+                    try:
+                        result = await tool_handler(tool_request)
+                    except Exception as exc:  # noqa: BLE001 - reported per tool
+                        result = tool_error_result(exc)
+                    event = await deliver(tool_request, result)
+                    lane_done.put_nowait(event)
+
+                lanes[agent] = asyncio.create_task(run())
+
+            async def settle_lanes() -> None:
+                pending = [task for task in lanes.values() if not task.done()]
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+            async def next_frame(wait_s: float | None) -> tuple[str, Any]:
+                """('lane', event) as lane results finish, else ('frame', raw)."""
+                nonlocal frame_get
+                if not lane_done.empty():
+                    return "lane", lane_done.get_nowait()
+                if frame_get is None:
+                    frame_get = asyncio.ensure_future(inbox.get())
+                if not any(not task.done() for task in lanes.values()):
+                    raw = await asyncio.wait_for(asyncio.shield(frame_get), wait_s)
+                    frame_get = None
+                    return "frame", raw
+                lane_get = asyncio.ensure_future(lane_done.get())
+                done, _ = await asyncio.wait(
+                    {frame_get, lane_get}, timeout=wait_s, return_when=asyncio.FIRST_COMPLETED
+                )
+                if lane_get in done:
+                    return "lane", lane_get.result()
+                lane_get.cancel()
+                if frame_get in done:
+                    raw = frame_get.result()
+                    frame_get = None
+                    return "frame", raw
+                raise TimeoutError
+
             metadata: dict[str, Any] = {}
             try:
                 frame_count = 0
@@ -780,7 +836,7 @@ class HostedChatClient:
                     if capacity_hold and timeout is not None:
                         timeout += capacity_hold
                     try:
-                        raw = await asyncio.wait_for(inbox.get(), timeout)
+                        source, raw = await next_frame(timeout)
                     except TimeoutError as exc:
                         phase = "first frame" if frame_count == 0 else "next frame"
                         message = (
@@ -798,6 +854,11 @@ class HostedChatClient:
                             close_reason="client_liveness_timeout",
                             resume_reason="idle_timeout",
                         ) from exc
+                    if source == "lane":
+                        yield raw
+                        if closed is not None:
+                            break
+                        continue
                     if isinstance(raw, ConnectionClosed):
                         closed = raw
                         break
@@ -873,7 +934,10 @@ class HostedChatClient:
                         usage = {**(usage or {}), **envelope_usage}
                     if usage:
                         yield CopperEvent(EventKind.USAGE, usage, **metadata)
-                    if response.tool_request:
+                    if response.tool_request and response.tool_request.agent_id:
+                        yield CopperEvent(EventKind.TOOL_REQUEST, response.tool_request, **metadata)
+                        submit_to_lane(response.tool_request, dict(metadata))
+                    elif response.tool_request:
                         yield CopperEvent(EventKind.TOOL_REQUEST, response.tool_request, **metadata)
                         try:
                             result = await tool_handler(response.tool_request)
@@ -905,6 +969,10 @@ class HostedChatClient:
                         if closed is not None:
                             break
                     if frame_type == "final" or response.is_final:
+                        # The server finals after every result; flush lanes first.
+                        await settle_lanes()
+                        while not lane_done.empty():
+                            yield lane_done.get_nowait()
                         saw_final = True
                         extra = response.model_extra or {}
                         tos_blocked = extra.get("tos_blocked") is True
@@ -951,7 +1019,14 @@ class HostedChatClient:
                             **metadata,
                         )
                         break
+                # A dropped socket: lanes still finish, and their results go
+                # to the journal (undelivered) so a resume does not rerun them.
+                await settle_lanes()
+                while not lane_done.empty():
+                    yield lane_done.get_nowait()
             finally:
+                if frame_get is not None and not frame_get.done():
+                    frame_get.cancel()
                 self._socket = None
                 self._owner = None
                 reader.cancel()

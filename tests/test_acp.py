@@ -2331,7 +2331,10 @@ async def test_account_failures_keep_their_error_after_exhaustion(tmp_path, monk
     ("text", "unfinished", "resumed"),
     [
         ("continue", True, True),
-        ("Continue where you left off with the plan.md", True, True),
+        ("Continue where you left off", True, True),
+        # Extra instructions start a new turn so they are not dropped.
+        ("Continue where you left off with the plan.md", True, False),
+        ("continue, but use 0603 resistors", True, False),
         (
             "<t3_code_instructions>x</t3_code_instructions>\n<user_request>continue</user_request>",
             True,
