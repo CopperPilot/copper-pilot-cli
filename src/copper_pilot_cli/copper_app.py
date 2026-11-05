@@ -51,6 +51,7 @@ from copper_pilot_cli.chat_context import (
     parse_context_usage,
     stored_usage,
 )
+from copper_pilot_cli.checkpoint_events import REPLAY_SKIPPED_TYPES
 from copper_pilot_cli.clipboard import copy_selection_to_clipboard
 from copper_pilot_cli.copper_api import format_token_limits, token_limits, usage_error_message
 from copper_pilot_cli.copper_auth import DeviceLogin, clear_credential
@@ -503,11 +504,8 @@ class CopperPilotApp(App[None]):
         for event in events if isinstance(events, list) else []:
             if not isinstance(event, dict):
                 continue
-            if str(event.get("type")) not in {
-                "copper.text",
-                "copper.tool_request",
-                "copper.tool_result",
-            }:
+            # Text and tool frames are in ``messages``; the stored log may omit them.
+            if str(event.get("type")) not in REPLAY_SKIPPED_TYPES:
                 await self._custom_event(event)
         self._context_usage = stored_usage(values)
         self._compaction = current_compaction(values)

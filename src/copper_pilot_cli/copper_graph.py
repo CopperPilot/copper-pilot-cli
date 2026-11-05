@@ -79,6 +79,7 @@ from copper_pilot_cli.chat_context import (
     todo_items,
     usage_record,
 )
+from copper_pilot_cli.checkpoint_events import events_update
 from copper_pilot_cli.copper_models import (
     cached_chat_model_catalog,
     load_chat_model_catalog,
@@ -1640,6 +1641,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 if manager is not None:
                     await manager.kill_all()
         result = run.result()
+        result["copper_events"] = events_update(state.get("copper_events"), result["copper_events"])
         result.update(_context_result(run, original, context_values, compacted))
         if has_facts(journal.carried):
             result[FACTS_KEY] = merge_facts(state.get(FACTS_KEY), journal.carried)
