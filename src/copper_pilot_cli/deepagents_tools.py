@@ -609,10 +609,11 @@ class LocalToolBroker:
         if canonical_name == "read_file" and (
             external or request.arguments.get("purpose") in RAW_KICAD_READ_PURPOSES
         ):
-            direct = self._read_text_direct(self._disk_path(arguments["file_path"], external))
-            if direct is not None:
-                return direct
-            # Too big for one frame: the native read pages it, with a status header.
+            return self._read_text_window(
+                self._disk_path(arguments["file_path"], external),
+                offset=request.arguments.get("offset"),
+                limit=request.arguments.get("limit"),
+            )
         if canonical_name == "write_binary_file":
             return await self._write_binary(arguments)
         if canonical_name == "execute":
@@ -662,19 +663,45 @@ class LocalToolBroker:
         return self.workspace / file_path.lstrip("/")
 
     @staticmethod
-    def _read_text_direct(path: Path) -> dict[str, Any] | None:
-        """The whole file as raw text, or None when it would not fit one frame."""
+    def _read_text_window(path: Path, *, offset: Any = None, limit: Any = None) -> dict[str, Any]:
+        """Raw text for internal KiCad reads, whole or one frame-sized page.
+
+        A first read that fits one frame returns the whole file with no
+        header, like the desktop harness. Anything bigger, and any request
+        with offset/limit (1-indexed, from the server's pager), returns
+        lines under an "@@ lines a-b of N | next offset b @@" header; the
+        server asks again from line b + 1. External stock libraries
+        (Connector_Generic.kicad_sym is 6.7 MB) take this path too, which the
+        Deep Agents read cannot (it only sees the workspace).
+        """
         try:
-            if path.stat().st_size > _DIRECT_READ_MAX_BYTES:
-                return None
             text = path.read_bytes().decode("utf-8", errors="replace")
         except FileNotFoundError:
             return {"error": f"Error: File '{path}' not found"}
         except OSError as exc:
             return {"error": f"Error reading {path}: {exc}"}
-        if len(json.dumps(text)) > _DIRECT_READ_MAX_BYTES:
-            return None
-        return {"result": text}
+        paged = offset is not None or limit is not None
+        if not paged and len(json.dumps(text)) <= _DIRECT_READ_MAX_BYTES:
+            return {"result": text}
+        lines = text.split("\n")
+        start = max(int(offset or 1), 1)
+        stop = len(lines)
+        if limit is not None:
+            stop = min(stop, start - 1 + max(int(limit), 1))
+        budget = _DIRECT_READ_MAX_BYTES - 256
+        shown: list[str] = []
+        used = 0
+        for line in lines[start - 1 : stop]:
+            cost = len(json.dumps(line))
+            if shown and used + cost > budget:
+                break
+            shown.append(line)
+            used += cost
+        end = start + len(shown) - 1
+        span = f"lines {start}-{end} of {len(lines)}"
+        if end < len(lines):
+            span += f" | next offset {end}"
+        return {"result": f"@@ {span} @@\n" + "\n".join(shown)}
 
     async def _read_binary(self, file_path: str, *, external: bool = False) -> dict[str, Any]:
         # Read bytes from disk: the native read is a text window (2000 lines by

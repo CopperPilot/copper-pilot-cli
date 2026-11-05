@@ -342,17 +342,73 @@ async def test_plain_read_keeps_the_paged_window(tmp_path) -> None:
     assert result["result"].startswith("@@ lines 1-100 of 150 | next offset 100 @@\n")
 
 
+async def _page_through(broker, file_path, **extra):
+    """Follow the CLI's pages like the server's bridge does."""
+    import re
+
+    pages, offset, n = [], None, 0
+    while True:
+        args = dict(extra, file_path=file_path)
+        if offset is not None:
+            args.update(offset=offset, limit=1_000_000)
+        n += 1
+        text = (await broker.execute(tool(f"p{n}", "read_file", **args)))["result"]
+        head, _, body = text.partition("\n")
+        match = re.match(r"@@ lines (\d+)-(\d+) of (\d+)", head)
+        assert match, head
+        pages.append(body)
+        end, total = int(match.group(2)), int(match.group(3))
+        if end >= total:
+            return "\n".join(pages), n
+        offset = end + 1
+
+
 @pytest.mark.asyncio
-async def test_oversized_purpose_read_falls_back_to_paging(tmp_path, monkeypatch) -> None:
+async def test_oversized_purpose_read_comes_back_in_raw_pages(tmp_path, monkeypatch) -> None:
     from copper_pilot_cli import deepagents_tools
 
-    monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 64)
-    (tmp_path / "big.kicad_pcb").write_text("".join(f"(segment {i})\n" for i in range(300)))
+    monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 2_000)
+    body = "".join(f"(segment {i})\n" for i in range(300))
+    (tmp_path / "big.kicad_pcb").write_text(body)
+    broker = LocalToolBroker(tmp_path)
+    text, pages = await _page_through(broker, "big.kicad_pcb", purpose="kicad_workspace_pcb")
+    assert text == body
+    assert pages > 1
+
+
+@pytest.mark.asyncio
+async def test_big_external_library_is_paged_not_lost(tmp_path, monkeypatch) -> None:
+    """Connector_Generic.kicad_sym (6.7 MB) is over one frame; the native read
+    could not see it outside the workspace and said 'not found'."""
+    from copper_pilot_cli import deepagents_tools
+
+    monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 4_000)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    lib = tmp_path / "Connector_Generic.kicad_sym"
+    body = "(kicad_symbol_lib\n" + '\t(symbol "Conn" (pin 1))\n' * 500 + ")\n"
+    lib.write_text(body)
+    broker = LocalToolBroker(workspace)
+    text, pages = await _page_through(broker, str(lib), external=True, platform="linux")
+    assert text == body
+    assert pages > 1
+
+
+@pytest.mark.asyncio
+async def test_internal_read_honours_offset_and_limit(tmp_path) -> None:
+    (tmp_path / "a.kicad_sch").write_text("l1\nl2\nl3\nl4")
     broker = LocalToolBroker(tmp_path)
     result = await broker.execute(
-        tool("1", "read_file", file_path="big.kicad_pcb", purpose="kicad_workspace_pcb")
+        tool(
+            "1",
+            "read_file",
+            file_path="a.kicad_sch",
+            purpose="kicad_workspace_schematic",
+            offset=2,
+            limit=2,
+        )
     )
-    assert result["result"].startswith("@@ lines 1-100 of 300")
+    assert result == {"result": "@@ lines 2-3 of 4 | next offset 3 @@\nl2\nl3"}
 
 
 @pytest.mark.asyncio
