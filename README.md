@@ -68,8 +68,18 @@ copper-pilot ./my-board
 copper-pilot --resume
 copper-pilot threads list
 copper-pilot -n -m "Review this board" --json
+copper-pilot -n -r          # resume the most recent thread's unfinished turn
 copper-pilot --mode plan --effort intelligence -m "Survey and plan this board"
 ```
+
+Long turns survive dropped connections, server restarts and LLM provider rate
+limits (the CLI shows "High demand — waiting to continue" and resumes on its
+own): the CLI keeps a
+journal of the turn on your machine and resumes it automatically. If a turn
+still does not finish (or the CLI was closed mid-turn), type `/resume` in the
+TUI, run `copper-pilot -n -r`, or send "continue"; the turn picks up where it
+left off without re-running finished tools. See
+[Turn durability](docs/cli.md#turn-durability).
 
 Both `copper-pilot` and `copper-pilot-cli` run the same program.
 `copper-pilot --help` lists flags; [docs/cli.md](docs/cli.md) is the full
@@ -170,7 +180,11 @@ That snippet is the runnable example in
 The hosted agent may request local filesystem and shell tools. Reads and
 searches run freely. Writes, edits, deletes, and shell commands are gated by
 Manual approval by default. Auto permits only deterministic routine actions;
-unknown actions still ask. YOLO must be selected explicitly.
+unknown actions still ask. YOLO must be selected explicitly. Shell commands
+that reach outside the workspace (`find /`, `grep -r ~`, other projects under
+the home directory, `docker`, `sudo`, `ssh`) ask in every mode, YOLO included,
+and are refused when nobody can approve them (headless, MCP). See
+[docs/cli.md](docs/cli.md#outside-the-workspace).
 
 Filesystem, search, edit, and shell execution use Deep Agents' native
 `FilesystemMiddleware` tools and `LocalShellBackend`; CopperPilot's adapter only

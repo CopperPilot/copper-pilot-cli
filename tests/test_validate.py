@@ -521,6 +521,15 @@ def test_review_policy_only_allows_scratch_writes_and_safe_shell(tmp_path) -> No
     assert asyncio.run(ask("execute", command="kicad-cli pcb render board/board.kicad_pcb"))
     assert not asyncio.run(ask("execute", command="rm -rf board"))
     assert not asyncio.run(ask("unknown_tool"))
+    outside = ApprovalRequest(
+        "2",
+        "execute",
+        {"command": "find / -name kicad-cli"},
+        "Outside the workspace: `find` searches /",
+        canonical_name="execute",
+        outside_workspace="`find` searches /",
+    )
+    assert not asyncio.run(policy(outside))
 
 
 @pytest.mark.asyncio
@@ -1415,7 +1424,7 @@ class FailedFinalClient(FakeClient):
 async def test_hosted_failure_records_the_hosted_turn_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
-    monkeypatch.setattr("copper_pilot_cli.copper_graph.RETRY_BACKOFF_SECONDS", (0.0,) * 4)
+    monkeypatch.setattr("copper_pilot_cli.copper_graph.RETRY_BACKOFF_SECONDS", (0.0,) * 9)
     make_project(tmp_path)
     turn = HostedTurnRunner(CREDENTIAL, client_factory=lambda: FailedFinalClient(""))
     runner = Runner(
@@ -1433,7 +1442,7 @@ async def test_hosted_failure_records_the_hosted_turn_id(tmp_path, monkeypatch) 
     assert result.error == (
         "CopperPilot ran into an error. (the hosted turn failed; "
         "the service sent no further detail; hosted turn turn-7.) "
-        "[all 4 attempts failed the same way]"
+        "[all 9 attempts failed the same way]"
     )
 
 

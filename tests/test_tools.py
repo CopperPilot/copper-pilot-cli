@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import re
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -252,3 +254,75 @@ async def test_noninteractive_ask_rejects_immediately(tmp_path) -> None:
     broker = LocalToolBroker(tmp_path)
     with pytest.raises(ToolRejected, match="headless and MCP"):
         await broker.execute(tool("ask", "ask_user_question", question="Continue?"))
+
+
+def _home_workspace(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    workspace = home / "board"
+    (home / "other").mkdir(parents=True)
+    (home / "other" / "secret.kicad_sch").write_text("other project")
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return workspace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [ApprovalMode.AUTO, ApprovalMode.YOLO])
+async def test_outside_workspace_shell_prompts_in_auto_and_yolo(
+    tmp_path, monkeypatch, mode
+) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    requests = []
+
+    async def approve(request):
+        requests.append(request)
+        return True
+
+    broker = LocalToolBroker(workspace, mode=mode, approve=approve)
+    result = await broker.execute(tool("1", "bash", command="cat ~/other/secret.kicad_sch"))
+
+    assert "other project" in result["result"]
+    assert len(requests) == 1
+    assert requests[0].outside_workspace == "touches ~/other/secret.kicad_sch"
+    assert requests[0].reason == "Outside the workspace: touches ~/other/secret.kicad_sch"
+    # Approval is per call: the next one asks again and the mode is unchanged.
+    await broker.execute(tool("2", "bash", command="cat ~/other/secret.kicad_sch"))
+    assert len(requests) == 2
+    assert broker.mode is mode
+
+
+@pytest.mark.asyncio
+async def test_outside_workspace_shell_rejected_by_user(tmp_path, monkeypatch) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+
+    async def decline(_request):
+        return False
+
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO, approve=decline)
+    # "/" is the workspace drive's root ("C:\\" on Windows).
+    root = re.escape("/" if os.name != "nt" else workspace.anchor)
+    with pytest.raises(ToolRejected, match=rf"outside the workspace \(`find` searches {root}\)"):
+        await broker.execute(tool("1", "bash", command="find / -name kicad-cli"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(ApprovalMode))
+async def test_headless_rejects_outside_workspace_with_reason(tmp_path, monkeypatch, mode) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    broker = LocalToolBroker(workspace, mode=mode)
+    assert broker.has_approver is False
+    with pytest.raises(ToolRejected) as caught:
+        await broker.execute(tool("1", "bash", command='grep -rn "VCC" / 2>/dev/null'))
+    root = "/" if os.name != "nt" else workspace.anchor
+    assert str(caught.value) == (
+        f"blocked: outside the workspace (`grep -r` searches {root}); ask the user first"
+    )
+
+
+@pytest.mark.asyncio
+async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monkeypatch) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    (workspace / "board.kicad_sch").write_text("VCC")
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
+    result = await broker.execute(tool("1", "bash", command="grep -rn VCC ."))
+    assert "board.kicad_sch" in result["result"]

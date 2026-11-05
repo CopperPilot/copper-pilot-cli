@@ -46,6 +46,7 @@ from copper_pilot_cli.copper_acp import (
     OPTION_SKIP,
     QUESTION_MESSAGE,
     QUESTION_TIMEOUT_MESSAGE,
+    RESUME_COMMAND,
     USAGE_COMMAND,
     USAGE_LIMIT_ERROR_CODE,
     AcpSession,
@@ -84,7 +85,13 @@ from copper_pilot_cli.copper_models import (
     FALLBACK_CATALOG,
     MODEL_FALLBACK_GENERIC_NOTICE,
 )
-from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, ErrorInfo, ProtocolError
+from copper_pilot_cli.copper_protocol import (
+    CopperEffort,
+    CopperMode,
+    ErrorInfo,
+    ProtocolError,
+    ToolRequest,
+)
 from copper_pilot_cli.copper_status_events import SubagentStatus
 from copper_pilot_cli.copper_tools import ApprovalMode, ApprovalRequest, ToolRejected
 
@@ -717,6 +724,7 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
         EFFORT_COMMAND,
         MODEL_COMMAND,
         USAGE_COMMAND,
+        RESUME_COMMAND,
     ]
     updates = updates[1:]
     assert updates[4].kind == "read" and updates[4].locations[0].path == "board.kicad_sch"
@@ -983,8 +991,8 @@ async def test_retry_thoughts_skip_the_terminal_attempt(tmp_path, monkeypatch) -
         if update.session_update == "agent_thought_chunk"
     ]
     assert thoughts == [
-        "Attempt 1/4 failed: boom (will retry)\n",
-        "Retrying (1/3) in 2s: boom\n",
+        "Attempt 1/9 failed: boom (will retry)\n",
+        "Retrying (1/8) in 2s: boom\n",
     ]
 
 
@@ -1260,6 +1268,54 @@ async def test_approval_handler_outcomes(tmp_path, monkeypatch) -> None:
     ]
 
 
+async def test_outside_workspace_permission_carries_reason(tmp_path, monkeypatch) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, responses=[selected(OPTION_ALLOW), selected(OPTION_ALLOW_SESSION)]
+    )
+    broker = agent.sessions[session_id].broker
+    broker.mode = ApprovalMode.YOLO
+    request = ApprovalRequest(
+        tool_call_id="shell-1",
+        tool_name="bash",
+        arguments={"command": "find / -name kicad-cli"},
+        reason="Outside the workspace: `find` searches /",
+        canonical_name="execute",
+        outside_workspace="`find` searches /",
+    )
+    assert await broker.approve(request) is True
+    permission = conn.permissions[0]
+    tool_call = permission["tool_call"]
+    assert tool_call.title.startswith("Outside the workspace: ")
+    assert "`find` searches /" in tool_call.content[0].content.text
+    assert [option.kind for option in permission["options"]] == ["allow_once", "reject_once"]
+    # A stray session-wide allow never switches the session or approves.
+    assert await broker.approve(request) is False
+    assert broker.mode is ApprovalMode.YOLO
+
+
+async def test_acp_yolo_session_still_asks_for_outside_workspace_shell(
+    tmp_path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    workspace = home / "board"
+    workspace.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    agent, conn, _runtime, session_id = await _connected_agent(
+        workspace, monkeypatch, responses=[selected(OPTION_REJECT)]
+    )
+    broker = agent.sessions[session_id].broker
+    broker.mode = ApprovalMode.YOLO
+    with pytest.raises(ToolRejected, match="the user declined"):
+        await broker.execute(
+            ToolRequest(
+                tool_call_id="shell-2",
+                tool_name="bash",
+                arguments={"command": 'grep -rn "VCC" ~'},
+            )
+        )
+    assert "`grep -r` searches ~" in conn.permissions[0]["tool_call"].content[0].content.text
+
+
 async def test_question_handler_maps_options_onto_permissions(tmp_path, monkeypatch) -> None:
     responses = [
         selected("option:1"),
@@ -1427,13 +1483,14 @@ def test_effort_command_parsing() -> None:
 
 @pytest.mark.usefixtures("model_selector_enabled")
 def test_available_commands_advertise_effort_model_and_usage() -> None:
-    effort, model, usage = available_commands()
+    effort, model, usage, resume = available_commands()
     assert effort.name == EFFORT_COMMAND
     assert effort.input.root.hint == "balanced | intelligence"
     assert model.name == MODEL_COMMAND
     assert model.input.root.hint == "model id"
     assert usage.name == USAGE_COMMAND
     assert usage.input is None
+    assert resume.name == RESUME_COMMAND
 
 
 def test_model_command_parsing() -> None:
@@ -2106,7 +2163,11 @@ def test_config_options_hide_the_model_while_the_selector_is_off() -> None:
 
 
 def test_available_commands_omit_model_while_the_selector_is_off() -> None:
-    assert [command.name for command in available_commands()] == [EFFORT_COMMAND, USAGE_COMMAND]
+    assert [command.name for command in available_commands()] == [
+        EFFORT_COMMAND,
+        USAGE_COMMAND,
+        RESUME_COMMAND,
+    ]
 
 
 async def test_model_config_option_is_rejected_while_the_selector_is_off(
@@ -2150,3 +2211,145 @@ async def test_model_fallback_notice_names_no_model_while_the_selector_is_off(
     agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
     await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Hi")])
     assert conn.updates[1][1].content.text == f"\n\n*{MODEL_FALLBACK_GENERIC_NOTICE}*\n\n"
+
+
+# ------------------------------------------------------------- turn resume
+
+
+class JournalRuntime(FakeRuntime):
+    def __init__(self, events=None, *, unfinished: bool = False) -> None:
+        super().__init__(events)
+        self.unfinished = unfinished
+
+    async def unfinished_turn(self, _config):
+        return object() if self.unfinished else None
+
+
+EXHAUSTED = [
+    {"type": "copper.text", "data": "Placed U1."},
+    {
+        "type": "copper.resume",
+        "data": {
+            "attempt": 9,
+            "reason": "connection_lost",
+            "will_retry": False,
+            "manual_resume": True,
+            "error_type": "connection",
+        },
+        "title": "Turn unfinished",
+    },
+    {
+        "type": "copper.error",
+        "data": {"message": "Chat socket closed before a final response.", "resumable": True},
+    },
+]
+
+
+async def test_exhausted_auto_resume_ends_the_prompt_with_a_resume_hint(
+    tmp_path, monkeypatch
+) -> None:
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, JournalRuntime(EXHAUSTED)
+    )
+    response = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="Route it")]
+    )
+    assert response.stop_reason == "max_turn_requests"
+    message = conn.updates[-1][1].content.text
+    assert "Chat socket closed before a final response" in message
+    assert "continue" in message and "/resume" in message
+
+
+async def test_provider_capacity_shows_as_progress_and_pauses_with_high_demand_copy(
+    tmp_path, monkeypatch
+) -> None:
+    from copper_pilot_cli.copper_acp import PROVIDER_BUSY_TURN_MESSAGE
+    from copper_pilot_cli.copper_graph import PROVIDER_BUSY_PAUSED_MESSAGE
+
+    events = [
+        {
+            "type": "copper.capacity_wait",
+            "data": {"kind": "capacity_wait", "phase": "retrying", "retry_in_s": 20},
+            "title": "High demand — waiting to continue (next try in 20 s)",
+        },
+        {
+            "type": "copper.resume",
+            "data": {"reason": "provider_busy", "will_retry": True, "delay_s": 45.0},
+            "title": "CopperPilot is under high demand; continuing in 45 s",
+        },
+        {
+            "type": "copper.resume",
+            "data": {
+                "reason": "provider_busy",
+                "will_retry": False,
+                "manual_resume": True,
+                "error_type": "provider_busy",
+            },
+            "title": "paused",
+        },
+        {
+            "type": "copper.error",
+            "data": {
+                "type": "provider_busy",
+                "message": PROVIDER_BUSY_PAUSED_MESSAGE,
+                "resumable": True,
+            },
+        },
+    ]
+    agent, conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, JournalRuntime(events)
+    )
+    response = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="Route it")]
+    )
+    assert response.stop_reason == "max_turn_requests"
+    thoughts = [
+        update.content.text
+        for _sid, update in conn.updates
+        if getattr(update, "session_update", "") == "agent_thought_chunk"
+    ]
+    assert thoughts == [
+        "High demand — waiting to continue (next try in 20 s)\n",
+        "CopperPilot is under high demand; continuing in 45 s\n",
+    ]
+    message = conn.updates[-1][1].content.text
+    assert message == "\n\n" + PROVIDER_BUSY_TURN_MESSAGE
+    assert "high demand" in message and "error" not in message
+
+
+async def test_account_failures_keep_their_error_after_exhaustion(tmp_path, monkeypatch) -> None:
+    events = [dict(EXHAUSTED[1]), {"type": "copper.error", "data": {"message": "Sign in again."}}]
+    events[0]["data"] = {**EXHAUSTED[1]["data"], "error_type": "authentication"}
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, JournalRuntime(events)
+    )
+    with pytest.raises(RequestError):
+        await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="x")])
+
+
+@pytest.mark.parametrize(
+    ("text", "unfinished", "resumed"),
+    [
+        ("continue", True, True),
+        ("Continue where you left off with the plan.md", True, True),
+        (
+            "<t3_code_instructions>x</t3_code_instructions>\n<user_request>continue</user_request>",
+            True,
+            True,
+        ),
+        ("continue", False, False),
+        ("/resume", False, True),
+        ("Route the board", True, False),
+    ],
+)
+async def test_continue_prompts_resume_the_unfinished_turn(
+    tmp_path, monkeypatch, text, unfinished, resumed
+) -> None:
+    runtime = JournalRuntime(unfinished=unfinished)
+    agent, _conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text=text)])
+    assert runtime.values is not None
+    if resumed:
+        assert runtime.values == {"copper_resume": {}}
+    else:
+        assert runtime.values["messages"][0].content == text

@@ -942,7 +942,7 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
         options = app.screen.query_one(OptionList)
-        assert options.has_focus
+        await _wait_until(pilot, lambda: options.has_focus)
         assert options.highlighted == 0
         await pilot.press("down", "enter")
         assert await answer_task == {
@@ -960,7 +960,7 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         await pilot.pause()
         assert isinstance(app.screen, QuestionScreen)
         custom = app.screen.query_one("#answer", Input)
-        assert custom.has_focus
+        await _wait_until(pilot, lambda: custom.has_focus)
         await pilot.press("b", "a", "r", "r", "e", "l", "enter")
         assert await custom_task == {
             "status": "answered",
@@ -974,7 +974,7 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
         options = app.screen.query_one(OptionList)
-        assert options.has_focus
+        await _wait_until(pilot, lambda: options.has_focus)
         await pilot.press("down", "down", "down", "enter")
         assert await skip_task == {"status": "skipped"}
 
@@ -1047,6 +1047,46 @@ async def test_inline_approval_tab_collects_rejection_feedback(tmp_path) -> None
         await pilot.press("k", "e", "e", "p", "space", "i", "t", "enter")
         assert await decision is False
         assert app._tools["delete-1"].output == "keep it"
+
+
+@pytest.mark.asyncio
+async def test_outside_workspace_approval_shows_reason_and_drops_auto(tmp_path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    app = CopperPilotApp(FakeRuntime(), broker, tmp_path, "thread")
+    request = ApprovalRequest(
+        tool_call_id="shell-1",
+        tool_name="bash",
+        canonical_name="execute",
+        arguments={"command": "find / -name kicad-cli"},
+        reason="Outside the workspace: `find` searches /",
+        outside_workspace="`find` searches /",
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        broker.mode = ApprovalMode.YOLO  # set after startup skips the YOLO notice
+        await app._custom_event(
+            {
+                "type": "copper.tool_request",
+                "data": {
+                    "tool_call_id": "shell-1",
+                    "tool_name": "bash",
+                    "arguments": request.arguments,
+                },
+            }
+        )
+        decision = asyncio.create_task(app.request_approval(request))
+        await _wait_until(
+            pilot,
+            lambda: any(menu.has_focus for menu in app.query(ApprovalMenu)),
+        )
+        menu = app.query_one(ApprovalMenu)
+        scope = str(menu.query_one(".approval-scope", Static).render())
+        assert "Outside the workspace: `find` searches /" in scope
+        assert [kind for _label, kind in menu._options] == ["approve", "reject"]
+        await pilot.press("a")  # no Auto shortcut for this prompt
+        assert not decision.done()
+        await pilot.press("n")
+        assert await decision is False
+        assert broker.mode is ApprovalMode.YOLO
 
 
 @pytest.mark.asyncio
@@ -1690,3 +1730,135 @@ async def test_btw_cancels_a_question_dropped_from_history(tmp_path) -> None:
         assert [entry.question for entry in app._btw.entries] == ["new?"]
         gate.set()
         await _wait_until(pilot, lambda: app._btw.pending() == 0)
+
+
+# ------------------------------------------------------------- turn resume
+
+
+class ResumableRuntime(FakeRuntime):
+    """A thread with an unfinished turn; resuming it clears the journal."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from copper_pilot_cli.turn_journal import TurnJournal
+
+        self.journal: object | None = TurnJournal(
+            query="Route the USB pair", original_len=1, last_error={"type": "connection"}
+        )
+        self.values: list[dict] = []
+
+    async def unfinished_turn(self, _config):
+        return self.journal
+
+    async def astream(self, values, _config):
+        self.values.append(values)
+        self.journal = None
+        yield (), "custom", {"type": "copper.text", "data": "routed"}
+        yield (), "custom", {"type": "copper.final", "data": {"success": True}}
+
+
+@pytest.mark.asyncio
+async def test_unfinished_turn_is_offered_and_resumed_with_slash_resume(tmp_path) -> None:
+    from copper_pilot_cli.copper_widgets import ResumeNotice
+
+    runtime = ResumableRuntime()
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_until(pilot, lambda: bool(list(app.query(ResumeNotice))))
+        notice = str(list(app.query(ResumeNotice))[0].render())
+        assert "Route the USB pair" in notice and "/resume" in notice
+        await app._command("/resume")
+        await _wait_until(pilot, lambda: app._turn_task is None and runtime.values)
+        assert runtime.values == [{"copper_resume": {}}]
+        assert not list(app.query(ResumeNotice))
+        assert app._turn_state.phase is TurnPhase.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_exhausted_turn_shows_the_resume_affordance(tmp_path) -> None:
+    from copper_pilot_cli.copper_widgets import ResumeNotice
+
+    runtime = FakeRuntime()
+
+    async def exhausted(_values, _config):
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.resume",
+                "data": {"attempt": 9, "will_retry": False, "manual_resume": True},
+                "title": "Turn unfinished",
+            },
+        )
+        yield (), "custom", {"type": "copper.error", "data": {"message": "gave up"}}
+
+    runtime.astream = exhausted
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("route it")
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        assert len(list(app.query(ResumeNotice))) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_capacity_waits_show_a_countdown_not_an_error(tmp_path) -> None:
+    from copper_pilot_cli.copper_graph import PROVIDER_BUSY_PAUSED_MESSAGE
+    from copper_pilot_cli.copper_widgets import ResumeNotice
+
+    runtime = FakeRuntime()
+    gate = asyncio.Event()
+    seen: list[str] = []
+
+    async def busy(_values, _config):
+        wait = {"kind": "capacity_wait", "phase": "retrying", "retry_in_s": 20, "message": "m"}
+        yield (), "custom", {"type": "copper.capacity_wait", "data": wait, "title": "t"}
+        await gate.wait()
+        gate.clear()
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.resume",
+                "data": {"reason": "provider_busy", "will_retry": True, "delay_s": 45.0},
+            },
+        )
+        await gate.wait()
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.resume",
+                "data": {"reason": "provider_busy", "will_retry": False, "manual_resume": True},
+            },
+        )
+        yield (
+            (),
+            "custom",
+            {
+                "type": "copper.error",
+                "data": {"type": "provider_busy", "message": PROVIDER_BUSY_PAUSED_MESSAGE},
+            },
+        )
+
+    runtime.astream = busy
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._submit("route it")
+
+        def status() -> str:
+            return app._loading.status_text if app._loading is not None else ""
+
+        await _wait_until(pilot, lambda: "next try in" in status())
+        seen.append(status())
+        assert app._countdown is not None
+        gate.set()
+        await _wait_until(pilot, lambda: "continuing in" in status())
+        seen.append(status())
+        gate.set()
+        await _wait_until(pilot, lambda: app._turn_task is None)
+        assert app._countdown is None
+        (notice,) = list(app.query(ResumeNotice))
+        assert "high demand" in str(notice.render())
+        assert not list(app.query(ErrorMessage))
+    assert seen[0].startswith("High demand — waiting to continue (next try in ")
+    assert seen[1].startswith("CopperPilot is under high demand; continuing in ")

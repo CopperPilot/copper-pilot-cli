@@ -1531,6 +1531,15 @@ async def delete_thread(thread_id: str) -> bool:
                     filtered = [row for row in rows if row["thread_id"] != thread_id]
                     _recent_threads_cache[key] = filtered
 
+    # The unfinished-turn journal lives next to the checkpoints; deleting the
+    # chat deletes it too (protocol v1: kept until the turn completes or the
+    # user deletes the chat).
+    from copper_pilot_cli.turn_journal import JournalStore
+
+    try:
+        JournalStore().delete(thread_id)
+    except OSError as exc:
+        logger.warning("Could not delete the turn journal (%s)", type(exc).__name__)
     return deleted
 
 

@@ -27,8 +27,8 @@ valid.
 | Flag | Meaning |
 |------|---------|
 | `-m`, `--message TEXT` | Send this message. In a TTY this seeds the composer; with `-n` it is required. |
-| `-r`, `--resume [THREAD]` | Continue a thread. With no id, resume the most recent thread for this workspace. |
-| `-n`, `--non-interactive` | Run without the Textual UI. Requires `--message`. |
+| `-r`, `--resume [THREAD]` | Continue a thread. With no id, resume the most recent thread for this workspace. With `-n` and no `--message`, resume that thread's unfinished turn (see [Turn durability](#turn-durability)). |
+| `-n`, `--non-interactive` | Run without the Textual UI. Requires `--message`, or `-r` to resume an unfinished turn. |
 | `--quiet` | Hide status and reasoning lines in headless streaming output. |
 | `--no-stream` | Print the final assistant message after the run instead of streaming. |
 | `--json` | Emit JSON events (or a final JSON document with `--no-stream`). |
@@ -36,7 +36,7 @@ valid.
 | `--effort {balanced,intelligence}` | Hosted effort. Default: `balanced`; Intelligence requires a paid plan. |
 | `--model MODEL` | Intelligence model id (see below). Implies `--effort intelligence`; rejected with `--effort balanced`. |
 | `-y`, `--auto-approve` | Auto approval: routine writes and known-safe shell still run; unknown actions prompt. |
-| `--yolo` | Permit local side effects without prompting. Must be set explicitly. |
+| `--yolo` | Permit local side effects without prompting, except commands that reach outside the workspace. Must be set explicitly. |
 | `--version` | Print the package version. |
 
 Examples:
@@ -45,6 +45,7 @@ Examples:
 copper-pilot ./my-board
 copper-pilot --resume
 copper-pilot -n -m "Review this board" --json
+copper-pilot -n -r            # finish the most recent thread's unfinished turn
 copper-pilot ./my-board --mode plan -m "Propose a power tree"
 copper-pilot ./my-board --mode plan --effort intelligence -m "Survey and plan the power tree"
 copper-pilot ./my-board --model gpt-6.1-sol -m "Review the USB-C front end"
@@ -53,6 +54,35 @@ copper-pilot ./my-board --model gpt-6.1-sol -m "Review the USB-C front end"
 Headless mode is also used when `--message` is set and stdout is not a TTY.
 With `--json --no-stream`, the document includes `thread_id` so a later run can
 pass `--resume`.
+
+Each streamed `--json` line is one event:
+
+```json
+{"type": "text", "data": "…", "title": null, "turn_id": "…", "root_turn_id": "…",
+ "resume_attempt": 0, "ts": 1793500000.123, "sequence": 12}
+```
+
+`type`, `data` and `title` are unchanged from earlier releases. `turn_id` is the
+hosted attempt, `root_turn_id` the logical turn (the id of its first attempt),
+`resume_attempt` the client's resume count (0 for the original attempt) and
+`ts` epoch seconds. `sequence` and `server_resume_attempt` (the hosted
+service's own retry counter) appear when the hosted frame carried them.
+`resume` events report each resume:
+`{"attempt", "reason", "delay_s", "will_retry", "root_turn_id", "previous_turn_id",
+"error_type", "error_message", "manual_resume"}`.
+`capacity_wait` events report the hosted model waiting for LLM provider
+capacity (a healthy turn, not an error). Their fields also appear at the top
+level of the line:
+
+```json
+{"type": "capacity_wait", "phase": "retrying", "model": "gemini-3.8-flash",
+ "retry_in_s": 20.0, "waited_s": 45.0, "budget_s": 600.0, "attempt": 2,
+ "message": "CopperPilot is under high demand. …", "data": {…},
+ "title": "High demand — waiting to continue (next try in 20 s)",
+ "turn_id": "…", "root_turn_id": "…", "resume_attempt": 0, "ts": 1793500000.123}
+```
+
+`phase` is `queued`, `retrying` or `resumed` (the wait is over).
 
 ### Side questions (`/btw`)
 
@@ -196,11 +226,13 @@ advertises a terminal auth method that runs `copper-pilot auth login`.
 | `session/cancel` | Cancels the hosted turn and local tools |
 | `usage_update` | Prompt tokens of the latest hosted turn; window size is unknown (0) |
 | `plan` | Hosted todo list events and `.copperpilot/plans/*.plan.md` todos |
-| `available_commands_update` | `/effort balanced\|intelligence`, `/model [id]`, and `/usage`, answered locally |
+| `available_commands_update` | `/effort balanced\|intelligence`, `/model [id]`, and `/usage`, answered locally; `/resume` resumes the unfinished turn |
+| Stop reason `max_turn_requests` | Automatic resumes ran out; the message says how to continue, and the next "continue" prompt resumes the turn |
 | Prompt error `-32003` | A usage limit refused the turn; see below |
 
 "Allow all for this session" switches that session to YOLO until the server
-exits; it is never saved. Clarifying questions use ACP form elicitation when
+exits; it is never saved. Commands that reach outside the workspace still ask
+each time (see [Outside the workspace](#outside-the-workspace)). Clarifying questions use ACP form elicitation when
 the client supports it (T3 Code does): options become an enum, free text a
 string field. Without form elicitation, option questions are shown as
 permission choices plus Skip and free-text questions are declined with a
@@ -331,32 +363,100 @@ searches run freely. Writes, edits, deletes, and shell commands are gated:
 
 `--yolo` wins over `--auto-approve`. Saved preferences never enable YOLO.
 
+### Outside the workspace
+
+Some shell commands reach beyond the project folder, and they need explicit
+approval in every mode, Auto and YOLO included:
+
+- recursive searches rooted at `/`, a system top-level directory (`/usr`,
+  `/etc`, `/home`, ...), or your home directory: `find /`, `grep -r ... ~`,
+  `rg`, `fd`, `du`, `tree`, `ls -R`, and `locate`/`mdfind`
+- paths under your home directory outside the workspace, such as
+  `cat ~/other-project/x.kicad_sch` or `cp ~/Downloads/lib.kicad_sym .`.
+  KiCad's library and settings folders, `~/.copper-pilot` and `TMPDIR` are
+  allowed.
+- `docker`, `podman`, `kubectl`, `sudo`, `ssh`, `scp`, and similar
+
+The CLI follows `&&`/`;`/`|` chains, `cd`, `$(...)` and `sh -c`. The TUI
+prompt shows the reason and offers only yes or no. ACP clients get a
+permission request titled "Outside the workspace: ..." with the reason and no
+"Allow all for this session". Each approval covers that one call only.
+
+With nobody to ask (headless `-n`, MCP), the command is refused and the agent
+gets the tool error `blocked: outside the workspace (<reason>); ask the user
+first`. This is a heuristic, not a sandbox: in-project commands with relative
+paths (`kicad-cli sch erc board.kicad_sch`, `grep -rn VCC .`) are left alone.
+
 ## Turn durability
 
 Every front-end (TUI, headless, MCP, ACP) runs a hosted turn through the same
-checkpointed graph node, which mirrors the desktop client's chat manager:
+checkpointed graph node. It implements the client side of the turn resume
+protocol (v1). The hosted service keeps no conversation content and cancels a
+turn when its socket closes, so the resume state lives only on this device.
 
-- A stream that drops before the final frame (socket close, timeout, 5xx, 429)
-  or a reconnect that the server refuses at the websocket handshake (HTTP 503
-  while a backend restarts, 429, other 5xx) is retried up to four times with
-  5 s, 10 s, 20 s, and 30 s backoff. The retry
-  re-prompts the hosted agent with the partial transcript and
-  `Resume where we left off: <original message>` so it continues rather than
-  restarting. Deterministic failures (4xx other than 429, invalid or oversized
-  requests, plan refusals, auth) fail immediately.
-- Retry progress is visible: the TUI status bar and a notification, a yellow
-  line in headless text mode, MCP progress, and ACP agent thoughts
-  (`Retrying (1/3) in 5s: …`). `--json` emits `copper.retry` events.
-- The websocket close code and reason are carried into the error message
-  (`close code 1011 received: …`) and the log file.
-- Whatever a failed turn produced before the error (assistant text, tool calls
-  and results) is still checkpointed with a hidden
-  `[Turn interrupted before completion: …]` note, so a later "continue" has the
-  prior work in context.
-- There is no idle timeout between frames once a turn is streaming; websocket
-  keepalive still detects dead peers, and long hosted reasoning or subagent
-  runs no longer trip a client-side limit. The first frame must still arrive
-  within 60 s.
+- **Journal.** While a turn runs, the CLI records the original request, the
+  assistant text streamed so far, and every tool call with its outcome
+  (`completed`, `failed`, or `interrupted` when the outcome was lost; results
+  clipped to 4 KB, at most 200 calls). It is rewritten to
+  `~/.copper-pilot/.state/turns/<thread>.json` as the turn runs and kept in the
+  thread's checkpoint when a turn ends unfinished. It is deleted when the turn
+  completes or the thread is deleted.
+- **Automatic resume.** When a stream drops (socket close, keepalive or idle
+  timeout, 5xx, 429, a failed final, or a reconnect the server refuses with
+  HTTP 503), the CLI resends the *original* request with a new `turn_id` and
+  `request.resume` built from the journal (capability `turn_resume_v1`). The
+  server continues from there; completed tools are not run again, and a
+  repeated `tool_call_id` is answered from the local cache. Up to 8 resumes or
+  10 minutes of recovery per logical turn, with 1, 2, 5, 10, 20, 30, 60, 60 s
+  backoff (±20% jitter). Before each resume the CLI waits for
+  `GET /api/heartbeat` to answer 200; that wait does not use up an attempt.
+- **Server restarts and socket rotation.** A `final` with `resumable: true`
+  (`server_restarting`, `socket_rotation`) resumes after 0–2 s and does not
+  count against the error budget (the hard cap is 20 resumes per turn).
+- **High demand (LLM rate limits).** While the hosted model waits for provider
+  capacity the server sends `capacity_wait` events; the CLI shows "High
+  demand — waiting to continue (next try in N s)" and the idle bound grows by
+  the server's remaining wait budget, so the wait is never mistaken for a
+  stall. When the server's wait budget runs out the turn ends with a
+  resumable `provider_busy` final: the CLI waits its `retry_after_s` (plus
+  up to 20% jitter, at least 15 s) and resumes with reason `provider_busy`. These resumes have
+  their own budget, 6 in a row or 30 minutes per logical turn, and do not
+  spend the error budget; any model output starts a new count. When they run
+  out the turn stays resumable and says CopperPilot is under high demand
+  rather than reporting an error.
+- **Fail fast.** Authentication, usage limits, invalid or oversized requests,
+  content-policy blocks and user cancellation are not retried.
+- **Liveness.** The socket pings every 15 s and closes when no pong arrives
+  within 20 s. A turn that receives no frame for 330 s (longer than the
+  server's 300 s quiet timeout; `COPPER_PILOT_IDLE_TIMEOUT_SECONDS`, `0` waits
+  forever) is closed with code 4000 and resumed. The first frame must arrive
+  within 60 s. Frames keep being read while a local tool runs; a tool that
+  finishes after its socket closed still lands in the journal.
+- **Unfinished turns.** When automatic resumes run out, or the CLI is killed,
+  quit or interrupted with Ctrl-C mid-turn, the turn stays resumable:
+  - TUI: opening the thread shows the unfinished turn; type `/resume` (or a
+    message starting with "continue", such as "Continue where you left off").
+    `/resume` opens the thread picker when there is nothing to resume.
+  - Headless: `copper-pilot -n -r [THREAD]` with no `--message` resumes it,
+    and exits 2 when there is nothing to resume. A turn that stops unfinished
+    prints the exact command.
+  - ACP: the prompt ends with stop reason `max_turn_requests` and a message;
+    the next "continue …" prompt or `/resume` resumes it.
+  - Any front-end: a short message starting with `continue` or `resume`
+    resumes the unfinished turn instead of starting a new one. Any other
+    message starts a new turn; the unfinished turn's partial work stays in the
+    transcript.
+- **Visibility.** The TUI status bar and notifications, yellow lines in
+  headless text mode, MCP progress and ACP agent thoughts show resumes
+  (`Retrying (1/8) in 1s: …`) and high-demand waits (the TUI counts down).
+  `--json` emits `retry`, `resume` and `capacity_wait` events. The log file
+  (`~/.copper-pilot/.state/logs/copper-pilot.log`) records each drop (close
+  code, reason, attempt, elapsed time), each resume start and success, each
+  capacity wait and provider-busy pause, and each finished turn (wall time,
+  attempts, capacity waits, tool counts), without content.
+- **Rollback.** `COPPER_PILOT_TURN_RESUME=0` turns off structured resume for a
+  hosted service without `turn_resume_v1`: retries then re-prompt with the
+  partial transcript and `Resume where we left off: <original message>`.
 - Shell commands run in the foreground for the requested timeout (default
   25 s) and then move to the background unless the request sets
   `kill_on_timeout` or `background: false`. After the final frame the client
@@ -406,6 +506,8 @@ with a window or weekly reset time in local time (`It resets at 3:20 AM (in 2h 2
 | Production API | `https://copperpilot.ai` |
 | Development API | `COPPER_PILOT_API_URL` |
 | CLI home | `COPPER_PILOT_CLI_HOME` or `~/.copper-pilot` |
+| Idle bound between frames | `COPPER_PILOT_IDLE_TIMEOUT_SECONDS` (default 330; `0` waits forever) |
+| Structured turn resume | `COPPER_PILOT_TURN_RESUME` (default on; `0` uses the stitched-transcript fallback) |
 | User state | `~/.copper-pilot/.state` |
 | Project artifacts | `.copperpilot/` in the workspace |
 

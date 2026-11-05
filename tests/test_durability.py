@@ -195,11 +195,20 @@ async def test_drop_while_sending_tool_result_reports_close_code(monkeypatch) ->
     async def handler(_request):
         return {"result": "content"}
 
-    kinds = []
-    with pytest.raises(ProtocolError, match="no close frame"):
+    events = []
+    with pytest.raises(ProtocolError, match="no close frame") as caught:
         async for event in client.stream(request(), handler):
-            kinds.append(event.kind)
-    assert kinds == [EventKind.TOOL_REQUEST]
+            events.append(event)
+    # The tool ran; its result is still reported (marked undelivered) so the
+    # journal records it as completed and a resume does not run it again.
+    assert [event.kind for event in events] == [EventKind.TOOL_REQUEST, EventKind.TOOL_RESULT]
+    assert events[1].data == {
+        "tool_call_id": "call-1",
+        "tool_name": "read_file",
+        "result": {"result": "content"},
+        "delivered": False,
+    }
+    assert caught.value.resume_reason == "tool_result_undeliverable"
 
 
 class _StallingSocket(_Socket):
@@ -334,12 +343,14 @@ class ScriptedAgent:
     cancel_requested: bool = False
     tool_broker: Any = None
     inputs: list[list[Any]] = field(default_factory=list)
+    payloads: list[dict[str, Any]] = field(default_factory=list)
     cancel_on_attempt: int | None = None
     conversation_id: str = "conversation"
     conversations: list[str] = field(default_factory=list)
 
     async def astream_events_raw(self, value):
         self.inputs.append(list(value["messages"]))
+        self.payloads.append(dict(value))
         self.conversations.append(self.conversation_id)
         script = self.attempts.pop(0)
         for item in script:
@@ -378,6 +389,7 @@ async def run_graph(agent, monkeypatch, tmp_path, *, thread: str = "t"):
     monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
     monkeypatch.setattr(copper_graph, "RETRY_BACKOFF_SECONDS", (0.0,) * MAX_TURN_ATTEMPTS)
+    monkeypatch.setattr(copper_graph, "IMMEDIATE_RESUME_MAX_DELAY", 0.0)
     workspace = tmp_path / "project"
     workspace.mkdir(exist_ok=True)
     async with create_copper_graph(agent) as runtime:
@@ -428,14 +440,27 @@ async def test_dropped_stream_resumes_with_partial_transcript(monkeypatch, tmp_p
     ]
     assert not [e for e in events if e["type"] == "copper.error"]
 
-    resumed = agent.inputs[1]
-    assert resumed[0].content == "Review it"
-    assert isinstance(resumed[-1], HumanMessage)
-    assert resumed[-1].content == f"{RESUME_PREFIX}Review it"
-    assert isinstance(resumed[-2], AIMessage)
-    assert "tail" in resumed[-2].content
-    assert "[Completed before the interruption: read_file (ok)]" in resumed[-2].content
-    assert any(isinstance(message, ToolMessage) for message in resumed)
+    # The resume resends the ORIGINAL request with the journal, not a
+    # stitched transcript.
+    assert [message.content for message in agent.inputs[1]] == ["Review it"]
+    first, second = agent.payloads
+    assert "resume" not in first
+    resume = second["resume"]
+    assert second["turn_id"] != first["turn_id"]
+    assert resume["root_turn_id"] == first["turn_id"]
+    assert resume["previous_turn_id"] == first["turn_id"]
+    assert resume["attempt"] == 1
+    assert resume["reason"] == "connection_lost"
+    assert resume["assistant_text"] == "Partial tail"
+    assert resume["tool_events"] == [
+        {
+            "tool_call_id": "call-1",
+            "tool_name": "read_file",
+            "arguments": {"file_path": "a"},
+            "status": "completed",
+            "result": "(sch)",
+        }
+    ]
 
     assert [type(message).__name__ for message in messages] == [
         "HumanMessage",
@@ -446,6 +471,23 @@ async def test_dropped_stream_resumes_with_partial_transcript(monkeypatch, tmp_p
     assert messages[1].tool_calls[0]["id"] == "call-1"
     assert messages[-1].content == "tail done."
     assert COPPER_CONTEXT_KEY not in messages[-1].additional_kwargs
+
+
+@pytest.mark.asyncio
+async def test_legacy_stitched_resume_when_turn_resume_is_disabled(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("COPPER_PILOT_TURN_RESUME", "0")
+    agent = ScriptedAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "Partial "), tool_request(), tool_result(), DROP],
+            [CopperEvent(EventKind.TEXT, "done"), CopperEvent(EventKind.FINAL, {"success": True})],
+        ]
+    )
+    _events, _messages = await run_graph(agent, monkeypatch, tmp_path)
+    resumed = agent.inputs[1]
+    assert "resume" not in agent.payloads[1]
+    assert resumed[-1].content == f"{RESUME_PREFIX}Review it"
+    assert "[Completed before the interruption: read_file (ok)]" in resumed[-2].content
+    assert any(isinstance(message, ToolMessage) for message in resumed)
 
 
 @pytest.mark.asyncio
@@ -661,8 +703,10 @@ async def test_finished_and_running_background_processes_resume_together(
     assert early["background"] is True
     await manager.wait_all()
     assert not manager.has_running()
+    # Long enough that it is still running when the first turn ends, even on
+    # a loaded CI runner (0.4 s raced the turn on ubuntu 3.13).
     late = await run_shell(
-        py("import time; time.sleep(0.4); print('late')"),
+        py("import time; time.sleep(3); print('late')"),
         tmp_path,
         manager=manager,
         foreground_seconds=0.05,
@@ -760,11 +804,10 @@ async def test_failed_final_is_retried_with_the_partial_transcript(monkeypatch, 
     assert not [e for e in events if e["type"] == "copper.error"]
     finals = [e for e in events if e["type"] == "copper.final"]
     assert [final["data"]["success"] for final in finals] == [True]
-    resumed = agent.inputs[1]
-    assert resumed[-1].content == f"{RESUME_PREFIX}Review it"
-    assert "Halfway." in resumed[-2].content
-    assert "ran into an error" not in resumed[-2].content
-    assert "[Completed before the interruption: read_file (ok)]" in resumed[-2].content
+    resume = agent.payloads[1]["resume"]
+    assert [message.content for message in agent.inputs[1]] == ["Review it"]
+    assert resume["assistant_text"] == "Halfway."
+    assert [event["status"] for event in resume["tool_events"]] == ["completed"]
     assert messages[-1].content == "Halfway. Done."
 
 
@@ -779,7 +822,7 @@ async def test_exhausted_failed_finals_surface_the_known_detail(monkeypatch, tmp
     assert error["data"]["message"] == (
         "CopperPilot ran into an error. (the hosted turn failed after 300 s on "
         "gemini-4-argon; the service sent no further detail.) "
-        "[all 4 attempts failed the same way]"
+        f"[all {MAX_TURN_ATTEMPTS} attempts failed the same way]"
     )
     assert error["data"]["code"] == "HOSTED_TURN_FAILED"
     assert error["data"]["type"] == "server"
@@ -817,9 +860,9 @@ async def test_resume_refused_as_too_large_continues_on_a_fresh_conversation(
     assert agent.conversations[2] != "conversation"
     assert agent.conversation_id == agent.conversations[2]
     assert not [e for e in events if e["type"] == "copper.error"]
-    resumed = agent.inputs[2]
-    assert resumed[-1].content == f"{RESUME_PREFIX}Review it"
-    assert "[Completed before the interruption: read_file (ok)]" in resumed[-2].content
+    resume = agent.payloads[2]["resume"]
+    assert resume["attempt"] == 2
+    assert [event["tool_call_id"] for event in resume["tool_events"]] == ["call-1"]
     assert messages[-1].content == "Halfway. Done."
 
 
@@ -849,12 +892,13 @@ async def test_final_error_names_what_earlier_attempts_saw(monkeypatch, tmp_path
     # rea-hardware, 2026-10-30: during a hosted outage every attempt failed
     # differently (dropped sockets, HTTP 503, restarts) but the turn error
     # only carried the last attempt's generic copy.
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 3)
     agent = ScriptedAgent(
         [[DROP], [refused(503)], [CopperEvent(EventKind.TEXT, "Half"), DROP], failed_attempt()]
     )
     events, _messages = await run_graph(agent, monkeypatch, tmp_path)
 
-    assert len(agent.inputs) == MAX_TURN_ATTEMPTS
+    assert len(agent.inputs) == 4
     (error,) = [e for e in events if e["type"] == "copper.error"]
     message = error["data"]["message"]
     assert message.startswith(

@@ -9,6 +9,7 @@ import importlib.util
 import json
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,13 @@ from copper_pilot_cli.copper_auth import (
     load_credential,
     validate_credential,
 )
-from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_graph import (
+    CAPACITY_WAIT_EVENT,
+    PROVIDER_BUSY_PAUSED_MESSAGE,
+    RESUME_EVENT,
+    RETRY_EVENT,
+    create_copper_graph,
+)
 from copper_pilot_cli.copper_models import (
     BUNDLED_MODELS,
     is_model_fallback_event,
@@ -37,7 +44,7 @@ from copper_pilot_cli.copper_models import (
     normalize_model_id,
 )
 from copper_pilot_cli.copper_preferences import saved_approval_mode, shell_auto_allow_settings
-from copper_pilot_cli.copper_protocol import CopperEffort, CopperMode, EventKind
+from copper_pilot_cli.copper_protocol import PROVIDER_BUSY_CODE, CopperEffort, CopperMode, EventKind
 from copper_pilot_cli.copper_status_events import (
     SubagentStatus,
     normalize_subagent_status,
@@ -94,7 +101,11 @@ def parser() -> argparse.ArgumentParser:
         "--resume",
         nargs="?",
         const="recent",
-        help="Resume a thread; omit the id to continue the most recent one",
+        help=(
+            "Resume a thread; omit the id to continue the most recent one. With -n and "
+            "no --message, resume the thread's unfinished turn (after a crash, Ctrl-C or "
+            "a dropped connection) instead of starting a new one"
+        ),
     )
     result.add_argument(
         "-n",
@@ -380,6 +391,11 @@ async def _resolve_thread(resume: str | None, workspace: Path) -> str:
     return generate_thread_id()
 
 
+def _clip_line(text: str, limit: int = 100) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def resolve_effort_and_model(args: argparse.Namespace) -> tuple[CopperEffort | None, str | None]:
     """Apply the picker rule to flags: choosing a model selects Intelligence.
 
@@ -394,26 +410,80 @@ def resolve_effort_and_model(args: argparse.Namespace) -> tuple[CopperEffort | N
     return CopperEffort.INTELLIGENCE, model
 
 
+def json_event(data: dict[str, Any]) -> dict[str, Any]:
+    """One headless ``--json`` line.
+
+    ``type``/``data``/``title`` are unchanged. ``turn_id`` is the hosted
+    attempt's id, ``root_turn_id`` the logical turn's (the first attempt's),
+    ``resume_attempt`` the client resume count (0 for the original attempt)
+    and ``ts`` epoch seconds. ``sequence`` and ``server_resume_attempt`` (the
+    hosted service's own retry counter) appear when the frame carried them.
+    A ``capacity_wait`` line (the hosted model is waiting for LLM provider
+    capacity) also carries its fields (``phase``, ``model``, ``retry_in_s``,
+    ``waited_s``, ``budget_s``, ``attempt``, ``message``) at the top level.
+    """
+    kind = str(data.get("type") or "").removeprefix("copper.")
+    line: dict[str, Any] = {
+        "type": kind,
+        "data": data.get("data"),
+        "title": data.get("title"),
+        "turn_id": data.get("turn_id"),
+        "root_turn_id": data.get("root_turn_id"),
+        "resume_attempt": data.get("turn_attempt"),
+        "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else time.time(),
+    }
+    if data.get("sequence") is not None:
+        line["sequence"] = data["sequence"]
+    if data.get("resume_attempt") is not None:
+        line["server_resume_attempt"] = data["resume_attempt"]
+    payload = data.get("data")
+    if data.get("type") == CAPACITY_WAIT_EVENT and isinstance(payload, dict):
+        line.update({key: value for key, value in payload.items() if key not in line})
+    return line
+
+
 async def _headless(
     runtime: Any,
     workspace: Path,
     thread_id: str,
-    message: str,
+    message: str | None,
     args: argparse.Namespace,
 ) -> int:
+    """Run one turn; ``message=None`` resumes the thread's unfinished turn."""
     config = runtime.config(thread_id, workspace)
     events: list[dict[str, Any]] = []
     subagents: dict[str, SubagentStatus] = {}
     failed = False
-    values = {
-        "messages": [HumanMessage(content=message)],
-        "copper_mode": args.mode,
-    }
-    effort, model = resolve_effort_and_model(args)
-    if effort is not None:
-        values["copper_effort"] = effort.value
-    if model is not None:
-        values["copper_model"] = model
+    values: dict[str, Any]
+    if message is None:
+        unfinished = await runtime.unfinished_turn(config)
+        if unfinished is None:
+            console.print(
+                f"copper-pilot: thread {thread_id} has no unfinished turn to resume; "
+                "pass --message to send a new one.",
+                style="red",
+                markup=False,
+                highlight=False,
+            )
+            return 2
+        if not args.quiet and not args.json:
+            console.print(
+                f"Resuming the unfinished turn: {_clip_line(unfinished.query)}",
+                style="yellow",
+                markup=False,
+                highlight=False,
+            )
+        values = {"copper_resume": {}}
+    else:
+        values = {
+            "messages": [HumanMessage(content=message)],
+            "copper_mode": args.mode,
+        }
+        effort, model = resolve_effort_and_model(args)
+        if effort is not None:
+            values["copper_effort"] = effort.value
+        if model is not None:
+            values["copper_model"] = model
     async for item in runtime.astream(values, config):
         _namespace, stream_mode, data = item
         if stream_mode != "custom" or not isinstance(data, dict):
@@ -428,7 +498,7 @@ async def _headless(
         if args.no_stream:
             continue
         if args.json:
-            print(json.dumps({"type": kind, "data": payload, "title": data.get("title")}))
+            print(json.dumps(json_event(data), default=str), flush=True)
         elif kind == EventKind.TEXT.value:
             print(str(payload), end="", flush=True)
         elif not args.quiet and kind in {
@@ -438,6 +508,33 @@ async def _headless(
             console.print(f"\n{payload}", style="dim", markup=False, highlight=False)
         elif not args.quiet and data.get("type") == RETRY_EVENT:
             console.print(f"\n{data.get('title')}", style="yellow", markup=False, highlight=False)
+        elif not args.quiet and data.get("type") == CAPACITY_WAIT_EVENT:
+            console.print(f"\n{data.get('title')}", style="yellow", markup=False, highlight=False)
+        elif data.get("type") == RESUME_EVENT and isinstance(payload, dict):
+            busy = payload.get("reason") == PROVIDER_BUSY_CODE
+            if busy and payload.get("manual_resume") and not payload.get("will_retry"):
+                console.print(
+                    f"\n{PROVIDER_BUSY_PAUSED_MESSAGE}\n"
+                    f"Resume it with: copper-pilot -n -r {thread_id}",
+                    style="yellow",
+                    markup=False,
+                    highlight=False,
+                )
+            elif busy and not args.quiet and payload.get("will_retry"):
+                console.print(
+                    f"\n{data.get('title')}", style="yellow", markup=False, highlight=False
+                )
+            elif payload.get("manual_resume") and not payload.get("will_retry"):
+                console.print(
+                    f"\nThe turn did not finish. Resume it with: copper-pilot -n -r {thread_id}",
+                    style="yellow",
+                    markup=False,
+                    highlight=False,
+                )
+            elif not args.quiet and payload.get("delay_s") == 0 and payload.get("will_retry"):
+                console.print(
+                    f"\n{data.get('title')}", style="yellow", markup=False, highlight=False
+                )
         elif not args.quiet and kind == EventKind.STATUS_EVENT.value and isinstance(payload, dict):
             if payload.get("kind") == "subagent":
                 identifier = str(payload.get("id") or "")
@@ -524,12 +621,15 @@ async def async_main(args: argparse.Namespace) -> int:
         tool_broker=broker,
     )
     if args.non_interactive or (args.message and not sys.stdout.isatty()):
-        if not args.message:
-            raise ValueError("--message is required in non-interactive mode.")
+        if not args.message and not args.resume:
+            raise ValueError(
+                "--message is required in non-interactive mode "
+                "(or -r to resume a thread's unfinished turn)."
+            )
         notice = asyncio.create_task(notify_background_update())
         try:
             async with create_copper_graph(agent) as runtime:
-                return await _headless(runtime, workspace, thread_id, args.message, args)
+                return await _headless(runtime, workspace, thread_id, args.message or None, args)
         finally:
             if not notice.done():
                 notice.cancel()

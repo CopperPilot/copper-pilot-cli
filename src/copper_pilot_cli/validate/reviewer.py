@@ -102,6 +102,8 @@ def review_policy(snapshot: Path) -> Callable[[ApprovalRequest], Awaitable[bool]
         return True
 
     async def approve(request: ApprovalRequest) -> bool:
+        if request.outside_workspace:
+            return False  # no human reviews validation runs
         name = request.canonical_name or request.tool_name
         if name in {"write_file", "edit_file", "write_binary_file"}:
             return _within_scratch(request.arguments.get("file_path"))

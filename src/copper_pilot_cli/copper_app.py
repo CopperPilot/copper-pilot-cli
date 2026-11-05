@@ -7,6 +7,7 @@ import base64
 import contextlib
 import json
 import logging
+import math
 import uuid
 from pathlib import Path
 from time import monotonic
@@ -53,7 +54,13 @@ from copper_pilot_cli.copper_features import (
     resolve_skill_manifest,
     scan_local_skills,
 )
-from copper_pilot_cli.copper_graph import RETRY_EVENT, CopperGraphRuntime
+from copper_pilot_cli.copper_graph import (
+    CAPACITY_WAIT_EVENT,
+    PROVIDER_BUSY_PAUSED_MESSAGE,
+    RESUME_EVENT,
+    RETRY_EVENT,
+    CopperGraphRuntime,
+)
 from copper_pilot_cli.copper_hooks import HookRunner
 from copper_pilot_cli.copper_models import (
     ChatModelCatalog,
@@ -115,6 +122,7 @@ from copper_pilot_cli.copper_widgets import (
     CompletionEntry,
     ErrorMessage,
     ReasoningMessage,
+    ResumeNotice,
     ShortcutsPanel,
     ThreadSelectorScreen,
     ToolCallMessage,
@@ -270,6 +278,9 @@ class CopperPilotApp(App[None]):
         self._skills: dict[str, LocalSkill] = {}
         self._selected_skill: str | None = None
         self._turn_error_rendered = False
+        # Live "next try in N s" countdown while the provider is out of capacity.
+        self._countdown: Any = None
+        self._capacity_notified = False
         self._loading: LoadingWidget | None = None
         self._turn_state = TurnState()
         self._turn_query = ""
@@ -470,8 +481,37 @@ class CopperPilotApp(App[None]):
                 "copper.tool_result",
             }:
                 await self._custom_event(event)
+        await self._show_unfinished_turn()
         if messages or events:
             self.query_one("#transcript", ChatScroll).scroll_end(animate=False)
+
+    async def _unfinished_turn(self) -> Any:
+        probe = getattr(self.runtime, "unfinished_turn", None)
+        if probe is None:
+            return None
+        try:
+            return await probe(self._config())
+        except Exception as exc:  # noqa: BLE001 - a broken journal must not block the app
+            logger.warning("Could not read the unfinished turn (%s)", type(exc).__name__)
+            return None
+
+    async def _show_unfinished_turn(self) -> None:
+        """Offer to resume a turn that a crash, quit or dropped connection cut short."""
+        journal = await self._unfinished_turn()
+        if journal is None:
+            return
+        query = " ".join(str(journal.query).split())
+        query = query if len(query) <= 80 else query[:79] + "…"
+        error = journal.last_error or {}
+        detail = f" Last error: {error.get('type')}." if error.get("type") else ""
+        tools = len(journal.tool_events)
+        done = f" {tools} tool call{'s' if tools != 1 else ''} recorded." if tools else ""
+        await self._mount(
+            ResumeNotice(
+                f"Unfinished turn: “{query}”.{done}{detail} "
+                "Type /resume (or “continue”) to pick it up where it left off."
+            )
+        )
 
     def _load_skills(self) -> None:
         skills, diagnostics = scan_local_skills(self.workspace)
@@ -747,6 +787,8 @@ class CopperPilotApp(App[None]):
         composer = self.query(ChatInput)
         if composer:
             composer.first().hide_tip()
+        for notice in list(self.query(ResumeNotice)):
+            await notice.remove()
         self._finalize_work_run()
         self.query_one("#transcript", ChatScroll).anchor()
         await self._mount(UserMessage(value))
@@ -758,7 +800,24 @@ class CopperPilotApp(App[None]):
         self._turn_error_rendered = False
         self._turn_task = asyncio.create_task(self._run_turn(value))
 
-    async def _run_turn(self, value: str) -> None:
+    async def _resume_turn(self) -> None:
+        """Continue the thread's unfinished turn from its journal (``/resume``)."""
+        if self._turn_task and not self._turn_task.done():
+            self.notify("A turn is already running.", severity="warning", markup=False)
+            return
+        for notice in list(self.query(ResumeNotice)):
+            await notice.remove()
+        self._finalize_work_run()
+        self.query_one("#transcript", ChatScroll).anchor()
+        self._turn_tool_start = len(self._tools)
+        self._assistant = None
+        self._last_assistant_content = ""
+        self._reasoning = None
+        self._turn_error_rendered = False
+        self._turn_task = asyncio.create_task(self._run_turn(None))
+
+    async def _run_turn(self, value: str | None) -> None:
+        """Run one turn; ``value=None`` resumes the unfinished turn instead."""
         try:
             self._cancel_requested = False
             self._turn_state = TurnState()
@@ -766,15 +825,17 @@ class CopperPilotApp(App[None]):
             await self._start_loading()
             self._update_status("Thinking")
             await self.hooks.run("before_turn")
-            async for item in self.runtime.astream(
-                {
+            values: dict[str, Any] = (
+                {"copper_resume": {}}
+                if value is None
+                else {
                     "messages": [HumanMessage(content=value)],
                     "copper_mode": self.copper_mode.value,
                     "copper_effort": self.copper_effort.value,
                     "copper_model": self.copper_model or "",
-                },
-                self._config(),
-            ):
+                }
+            )
+            async for item in self.runtime.astream(values, self._config()):
                 namespace, mode, data = item
                 del namespace
                 if mode == "custom" and isinstance(data, dict):
@@ -795,6 +856,8 @@ class CopperPilotApp(App[None]):
                 await self._mount(ErrorMessage(str(exc)))
             await self._finalize_turn(TurnPhase.FAILED, str(exc))
         finally:
+            self._stop_countdown()
+            self._capacity_notified = False
             self.runtime.agent.workflow = None
             self.runtime.agent.plan_context = None
             self.runtime.agent.runtime_context = None
@@ -842,6 +905,9 @@ class CopperPilotApp(App[None]):
             )
         ):
             return
+        if kind not in {CAPACITY_WAIT_EVENT, RESUME_EVENT}:
+            # Any normal frame means the high-demand wait is over.
+            self._stop_countdown()
         if kind == "copper.text":
             self._finalize_work_run()
             if self._reasoning is not None:
@@ -897,6 +963,38 @@ class CopperPilotApp(App[None]):
             self._reasoning = None
         elif kind == "copper.status":
             self._update_status(str(data)[:120].replace("\n", " "))
+        elif kind == CAPACITY_WAIT_EVENT and isinstance(data, dict):
+            self._show_capacity_wait(data, str(event.get("title") or "High demand"))
+        elif (
+            kind == RESUME_EVENT
+            and isinstance(data, dict)
+            and data.get("reason") == "provider_busy"
+        ):
+            delay = data.get("delay_s")
+            if data.get("will_retry") and isinstance(delay, (int, float)) and delay >= 1:
+                self._start_countdown(
+                    "CopperPilot is under high demand; continuing in {seconds} s",
+                    delay,
+                    "CopperPilot is under high demand; continuing",
+                )
+            elif data.get("manual_resume") and self._turn_task is not None:
+                await self._mount(
+                    ResumeNotice(
+                        f"{PROVIDER_BUSY_PAUSED_MESSAGE} "
+                        "Type /resume (or “continue”) when you are ready."
+                    )
+                )
+        elif kind == RESUME_EVENT and isinstance(data, dict):
+            label = str(event.get("title") or "Resuming the turn")
+            if data.get("will_retry"):
+                self._update_status(label[:120].replace("\n", " "))
+            elif data.get("manual_resume") and self._turn_task is not None:
+                await self._mount(
+                    ResumeNotice(
+                        "The turn did not finish; its progress is saved. "
+                        "Type /resume (or “continue”) to pick it up where it left off."
+                    )
+                )
         elif kind == RETRY_EVENT:
             label = str(event.get("title") or "Retrying the hosted turn")
             self._update_status(label[:120].replace("\n", " "))
@@ -919,7 +1017,52 @@ class CopperPilotApp(App[None]):
             if self._work_run is not None:
                 self._work_run.mark_failed()
             self._finalize_work_run()
-            await self._mount(ErrorMessage(message))
+            if not (isinstance(data, dict) and data.get("type") == "provider_busy"):
+                # A provider-busy pause already shows its high-demand notice.
+                await self._mount(ErrorMessage(message))
+
+    def _show_capacity_wait(self, data: dict[str, Any], title: str) -> None:
+        """The hosted model waits for provider capacity: a status, not an error."""
+        retry_in = data.get("retry_in_s")
+        if data.get("phase") not in {"queued", "retrying"}:
+            self._stop_countdown()
+            self._update_status("Continuing")
+            return
+        if not self._capacity_notified:
+            self._capacity_notified = True
+            self.notify(
+                str(data.get("message") or title), title="High demand", markup=False, timeout=8
+            )
+        if isinstance(retry_in, (int, float)) and retry_in >= 1:
+            self._start_countdown(
+                "High demand — waiting to continue (next try in {seconds} s)",
+                retry_in,
+                "High demand — waiting to continue",
+            )
+        else:
+            self._stop_countdown()
+            self._update_status(title)
+
+    def _start_countdown(self, template: str, seconds: float, done: str) -> None:
+        """Show ``template`` on the working line, counting ``{seconds}`` down to ``done``."""
+        self._stop_countdown()
+        deadline = monotonic() + seconds
+
+        def tick() -> None:
+            remaining = deadline - monotonic()
+            if remaining < 0.5:
+                self._stop_countdown()
+                self._update_status(done)
+                return
+            self._update_status(template.format(seconds=math.ceil(remaining)))
+
+        self._countdown = self.set_interval(1.0, tick)
+        tick()
+
+    def _stop_countdown(self) -> None:
+        if self._countdown is not None:
+            self._countdown.stop()
+            self._countdown = None
 
     async def _handle_status_event(self, data: dict[str, Any]) -> None:
         if data.get("kind") == "subagent":
@@ -1086,6 +1229,8 @@ class CopperPilotApp(App[None]):
             self.runtime.agent.mode = CopperMode.AGENT
             self.copper_mode = CopperMode.AGENT
             await self._submit(f"Build the attached plan: {plan.name}")
+        elif command == "/resume" and await self._unfinished_turn() is not None:
+            await self._resume_turn()
         elif command in {"/resume", "/threads"}:
             await self.action_resume_thread()
         elif command == "/approval":

@@ -1365,6 +1365,7 @@ class ApprovalMenu(Container):
     }
     ApprovalMenu .approval-title { height: auto; color: $heading; text-style: bold; }
     ApprovalMenu .approval-detail { height: auto; color: $muted; }
+    ApprovalMenu .approval-scope { height: auto; color: $warn; text-style: bold; }
     ApprovalMenu .approval-preview { height: auto; max-height: 8; color: $text-soft; }
     ApprovalMenu .approval-options { height: 1; width: 100%; }
     ApprovalMenu .approval-option { height: 1; width: auto; padding: 0 1; color: $text; }
@@ -1389,6 +1390,9 @@ class ApprovalMenu(Container):
             (APPROVAL_OPTIONS[1], "auto"),
             (APPROVAL_OPTIONS[2], "reject"),
         ]
+        if request.outside_workspace:
+            # Asked every time; switching to Auto would not cover it anyway.
+            self._options = [option for option in self._options if option[1] != "auto"]
         self._option_widgets: list[Static] = []
         self._reason_active = False
         self._future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
@@ -1400,6 +1404,14 @@ class ApprovalMenu(Container):
         detail = self._detail(tool_name, path)
         if detail:
             yield Static(literal_text(detail), classes="approval-detail")
+        if self.request.outside_workspace:
+            yield Static(
+                literal_text(
+                    f"Outside the workspace: {self.request.outside_workspace}. "
+                    "Asked in every approval mode."
+                ),
+                classes="approval-scope",
+            )
         warning = _unicode_warning(self.request.arguments)
         if warning:
             yield Static(literal_text(warning), classes="approval-warning")
@@ -1489,7 +1501,7 @@ class ApprovalMenu(Container):
             self._decide("approve")
 
     def action_auto(self) -> None:
-        if not self._reason_active:
+        if not self._reason_active and any(kind == "auto" for _label, kind in self._options):
             self._decide("auto")
 
     def action_reject(self) -> None:
@@ -1501,7 +1513,7 @@ class ApprovalMenu(Container):
     def action_reason(self) -> None:
         if self._reason_active:
             return
-        self._selected = 2
+        self._selected = len(self._options) - 1
         self._reason_active = True
         field = self.query_one(Input)
         field.display = True
@@ -1745,6 +1757,17 @@ class BtwPanel(Container):
 class ErrorMessage(Static):
     DEFAULT_CSS = """
     ErrorMessage { height: auto; color: $error; border-left: wide $error; padding: 0 1; }
+    """
+
+    def __init__(self, content: str) -> None:
+        super().__init__(literal_text(content))
+
+
+class ResumeNotice(Static):
+    """An unfinished turn that ``/resume`` (or a "continue" message) can pick up."""
+
+    DEFAULT_CSS = """
+    ResumeNotice { height: auto; color: $warning; border-left: wide $warning; padding: 0 1; }
     """
 
     def __init__(self, content: str) -> None:
