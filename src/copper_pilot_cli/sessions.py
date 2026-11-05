@@ -1585,3 +1585,82 @@ def get_thread_limit() -> int:
             _DEFAULT_THREAD_LIMIT,
         )
         return _DEFAULT_THREAD_LIMIT
+
+
+# --------------------------------------------------------- checkpoint bounds
+
+KEEP_CHECKPOINTS = 3
+"""Checkpoints kept per thread besides its first: one turn writes three.
+
+Every checkpoint row stores the whole state, so a thread that kept them all
+grew with the square of its turns. Nothing reads older ones: the CLI never
+time-travels, and the turn journal is a sidecar file. The first checkpoint is
+kept too (it is small) because its writes hold the thread's initial prompt.
+"""
+
+PRUNE_BYTES_PER_TURN = 256 * 1024 * 1024
+"""Most checkpoint bytes one turn's prune deletes (at least one row).
+
+Freeing a row reads its overflow pages, so a thread from before pruning is
+trimmed over a few turns instead of stalling one; `threads compact-db` does
+it all at once.
+"""
+
+COPPER_AGENT_NAME = "copper-pilot"
+
+
+async def _prune_thread(
+    conn: aiosqlite.Connection,
+    thread_id: str,
+    *,
+    keep: int = KEEP_CHECKPOINTS,
+    budget: int | None = None,
+) -> int:
+    """Delete a thread's old root-namespace checkpoints and their writes.
+
+    Returns:
+        The number of checkpoints deleted. The caller commits.
+    """
+    async with conn.execute(
+        "SELECT checkpoint_id, length(checkpoint) FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
+        (thread_id,),
+    ) as cursor:
+        rows = list(await cursor.fetchall())
+    if len(rows) <= keep + 1:
+        return 0
+    victims: list[str] = []
+    spent = 0
+    for checkpoint_id, size in rows[1:-keep]:
+        if budget is not None and victims and spent + (size or 0) > budget:
+            break
+        victims.append(checkpoint_id)
+        spent += size or 0
+    # The victims are every checkpoint between the first and the last victim;
+    # delete them by range, with their writes (and any orphaned writes there).
+    bounds = (thread_id, rows[0][0], victims[-1])
+    for table in ("writes", "checkpoints"):
+        await conn.execute(
+            f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_ns = '' "  # noqa: S608  # fixed table names
+            "AND checkpoint_id > ? AND checkpoint_id <= ?",
+            bounds,
+        )
+    return len(victims)
+
+
+async def prune_checkpoints(saver: AsyncSqliteSaver, thread_id: str) -> int:
+    """Bound a thread's checkpoint history after a turn (see `KEEP_CHECKPOINTS`).
+
+    Runs on the saver's own connection under its lock, so it never interleaves
+    with a checkpoint write.
+
+    Returns:
+        The number of checkpoints deleted.
+    """
+    async with saver.lock:
+        deleted = await _prune_thread(saver.conn, thread_id, budget=PRUNE_BYTES_PER_TURN)
+        if deleted:
+            await saver.conn.commit()
+    if deleted:
+        logger.debug("Pruned %s old checkpoints of thread %s", deleted, thread_id)
+    return deleted

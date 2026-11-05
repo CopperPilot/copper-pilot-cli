@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import sqlite3
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+import copper_pilot_cli.copper_graph as copper_graph_module
+import copper_pilot_cli.sessions as sessions_module
 from copper_pilot_cli.chat_context import (
     COMPACTION_EVENT,
     build_session_state,
@@ -21,6 +24,19 @@ from copper_pilot_cli.copper_graph import (
     CAPACITY_WAIT_EVENT,
     RESUME_EVENT,
     RETRY_EVENT,
+    create_copper_graph,
+)
+from copper_pilot_cli.copper_protocol import (
+    CopperEffort,
+    CopperEvent,
+    CopperMode,
+    EventKind,
+    ToolRequest,
+)
+from copper_pilot_cli.sessions import (
+    KEEP_CHECKPOINTS,
+    get_db_path,
+    list_threads,
 )
 
 
@@ -218,6 +234,124 @@ async def test_tui_replay_of_the_compact_log_matches_the_raw_log(tmp_path) -> No
     assert after == before
     names = [row[0] for row in before["transcript"]]
     assert "ReasoningMessage" in names and "ErrorMessage" in names
+
+
+# ------------------------------------------------------- graph and storage
+
+
+@dataclass
+class TurnAgent:
+    mode: CopperMode = CopperMode.AGENT
+    effort: CopperEffort = CopperEffort.BALANCED
+    model: str | None = None
+    turn: int = 0
+
+    async def astream_events_raw(self, _payload):
+        turn = f"turn-{self.turn}"
+        seq = 0
+
+        def event(kind: EventKind, data: Any) -> CopperEvent:
+            nonlocal seq
+            seq += 1
+            return CopperEvent(kind, data, turn_id=turn, sequence=seq, resume_attempt=0)
+
+        for index in range(10):
+            yield event(EventKind.REASONING, f"think {index} ")
+        call = f"call-{self.turn}"
+        yield event(
+            EventKind.TOOL_REQUEST,
+            ToolRequest(tool_call_id=call, tool_name="read_file", arguments={"file_path": "a"}),
+        )
+        yield event(
+            EventKind.TOOL_RESULT,
+            {"tool_call_id": call, "tool_name": "read_file", "result": "y" * 2_000},
+        )
+        yield event(
+            EventKind.STATUS_EVENT,
+            {"kind": "todo_list", "items": [{"content": f"Step {self.turn}", "status": "pending"}]},
+        )
+        for index in range(30):
+            yield event(EventKind.TEXT, f"word{index} ")
+        yield event(EventKind.FINAL, {"success": True, "is_final": True})
+
+    async def acancel(self):
+        return None
+
+
+async def _run_turns(workspace: Path, agent: TurnAgent, turns: range, thread: str = "t") -> Any:
+    async with create_copper_graph(agent) as runtime:
+        config = runtime.config(thread, workspace)
+        for turn in turns:
+            agent.turn = turn
+            async for _ in runtime.astream(
+                {"messages": [HumanMessage(content=f"Question {turn}")]}, config
+            ):
+                pass
+        return await runtime.aget_state(config)
+
+
+def _rows(table: str, thread: str = "t") -> int:
+    with sqlite3.connect(get_db_path()) as conn:
+        query = f"SELECT count(*) FROM {table} WHERE thread_id = ?"  # noqa: S608
+        return conn.execute(query, (thread,)).fetchone()[0]
+
+
+@pytest.mark.asyncio
+async def test_turns_keep_a_bounded_checkpoint_history_and_a_compact_log(home) -> None:
+    state = await _run_turns(home, TurnAgent(), range(8))
+
+    assert _rows("checkpoints") == KEEP_CHECKPOINTS + 1
+    messages = state.values["messages"]
+    assert [m.content for m in messages if isinstance(m, HumanMessage)] == [
+        f"Question {turn}" for turn in range(8)
+    ]
+    assert len(messages) == 8 * 4
+    events = state.values["copper_events"]
+    assert [event["type"] for event in events] == [
+        "copper.reasoning",
+        "copper.status_event",
+        "copper.final",
+    ] * 8
+    assert events[0]["data"] == "".join(f"think {index} " for index in range(10))
+    assert latest_todos(events) == {"items": [{"content": "Step 7", "status": "pending"}]}
+
+    rows = await list_threads(cwd=str(home), include_message_count=True, limit=5)
+    sessions_module._message_count_cache.clear()
+    await sessions_module.populate_thread_checkpoint_details(
+        rows, include_message_count=True, include_initial_prompt=True
+    )
+    assert rows[0]["message_count"] == 32
+    assert rows[0]["initial_prompt"] == "Question 0"
+
+    # A reopened runtime continues the thread from the kept checkpoints.
+    state = await _run_turns(home, TurnAgent(), range(8, 9))
+    assert len(state.values["messages"]) == 9 * 4
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_thread_is_rewritten_on_its_next_turn(home, monkeypatch) -> None:
+    def append_raw(_stored, new):
+        return new
+
+    async def keep_all(_saver, _thread_id):
+        return 0
+
+    with monkeypatch.context() as patch:
+        patch.setattr(copper_graph_module, "events_update", append_raw)
+        patch.setattr(copper_graph_module, "prune_checkpoints", keep_all)
+        legacy = await _run_turns(home, TurnAgent(), range(3))
+    raw = legacy.values["copper_events"]
+    assert any(event["type"] == "copper.text" for event in raw)
+    assert _rows("checkpoints") == 9
+
+    state = await _run_turns(home, TurnAgent(), range(3, 4))
+    events = state.values["copper_events"]
+    assert not any(event["type"] == "copper.text" for event in events)
+    assert len(events) == 4 * 3
+    assert events[:9] == compact_events(raw)
+    # Reading it back from disk decodes the rewritten log too.
+    state = await _run_turns(home, TurnAgent(), range(0))
+    assert state.values["copper_events"] == events
 
 
 def test_compaction_event_type_is_kept() -> None:

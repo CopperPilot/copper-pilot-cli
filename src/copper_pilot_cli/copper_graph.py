@@ -105,7 +105,7 @@ from copper_pilot_cli.copper_status_events import (
     normalize_subagent_status,
 )
 from copper_pilot_cli.langchain import CopperPilotAgent
-from copper_pilot_cli.sessions import get_checkpointer
+from copper_pilot_cli.sessions import get_checkpointer, prune_checkpoints
 from copper_pilot_cli.turn_journal import (
     STATUS_RUNNING,
     STATUS_UNFINISHED,
@@ -242,6 +242,18 @@ class CopperGraphRuntime:
             subgraphs=True,
         ):
             yield item
+        await self._prune(config)
+
+    async def _prune(self, config: dict[str, Any]) -> None:
+        """Bound the thread's checkpoint history; a failure never fails the turn."""
+        thread_id = _thread_id(config)
+        checkpointer = getattr(self.graph, "checkpointer", None)
+        if not thread_id or not hasattr(checkpointer, "conn"):
+            return
+        try:
+            await prune_checkpoints(checkpointer, thread_id)
+        except Exception as exc:  # noqa: BLE001 - the next turn prunes again
+            logger.warning("Could not prune old checkpoints (%s): %s", type(exc).__name__, exc)
 
     async def aget_state(self, config: dict[str, Any]) -> Any:
         return await self.graph.aget_state(config)
@@ -253,7 +265,9 @@ class CopperGraphRuntime:
         *,
         as_node: str | None = None,
     ) -> Any:
-        return await self.graph.aupdate_state(config, values, as_node=as_node)
+        result = await self.graph.aupdate_state(config, values, as_node=as_node)
+        await self._prune(config)
+        return result
 
     async def acancel(self) -> None:
         await self.agent.acancel()
