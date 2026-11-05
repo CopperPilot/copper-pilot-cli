@@ -60,6 +60,7 @@ from copper_pilot_cli.chat_context import (
     SUPERSEDED_KEY,
     USAGE_KEY,
     NothingToCompact,
+    active_workers,
     auto_compact_threshold,
     build_session_state,
     compact_history,
@@ -1401,9 +1402,21 @@ async def _auto_compact(
         threshold = auto_compact_threshold(values, catalog, effort, model)
     if not should_auto_compact(estimate, threshold, unfinished=False):
         return {}
+    workspace = getattr(agent, "workspace", None)
+    workers = active_workers(workspace)
+    if workers:
+        # A resume restarts them from the uncompacted context; say nothing to the user.
+        logger.info(
+            "Auto-compaction skipped: %s subagent worker(s) still queued/running/paused "
+            "(%s; estimate=%s, threshold=%s)",
+            len(workers),
+            ", ".join(workers[:8]),
+            estimate,
+            threshold,
+        )
+        return {}
     logger.info("Auto-compacting the chat context (estimate=%s, threshold=%s)", estimate, threshold)
     run.emit(compaction_event("started", trigger="auto", estimate=estimate, threshold=threshold))
-    workspace = getattr(agent, "workspace", None)
     # The message about to be sent is the query, not history to summarize.
     messages = list(values.get("messages") or [])
     history = {**values, "messages": messages[:-1]}

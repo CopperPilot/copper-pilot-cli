@@ -69,11 +69,14 @@ from websockets.exceptions import InvalidStatus
 
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.chat_context import (
+    COMPACT_CONFIRM_SECONDS,
     COMPACTION_EVENT,
     CONTEXT_COMPACTED_KIND,
     CONTEXT_USAGE_KIND,
     USAGE_KEY,
     NothingToCompact,
+    active_workers,
+    active_workers_notice,
     auto_compact_threshold,
     compact_history,
     compaction_notice,
@@ -279,6 +282,8 @@ class AcpSession:
     # sent as a usage update (live updates are throttled).
     context_usage: dict[str, Any] | None = None
     usage_sent_at: float = 0.0
+    # When /compact last warned about active subagent workers (monotonic).
+    compact_warned_at: float | None = None
 
     @property
     def busy(self) -> bool:
@@ -1360,6 +1365,14 @@ class CopperAcpAgent:
         self, session: AcpSession, credential: DeviceCredential, focus: str | None
     ) -> None:
         """Answer ``/compact [focus]`` without a hosted chat turn."""
+        workers = active_workers(session.workspace)
+        warned = session.compact_warned_at
+        if workers and (warned is None or time.monotonic() - warned > COMPACT_CONFIRM_SECONDS):
+            # A resume restarts these workers from the uncompacted context.
+            session.compact_warned_at = time.monotonic()
+            await self._say(session, active_workers_notice(workers))
+            return
+        session.compact_warned_at = None
         agent = self._new_agent(session, credential)
         async with create_copper_graph(agent) as runtime:
             config = runtime.config(session.session_id, session.workspace)

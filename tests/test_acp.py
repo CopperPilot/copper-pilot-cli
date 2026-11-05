@@ -2600,3 +2600,35 @@ async def test_load_session_sends_stored_usage_and_the_compaction_note(
     ]
     assert "compacted earlier" in conn.updates[2][1].content.text
     assert usage_updates(conn) == [(470_000, 1_048_576)]
+
+
+async def test_compact_command_with_active_subagents_needs_a_second_compact(
+    tmp_path, monkeypatch
+) -> None:
+    from copper_pilot_cli.chat_context import CompactionResult
+
+    folder = tmp_path / ".copperpilot" / "scratch"
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text(
+        '{"version": 2, "units": {"a": {"unit_id": "a", "status": "paused"}}}', encoding="utf-8"
+    )
+    runtime = ContextRuntime(state_values={"messages": [HumanMessage(content="hi")]})
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    calls: list[Any] = []
+
+    async def fake_compact(_agent, values, **kwargs):
+        calls.append(kwargs)
+        return CompactionResult({"summary": "s"}, {"copper_compaction": {"summary": "s"}})
+
+    monkeypatch.setattr(copper_acp, "compact_history", fake_compact)
+    compact = [TextContentBlock(type="text", text="/compact")]
+    await agent.prompt(session_id=session_id, prompt=compact)
+    assert calls == [] and agent_text(conn) == (
+        "1 subagent worker is still queued/running/paused; compacting now drops context "
+        "a resume needs. Run /compact again to compact anyway."
+    )
+    agent.sessions[session_id].compact_warned_at -= 61
+    await agent.prompt(session_id=session_id, prompt=compact)
+    assert calls == []
+    await agent.prompt(session_id=session_id, prompt=compact)
+    assert len(calls) == 1 and len(runtime.updates) == 1

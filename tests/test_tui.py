@@ -2038,3 +2038,31 @@ async def test_compact_command_needs_a_login(tmp_path) -> None:
         await pilot.pause()
         await app._handle_submission("/compact")
         assert "Log in" in str(list(app.query(ErrorMessage))[-1].render())
+
+
+@pytest.mark.asyncio
+async def test_compact_with_active_subagents_needs_a_second_compact(tmp_path) -> None:
+    folder = tmp_path / ".copperpilot" / "scratch"
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text(
+        '{"version": 2, "units": {"a": {"unit_id": "a", "status": "running"},'
+        ' "b": {"unit_id": "b", "status": "queued"}}}',
+        encoding="utf-8",
+    )
+    runtime = ContextRuntime(chat_values(copper_context_usage=CONTEXT_USAGE))
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._handle_submission("/compact")
+        assert runtime.agent.requests == []
+        assert list(app.query(AssistantMessage))[-1].content == (
+            "*2 subagent workers are still queued/running/paused; compacting now drops "
+            "context a resume needs. Run /compact again to compact anyway.*"
+        )
+        # A warning older than 60 s does not count as confirmation.
+        app._compact_warned_at -= 61
+        await app._handle_submission("/compact")
+        assert runtime.agent.requests == []
+        await app._handle_submission("/compact")
+        assert len(runtime.agent.requests) == 1
+        assert "Context compacted" in list(app.query(AssistantMessage))[-1].content

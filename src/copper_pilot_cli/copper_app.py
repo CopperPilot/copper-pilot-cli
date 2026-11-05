@@ -31,11 +31,14 @@ from copper_pilot_cli import copper_theme
 from copper_pilot_cli import textual_patches as _textual_patches  # noqa: F401
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.chat_context import (
+    COMPACT_CONFIRM_SECONDS,
     COMPACTION_EVENT,
     CONTEXT_COMPACTED_KIND,
     CONTEXT_USAGE_KIND,
     USAGE_KEY,
     NothingToCompact,
+    active_workers,
+    active_workers_notice,
     auto_compact_threshold,
     compact_history,
     compaction_notice,
@@ -306,6 +309,8 @@ class CopperPilotApp(App[None]):
         # current compaction record of this thread.
         self._context_usage: dict[str, Any] | None = None
         self._compaction: dict[str, Any] | None = None
+        # When /compact last warned about active subagent workers (monotonic).
+        self._compact_warned_at: float | None = None
         self._turn_query = ""
         self._turn_tool_start = 0
         self._btw = SideQuestionLog()
@@ -1415,6 +1420,13 @@ class CopperPilotApp(App[None]):
         if getattr(agent, "credential", None) is None or not hasattr(agent, "acompact"):
             await self._mount(ErrorMessage("Log in to CopperPilot to compact the context."))
             return
+        workers = active_workers(self.workspace)
+        warned = self._compact_warned_at
+        if workers and (warned is None or monotonic() - warned > COMPACT_CONFIRM_SECONDS):
+            self._compact_warned_at = monotonic()
+            await self._mount(AssistantMessage(f"*{active_workers_notice(workers)}*"))
+            return
+        self._compact_warned_at = None
         self._turn_task = asyncio.create_task(self._compact(focus))
         try:
             await self._turn_task

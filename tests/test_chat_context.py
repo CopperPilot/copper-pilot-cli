@@ -1243,3 +1243,67 @@ async def test_live_measurement_counts_a_later_image_at_the_fixed_cost(
     _events, values = await turn(agent, graph_env, say("Show the schematic"))
     pending = values[USAGE_KEY]["pending_tokens"]
     assert pending == IMAGE_TOKENS + 3  # '<img src="">' is 12 chars
+
+
+# ---------------------------------------------------------- active subagents
+
+
+def write_manifest(workspace, units: Any) -> None:
+    folder = workspace / ".copperpilot" / "scratch"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "manifest.json").write_text(
+        json.dumps({"version": 2, "units": units}), encoding="utf-8"
+    )
+
+
+def test_active_workers_reads_the_scratch_manifest(tmp_path) -> None:
+    from copper_pilot_cli.chat_context import active_workers, active_workers_notice
+
+    assert active_workers(tmp_path) == []  # missing
+    write_manifest(
+        tmp_path,
+        {
+            "power": {"unit_id": "power", "status": "running"},
+            "usb": {"unit_id": "usb", "status": "paused"},
+            "mcu": {"unit_id": "mcu", "status": "queued"},
+            "leds": {"unit_id": "leds", "status": "done"},
+            "esd": {"unit_id": "esd", "status": "failed"},
+            "rf": {"unit_id": "rf", "status": "cancelled"},
+        },
+    )
+    assert active_workers(tmp_path) == ["mcu", "power", "usb"]
+    assert active_workers_notice(["mcu", "power", "usb"]) == (
+        "3 subagent workers are still queued/running/paused; compacting now drops context "
+        "a resume needs. Run /compact again to compact anyway."
+    )
+    write_manifest(tmp_path, [{"unit_id": "a", "status": "running"}])
+    assert active_workers(tmp_path) == ["a"]
+    (tmp_path / ".copperpilot" / "scratch" / "manifest.json").write_text("{not json")
+    assert active_workers(tmp_path) == []  # unreadable
+    write_manifest(tmp_path, "nonsense")
+    assert active_workers(tmp_path) == []
+    assert active_workers(None) == []
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_waits_for_active_subagent_workers(graph_env, caplog) -> None:
+    write_manifest(graph_env, {"power": {"unit_id": "power", "status": "paused"}})
+    agent = GraphAgent(
+        [
+            [CopperEvent(EventKind.TEXT, "First."), final(context_usage=usage(2000))],
+            [CopperEvent(EventKind.TEXT, "Second."), final()],
+            [CopperEvent(EventKind.TEXT, "Third."), final()],
+        ],
+        compactions=[reply(2, trigger="auto")],
+        workspace=graph_env,
+    )
+    await turn(agent, graph_env, say("one"))
+    with caplog.at_level("INFO", logger="copper_pilot_cli.copper_graph"):
+        events, _values = await turn(agent, graph_env, say("two"))
+    assert agent.compact_requests == []
+    assert not [e for e in events if e["type"] == COMPACTION_EVENT]
+    assert "Auto-compaction skipped: 1 subagent worker(s)" in caplog.text
+    # Once the worker is done, the next turn compacts.
+    write_manifest(graph_env, {"power": {"unit_id": "power", "status": "done"}})
+    await turn(agent, graph_env, say("three"))
+    assert len(agent.compact_requests) == 1

@@ -106,6 +106,55 @@ _TODO_STATUSES = {
 _PLAN_STATUSES = {"open": "draft", "running": "running", "done": "done"}
 
 
+# Async subagents (server #155) keep their state in this workspace file.
+# Schema (the hosted scratch-units module, MANIFEST_VERSION 2): ``ScratchManifest``
+# ``{"version": 2, "units": {<unit id>: UnitRecord}}`` and ``UnitRecord.status``
+# in queued, running, done, failed, cancelled, paused. A resumed turn restarts
+# queued, running and paused workers from it, and they need the uncompacted
+# context, so the chat is never auto-compacted while any of them exist.
+SCRATCH_MANIFEST = Path(".copperpilot") / "scratch" / "manifest.json"
+ACTIVE_WORKER_STATES = frozenset({"queued", "running", "paused"})
+# A second /compact within this window compacts despite active workers.
+COMPACT_CONFIRM_SECONDS = 60.0
+
+
+def active_workers(workspace: Path | str | None) -> list[str]:
+    """Ids of subagent workers still queued, running or paused.
+
+    A missing, unreadable or malformed manifest counts as no active workers.
+    """
+    if workspace is None:
+        return []
+    try:
+        data = json.loads((Path(workspace) / SCRATCH_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    units = data.get("units") if isinstance(data, dict) else None
+    if isinstance(units, dict):
+        records = [(str(key), value) for key, value in units.items() if isinstance(value, dict)]
+    elif isinstance(units, list):
+        records = [
+            (str(item.get("unit_id") or ""), item) for item in units if isinstance(item, dict)
+        ]
+    else:
+        return []
+    return sorted(
+        unit_id or str(record.get("unit_id") or "")
+        for unit_id, record in records
+        if str(record.get("status") or "").lower() in ACTIVE_WORKER_STATES
+    )
+
+
+def active_workers_notice(workers: Sequence[str]) -> str:
+    """The manual ``/compact`` warning while subagent workers are active."""
+    count = len(workers)
+    subject = "1 subagent worker is" if count == 1 else f"{count} subagent workers are"
+    return (
+        f"{subject} still queued/running/paused; compacting now drops context a resume "
+        "needs. Run /compact again to compact anyway."
+    )
+
+
 class NothingToCompact(RuntimeError):
     """The chat has too little history after the last cut to summarize."""
 
@@ -1189,6 +1238,8 @@ __all__ = [
     "current_compaction",
     "describe_context",
     "earlier_user_messages",
+    "active_workers",
+    "active_workers_notice",
     "estimate_tokens",
     "strip_images",
     "format_tokens",
