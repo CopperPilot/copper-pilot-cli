@@ -105,7 +105,7 @@ from copper_pilot_cli.copper_status_events import (
     normalize_subagent_status,
 )
 from copper_pilot_cli.langchain import CopperPilotAgent
-from copper_pilot_cli.sessions import get_checkpointer, prune_checkpoints
+from copper_pilot_cli.sessions import get_checkpointer, prune_checkpoints, sessions_open
 from copper_pilot_cli.turn_journal import (
     STATUS_RUNNING,
     STATUS_UNFINISHED,
@@ -1504,8 +1504,15 @@ _CONTEXT_KEYS = frozenset({COMPACTION_KEY, SUPERSEDED_KEY, USAGE_KEY})
 @asynccontextmanager
 async def create_copper_graph(agent: CopperPilotAgent) -> Any:
     """Compile a one-node, no-local-model graph using dcode's checkpointer."""
+    # Held while the runtime lives: ``threads compact-db`` refuses to run meanwhile.
+    open_marker = sessions_open()
+    open_marker.__enter__()
     checkpointer_context = get_checkpointer()
-    checkpointer = await checkpointer_context.__aenter__()
+    try:
+        checkpointer = await checkpointer_context.__aenter__()
+    except BaseException:
+        open_marker.__exit__(None, None, None)
+        raise
 
     store = JournalStore()
 
@@ -1670,4 +1677,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
     try:
         yield runtime
     finally:
-        await runtime.aclose()
+        try:
+            await runtime.aclose()
+        finally:
+            open_marker.__exit__(None, None, None)

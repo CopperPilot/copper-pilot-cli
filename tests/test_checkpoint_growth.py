@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import sqlite3
+import sys
+from collections import namedtuple
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +38,10 @@ from copper_pilot_cli.copper_protocol import (
 )
 from copper_pilot_cli.sessions import (
     KEEP_CHECKPOINTS,
+    NotEnoughSpaceError,
+    SessionsBusyError,
+    compact_database,
+    exclusive_sessions,
     get_db_path,
     list_threads,
 )
@@ -352,6 +359,102 @@ async def test_a_legacy_thread_is_rewritten_on_its_next_turn(home, monkeypatch) 
     # Reading it back from disk decodes the rewritten log too.
     state = await _run_turns(home, TurnAgent(), range(0))
     assert state.values["copper_events"] == events
+
+
+async def _legacy_db(home: Path, monkeypatch, turns: int = 6) -> dict[str, Any]:
+    def append_raw(_stored, new):
+        return new
+
+    async def keep_all(_saver, _thread_id):
+        return 0
+
+    with monkeypatch.context() as patch:
+        patch.setattr(copper_graph_module, "events_update", append_raw)
+        patch.setattr(copper_graph_module, "prune_checkpoints", keep_all)
+        state = await _run_turns(home, TurnAgent(), range(turns))
+        await _run_turns(home, TurnAgent(), range(2), thread="other")
+    # A thread another agent wrote: compact-db must leave it alone.
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.execute(
+            "INSERT INTO checkpoints SELECT 'foreign', checkpoint_ns, checkpoint_id, "
+            "parent_checkpoint_id, type, checkpoint, "
+            "json_set(metadata, '$.agent_name', 'dcode') FROM checkpoints WHERE thread_id = 't'"
+        )
+    return dict(state.values)
+
+
+@pytest.mark.asyncio
+async def test_compact_db_prunes_rewrites_and_vacuums_a_legacy_database(home, monkeypatch) -> None:
+    values = await _legacy_db(home, monkeypatch)
+    before = sessions_module.db_file_size(get_db_path())
+
+    dry = compact_database(dry_run=True)
+    assert dry.checkpoints_deleted == (18 - 4) + (6 - 4)
+    assert sessions_module.db_file_size(get_db_path()) == before
+    assert _rows("checkpoints") == 18
+
+    with exclusive_sessions():
+        report = compact_database()
+    assert report.vacuumed and report.threads == 2
+    assert report.size_after < before
+    assert _rows("checkpoints") == KEEP_CHECKPOINTS + 1
+    assert _rows("checkpoints", "foreign") == 18
+    with sqlite3.connect(get_db_path()) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+    async with create_copper_graph(TurnAgent()) as runtime:
+        state = await runtime.aget_state(runtime.config("t", home))
+    assert state.values["messages"] == values["messages"]
+    assert state.values["copper_events"] == compact_events(values["copper_events"])
+    rows = await list_threads(cwd=str(home), limit=5)
+    await sessions_module.populate_thread_checkpoint_details(
+        rows, include_message_count=True, include_initial_prompt=True
+    )
+    by_id = {row["thread_id"]: row for row in rows}
+    assert by_id["t"]["initial_prompt"] == "Question 0"
+    assert by_id["t"]["message_count"] == 24
+
+    # Running it again finds nothing left to do.
+    again = compact_database()
+    assert (again.checkpoints_deleted, again.rows_rewritten) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_compact_db_refuses_to_vacuum_without_free_space(home, monkeypatch) -> None:
+    await _legacy_db(home, monkeypatch)
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: usage(10**9, 10**9, 1024))
+
+    with pytest.raises(NotEnoughSpaceError, match="Not enough free disk space"):
+        compact_database()
+    # The prune already ran; the database is intact, only not shrunk.
+    assert _rows("checkpoints") == KEEP_CHECKPOINTS + 1
+    with sqlite3.connect(get_db_path()) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="open chats are detected on POSIX only")
+@pytest.mark.asyncio
+async def test_compact_db_never_runs_while_a_chat_is_open(home, capsys) -> None:
+    from copper_pilot_cli.copper_main import _threads_command
+
+    await _run_turns(home, TurnAgent(), range(1))
+    args = argparse.Namespace(thread_action="compact-db", dry_run=False, yes=True)
+    async with create_copper_graph(TurnAgent()):
+        with pytest.raises(SessionsBusyError), exclusive_sessions():
+            pass
+        assert await _threads_command(args, home) == 1
+    assert "A CopperPilot chat is open" in capsys.readouterr().out
+
+    assert await _threads_command(args, home) == 0
+    assert "Deleted 0 old checkpoints" in capsys.readouterr().out
+
+
+def test_compact_db_command_is_registered() -> None:
+    from copper_pilot_cli.copper_main import command_parser
+
+    args = command_parser("threads").parse_args(["compact-db", "--dry-run"])
+    assert args.thread_action == "compact-db" and args.dry_run and not args.yes
 
 
 def test_compaction_event_type_is_kept() -> None:
