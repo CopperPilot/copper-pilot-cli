@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import re
 import sys
 
 import pytest
@@ -298,7 +300,9 @@ async def test_outside_workspace_shell_rejected_by_user(tmp_path, monkeypatch) -
         return False
 
     broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO, approve=decline)
-    with pytest.raises(ToolRejected, match=r"outside the workspace \(`find` searches /\)"):
+    # "/" is the workspace drive's root ("C:\\" on Windows).
+    root = re.escape("/" if os.name != "nt" else workspace.anchor)
+    with pytest.raises(ToolRejected, match=rf"outside the workspace \(`find` searches {root}\)"):
         await broker.execute(tool("1", "bash", command="find / -name kicad-cli"))
 
 
@@ -310,8 +314,9 @@ async def test_headless_rejects_outside_workspace_with_reason(tmp_path, monkeypa
     assert broker.has_approver is False
     with pytest.raises(ToolRejected) as caught:
         await broker.execute(tool("1", "bash", command='grep -rn "VCC" / 2>/dev/null'))
+    root = "/" if os.name != "nt" else workspace.anchor
     assert str(caught.value) == (
-        "blocked: outside the workspace (`grep -r` searches /); ask the user first"
+        f"blocked: outside the workspace (`grep -r` searches {root}); ask the user first"
     )
 
 

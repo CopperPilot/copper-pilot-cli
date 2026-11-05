@@ -79,6 +79,7 @@ from copper_pilot_cli.chat_context import (
     todo_items,
     usage_record,
 )
+from copper_pilot_cli.checkpoint_events import events_update
 from copper_pilot_cli.copper_models import (
     cached_chat_model_catalog,
     load_chat_model_catalog,
@@ -104,7 +105,7 @@ from copper_pilot_cli.copper_status_events import (
     normalize_subagent_status,
 )
 from copper_pilot_cli.langchain import CopperPilotAgent
-from copper_pilot_cli.sessions import get_checkpointer
+from copper_pilot_cli.sessions import get_checkpointer, prune_checkpoints, sessions_open
 from copper_pilot_cli.turn_journal import (
     STATUS_RUNNING,
     STATUS_UNFINISHED,
@@ -241,6 +242,18 @@ class CopperGraphRuntime:
             subgraphs=True,
         ):
             yield item
+        await self._prune(config)
+
+    async def _prune(self, config: dict[str, Any]) -> None:
+        """Bound the thread's checkpoint history; a failure never fails the turn."""
+        thread_id = _thread_id(config)
+        checkpointer = getattr(self.graph, "checkpointer", None)
+        if not thread_id or not hasattr(checkpointer, "conn"):
+            return
+        try:
+            await prune_checkpoints(checkpointer, thread_id)
+        except Exception as exc:  # noqa: BLE001 - the next turn prunes again
+            logger.warning("Could not prune old checkpoints (%s): %s", type(exc).__name__, exc)
 
     async def aget_state(self, config: dict[str, Any]) -> Any:
         return await self.graph.aget_state(config)
@@ -252,7 +265,9 @@ class CopperGraphRuntime:
         *,
         as_node: str | None = None,
     ) -> Any:
-        return await self.graph.aupdate_state(config, values, as_node=as_node)
+        result = await self.graph.aupdate_state(config, values, as_node=as_node)
+        await self._prune(config)
+        return result
 
     async def acancel(self) -> None:
         await self.agent.acancel()
@@ -1489,8 +1504,15 @@ _CONTEXT_KEYS = frozenset({COMPACTION_KEY, SUPERSEDED_KEY, USAGE_KEY})
 @asynccontextmanager
 async def create_copper_graph(agent: CopperPilotAgent) -> Any:
     """Compile a one-node, no-local-model graph using dcode's checkpointer."""
+    # Held while the runtime lives: ``threads compact-db`` refuses to run meanwhile.
+    open_marker = sessions_open()
+    open_marker.__enter__()
     checkpointer_context = get_checkpointer()
-    checkpointer = await checkpointer_context.__aenter__()
+    try:
+        checkpointer = await checkpointer_context.__aenter__()
+    except BaseException:
+        open_marker.__exit__(None, None, None)
+        raise
 
     store = JournalStore()
 
@@ -1640,6 +1662,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 if manager is not None:
                     await manager.kill_all()
         result = run.result()
+        result["copper_events"] = events_update(state.get("copper_events"), result["copper_events"])
         result.update(_context_result(run, original, context_values, compacted))
         if has_facts(journal.carried):
             result[FACTS_KEY] = merge_facts(state.get(FACTS_KEY), journal.carried)
@@ -1654,4 +1677,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
     try:
         yield runtime
     finally:
-        await runtime.aclose()
+        try:
+            await runtime.aclose()
+        finally:
+            open_marker.__exit__(None, None, None)

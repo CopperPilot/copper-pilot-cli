@@ -943,7 +943,7 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
         options = app.screen.query_one(OptionList)
-        assert options.has_focus
+        await _wait_until(pilot, lambda: options.has_focus)
         assert options.highlighted == 0
         await pilot.press("down", "enter")
         assert await answer_task == {
@@ -961,7 +961,7 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         await pilot.pause()
         assert isinstance(app.screen, QuestionScreen)
         custom = app.screen.query_one("#answer", Input)
-        assert custom.has_focus
+        await _wait_until(pilot, lambda: custom.has_focus)
         await pilot.press("b", "a", "r", "r", "e", "l", "enter")
         assert await custom_task == {
             "status": "answered",
@@ -975,7 +975,7 @@ async def test_hosted_ask_user_options_and_skip_are_structured(tmp_path) -> None
         await pilot.pause()
         assert isinstance(app.screen, ChoiceScreen)
         options = app.screen.query_one(OptionList)
-        assert options.has_focus
+        await _wait_until(pilot, lambda: options.has_focus)
         await pilot.press("down", "down", "down", "enter")
         assert await skip_task == {"status": "skipped"}
 

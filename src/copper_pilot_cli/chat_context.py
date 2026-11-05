@@ -848,7 +848,10 @@ def _plan_file(path: str, workspace: Path) -> Path:
         resolved = candidate.resolve()
         if resolved == workspace or workspace in resolved.parents:
             return resolved
-        # Deep Agents' virtual paths are rooted at the workspace.
+    if candidate.is_absolute() or path.startswith(("/", "\\")):
+        # Deep Agents' virtual paths are rooted at the workspace. On Windows
+        # "/.copperpilot/..." has no drive, so it is not absolute, and joining
+        # it would land on the drive root.
         return workspace / path.lstrip("/\\")
     return workspace / candidate
 

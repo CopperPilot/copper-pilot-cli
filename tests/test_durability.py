@@ -703,8 +703,10 @@ async def test_finished_and_running_background_processes_resume_together(
     assert early["background"] is True
     await manager.wait_all()
     assert not manager.has_running()
+    # Long enough that it is still running when the first turn ends, even on
+    # a loaded CI runner (0.4 s raced the turn on ubuntu 3.13).
     late = await run_shell(
-        py("import time; time.sleep(0.4); print('late')"),
+        py("import time; time.sleep(3); print('late')"),
         tmp_path,
         manager=manager,
         foreground_seconds=0.05,
