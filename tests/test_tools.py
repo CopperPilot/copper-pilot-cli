@@ -314,6 +314,63 @@ async def test_headless_rejects_outside_workspace_with_reason(tmp_path, monkeypa
     )
 
 
+_KILLALL_REASON = (
+    "`killall python3` kills every process named python3 for this user, not just the "
+    "agent's; kill the PID of the process you started instead"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(ApprovalMode))
+@pytest.mark.parametrize("dangerous", [False, True])
+async def test_kill_by_name_prompts_in_every_mode(tmp_path, monkeypatch, mode, dangerous) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    requests = []
+
+    async def decline(request):
+        requests.append(request)
+        return False
+
+    broker = LocalToolBroker(
+        workspace,
+        mode=mode,
+        approve=decline,
+        always_allow_shell_commands=True,
+        always_allow_dangerous_shell_commands=dangerous,
+    )
+    with pytest.raises(ToolRejected) as caught:
+        await broker.execute(tool("1", "bash", command="sleep 0; killall -9 python3"))
+    assert len(requests) == 1
+    assert requests[0].outside_workspace == _KILLALL_REASON
+    assert requests[0].reason == f"Outside the workspace: {_KILLALL_REASON}"
+    assert (
+        str(caught.value)
+        == f"blocked: outside the workspace ({_KILLALL_REASON}); the user declined"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(ApprovalMode))
+async def test_headless_refuses_kill_by_name_with_reason(tmp_path, monkeypatch, mode) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    broker = LocalToolBroker(workspace, mode=mode)
+    with pytest.raises(ToolRejected) as caught:
+        await broker.execute(tool("1", "bash", command="killall -9 python3"))
+    assert str(caught.value) == (
+        f"blocked: outside the workspace ({_KILLALL_REASON}); ask the user first"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kill_by_pid_runs_without_prompt_in_yolo(tmp_path, monkeypatch) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
+    result = await broker.execute(
+        tool("1", "bash", command="sleep 30 & pid=$!; kill -9 $pid; wait $pid; echo done")
+    )
+    assert "done" in result["result"]
+
+
 @pytest.mark.asyncio
 async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monkeypatch) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)

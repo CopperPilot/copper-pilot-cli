@@ -9,6 +9,10 @@ The classifier is a heuristic over shell words, not a sandbox. It errs toward
 leaving ordinary in-project commands alone: relative paths, ``.copperpilot/``,
 ``kicad-cli sch erc board.kicad_sch``, ``which kicad-cli`` and ``python3
 script.py`` never trip it.
+
+Process kills by name (``killall``, ``pkill``, ``taskkill /IM``, ``kill
+$(pgrep ...)``) are flagged too: they reach every process of the user with
+that name, not just the ones the agent started. ``kill 1234`` stays allowed.
 """
 
 from __future__ import annotations
@@ -103,6 +107,61 @@ _KICAD_HOME_DIRS = (
     "Library/Caches/kicad",
     "Library/Preferences/kicad",
     "snap/kicad",
+)
+# Process killers that pick their targets by name or pattern.
+_NAME_KILLERS = frozenset({"killall", "pkill"})
+# Value-taking options of killall and pkill; the pattern is the first positional.
+_NAME_KILLER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "killall": frozenset(
+        {
+            "-n",
+            "-o",
+            "-s",
+            "-u",
+            "-y",
+            "-Z",
+            "--context",
+            "--ns",
+            "--older-than",
+            "--signal",
+            "--user",
+            "--younger-than",
+        }
+    ),
+    "pkill": frozenset(
+        {
+            "-F",
+            "-G",
+            "-P",
+            "-U",
+            "-g",
+            "-q",
+            "-s",
+            "-t",
+            "-u",
+            "--euid",
+            "--group",
+            "--ns",
+            "--nslist",
+            "--parent",
+            "--pgroup",
+            "--pidfile",
+            "--queue",
+            "--session",
+            "--signal",
+            "--terminal",
+            "--uid",
+        }
+    ),
+}
+_NAME_KILLER_INFO_OPTIONS = frozenset({"-l", "-L", "-V", "--list", "--version", "--help"})
+# Lookups that turn a process name into PIDs; fed to kill they kill by name.
+_LOOKUP = r"(?:pgrep|pidof|ps)\b"
+_SUBSTITUTED_LOOKUP_RE = re.compile(rf"\bkill\b[^;&|\n]*(?:\$\(|`)\s*{_LOOKUP}")
+_PIPED_LOOKUP_RE = re.compile(rf"\b{_LOOKUP}[^;&\n]*\|[^;&\n]*\bxargs\b[^;&|\n]*\bkill\b")
+_BOUND_LOOKUP_RE = re.compile(rf"(?:\b(\w+)=|\bfor\s+(\w+)\s+in\s+)(?:\$\(|`)\s*{_LOOKUP}")
+_KILL_BY_NAME_ADVICE = (
+    "for this user, not just the agent's; kill the PID of the process you started instead"
 )
 _SEPARATOR_CHARS = frozenset("&|;()")
 _REDIRECT_RE = re.compile(r"^[<>&|]*[<>][<>&|]*$")
@@ -371,6 +430,149 @@ def _path_candidates(name: str, args: list[str]) -> list[str]:
     return candidates
 
 
+def _name_killer_reason(name: str, args: Sequence[str]) -> str | None:
+    """Why ``killall``/``pkill`` with ``args`` kills by name, or None."""
+    if any(arg in _NAME_KILLER_INFO_OPTIONS for arg in args):
+        return None
+    patterns: list[str] = []
+    full = regex = pidfile = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            patterns.extend(args[index + 1 :])
+            break
+        if arg in _NAME_KILLER_VALUE_OPTIONS[name]:
+            pidfile = pidfile or arg in {"-F", "--pidfile"}
+            index += 2
+            continue
+        if arg.startswith("-") and arg != "-":
+            if arg.startswith("--pidfile="):
+                pidfile = True
+            if arg == "--full" or (name == "pkill" and not arg.startswith("--") and "f" in arg):
+                full = True
+            if arg == "--regexp" or (
+                name == "killall" and not arg.startswith("--") and "r" in arg[1:]
+            ):
+                regex = True
+            index += 1
+            continue
+        patterns.append(arg)
+        index += 1
+    if pidfile and not patterns:
+        return None  # pkill -F pidfile signals the PIDs in that file
+    label = f"{name} -f" if full else f"{name} -r" if regex else name
+    if not patterns:
+        return f"`{label}` kills every matching process {_KILL_BY_NAME_ADVICE}"
+    shown = f"{label} {shlex.join(patterns)}"
+    targets = " or ".join(shlex.quote(pattern) for pattern in patterns)
+    if full:
+        return (
+            f"`{shown}` kills every process whose command line matches {targets} "
+            f"{_KILL_BY_NAME_ADVICE}"
+        )
+    return f"`{shown}` kills every process named {targets} {_KILL_BY_NAME_ADVICE}"
+
+
+def _taskkill_reason(args: Sequence[str]) -> str | None:
+    """Why a Windows ``taskkill`` kills by image name or filter, or None."""
+    for position, arg in enumerate(args):
+        option = arg.lower()
+        if option in {"/im", "-im", "/fi", "-fi"}:
+            value = args[position + 1] if position + 1 < len(args) else ""
+            kind = "named" if option.endswith("im") else "matching"
+            shown = " ".join(word for word in ("taskkill", arg, value) if word)
+            return f"`{shown}` kills every process {kind} {value} {_KILL_BY_NAME_ADVICE}"
+    return None
+
+
+def _stop_process_reason(args: Sequence[str]) -> str | None:
+    """Why PowerShell ``Stop-Process -Name`` kills by name, or None."""
+    for position, arg in enumerate(args):
+        if arg.lower() in {"-name", "-processname"}:
+            value = args[position + 1] if position + 1 < len(args) else ""
+            return (
+                f"`Stop-Process {arg} {value}` kills every process named {value} "
+                f"{_KILL_BY_NAME_ADVICE}"
+            )
+    return None
+
+
+def _kill_by_name_reason(argv: Sequence[str]) -> str | None:
+    name = Path(argv[0]).name.lower()
+    if name.endswith(".exe"):
+        name = name[: -len(".exe")]
+    args = argv[1:]
+    if name in _NAME_KILLERS:
+        return _name_killer_reason(name, args)
+    if name == "killall5":
+        return f"`killall5` kills every process {_KILL_BY_NAME_ADVICE}"
+    if name == "taskkill":
+        return _taskkill_reason(args)
+    if name in {"stop-process", "spps"}:
+        return _stop_process_reason(args)
+    if name == "kill":
+        targets = _kill_targets(args)
+        shown = " ".join(argv)
+        if "-1" in targets:
+            return f"`{shown}` kills every process {_KILL_BY_NAME_ADVICE}"
+        if "0" in targets:
+            return (
+                f"`{shown}` kills the whole process group, CopperPilot included; "
+                "kill the PID of the process you started instead"
+            )
+    return None
+
+
+def _lookup_fed_kill_reason(command: str) -> str | None:
+    """Why ``kill`` fed by ``pgrep``/``pidof``/``ps`` output kills by name, or None."""
+    found = _SUBSTITUTED_LOOKUP_RE.search(command) or _PIPED_LOOKUP_RE.search(command)
+    if found is None:
+        for bound in _BOUND_LOOKUP_RE.finditer(command):
+            variable = re.escape(bound.group(1) or bound.group(2))
+            use = re.compile(rf"\bkill\b[^;&|\n]*\$(?:{variable}\b|\{{{variable}\}})")
+            found = use.search(command, bound.end())
+            if found:
+                break
+    if found is None:
+        return None
+    lookup = re.search(_LOOKUP, command)
+    name = lookup.group(0) if lookup else "pgrep"
+    return f"`kill` fed by `{name}` kills every process found by name {_KILL_BY_NAME_ADVICE}"
+
+
+def _kill_targets(args: Sequence[str]) -> list[str]:
+    """PIDs ``kill`` signals; the first dash word is the signal, not a target."""
+    targets: list[str] = []
+    index = 0
+    signal_seen = False
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            targets.extend(args[index + 1 :])
+            break
+        if arg in {"-l", "-L", "--list", "--table"}:
+            return []
+        if arg in {"-s", "-n", "--signal"}:
+            signal_seen = True
+            index += 2
+            continue
+        if arg.startswith("-") and not signal_seen and not targets:
+            signal_seen = True
+            index += 1
+            continue
+        targets.append(arg)
+        index += 1
+    return targets
+
+
+def _powershell_script(args: Sequence[str]) -> str | None:
+    for position, arg in enumerate(args):
+        if arg.lower() in {"-c", "-command"}:
+            return " ".join(args[position + 1 :]) or None
+    return None
+
+
 def _classify(command: str, scope: _Scope, depth: int) -> str | None:
     if depth > _MAX_DEPTH or not command.strip():
         return None
@@ -380,6 +582,9 @@ def _classify(command: str, scope: _Scope, depth: int) -> str | None:
         if reason:
             return reason
     cwd = scope.workspaces[0]
+    reason = _lookup_fed_kill_reason(command)
+    if reason:
+        return reason
     for raw_argv, redirects in _simple_commands(_tokens(command)):
         for target in redirects:
             path = scope.resolve(target, cwd)
@@ -390,6 +595,16 @@ def _classify(command: str, scope: _Scope, depth: int) -> str | None:
             continue
         name = Path(argv[0]).name.lower()
         args = argv[1:]
+        reason = _kill_by_name_reason(argv)
+        if reason:
+            return reason
+        if name in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            script = _powershell_script(args)
+            if script:
+                reason = _classify(script, scope, depth + 1)
+                if reason:
+                    return reason
+            continue
         if name in _ESCAPE_EXECUTABLES:
             return f"`{name}` reaches outside the workspace"
         if name in _INDEX_SEARCHES:
@@ -435,8 +650,9 @@ def classify_outside_workspace(
     Flags recursive searches rooted at ``/``, a system top-level directory, or
     a home directory; paths under a home directory outside ``workspace_root``
     (KiCad locations, temp dirs and ``allowed`` excepted); filesystem index
-    searches; and ``docker``/``podman``/``kubectl``/``sudo``/``ssh``-style
-    commands.
+    searches; ``docker``/``podman``/``kubectl``/``sudo``/``ssh``-style
+    commands; and process kills by name (``killall``, ``pkill``, ``taskkill
+    /IM``, ``kill`` fed by ``pgrep``/``pidof``/``ps``, ``kill -1``, ``kill 0``).
     """
     if not isinstance(command, str) or not command.strip():
         return None

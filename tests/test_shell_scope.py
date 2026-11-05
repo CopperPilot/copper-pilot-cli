@@ -136,3 +136,133 @@ def test_temp_dir_allowed_unless_it_holds_home(monkeypatch) -> None:
     assert classify("cat ~/tmp/out.txt") is None
     monkeypatch.setattr(tempfile, "gettempdir", lambda: "/home")
     assert classify("cat ~/other/x") == "touches ~/other/x"
+
+
+_ADVICE = "for this user, not just the agent's; kill the PID of the process you started instead"
+
+
+# A benchmark agent ran `killall -9 python3` to stop its own background job and
+# killed the CLI and an unrelated harness with it (2026-11-04).
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("killall -9 python3", f"`killall python3` kills every process named python3 {_ADVICE}"),
+        ("killall python3", f"`killall python3` kills every process named python3 {_ADVICE}"),
+        (
+            "killall -s KILL python3 kicad",
+            f"`killall python3 kicad` kills every process named python3 or kicad {_ADVICE}",
+        ),
+        (
+            "killall -r 'python.*'",
+            f"`killall -r 'python.*'` kills every process named 'python.*' {_ADVICE}",
+        ),
+        ("pkill python3", f"`pkill python3` kills every process named python3 {_ADVICE}"),
+        ("pkill -n python3", f"`pkill python3` kills every process named python3 {_ADVICE}"),
+        (
+            'pkill -9 -f "python3 run.py"',
+            "`pkill -f 'python3 run.py'` kills every process whose command line matches "
+            f"'python3 run.py' {_ADVICE}",
+        ),
+        (
+            "pkill --full server.py",
+            "`pkill -f server.py` kills every process whose command line matches "
+            f"server.py {_ADVICE}",
+        ),
+        ("pkill -u maker", f"`pkill` kills every matching process {_ADVICE}"),
+        ("killall5 -9", f"`killall5` kills every process {_ADVICE}"),
+        ("kill -9 -1", f"`kill -9 -1` kills every process {_ADVICE}"),
+        ("kill -- -1", f"`kill -- -1` kills every process {_ADVICE}"),
+        (
+            "kill 0",
+            "`kill 0` kills the whole process group, CopperPilot included; "
+            "kill the PID of the process you started instead",
+        ),
+        (
+            "kill $(pgrep python3)",
+            f"`kill` fed by `pgrep` kills every process found by name {_ADVICE}",
+        ),
+        (
+            "kill -9 `pidof kicad`",
+            f"`kill` fed by `pidof` kills every process found by name {_ADVICE}",
+        ),
+        (
+            "pgrep -f run.py | xargs kill -9",
+            f"`kill` fed by `pgrep` kills every process found by name {_ADVICE}",
+        ),
+        (
+            "ps aux | grep python | awk '{print $2}' | xargs kill",
+            f"`kill` fed by `ps` kills every process found by name {_ADVICE}",
+        ),
+        (
+            "pid=$(pgrep -f run.py); kill $pid",
+            f"`kill` fed by `pgrep` kills every process found by name {_ADVICE}",
+        ),
+        (
+            'for p in $(pgrep python3); do kill -9 "$p"; done',
+            f"`kill` fed by `pgrep` kills every process found by name {_ADVICE}",
+        ),
+        (
+            "sleep 1 && nohup killall python3",
+            f"`killall python3` kills every process named python3 {_ADVICE}",
+        ),
+        ("ls; timeout 5 pkill x", f"`pkill x` kills every process named x {_ADVICE}"),
+        ("(cd build && killall make)", f"`killall make` kills every process named make {_ADVICE}"),
+        (
+            "bash -c 'killall python3'",
+            f"`killall python3` kills every process named python3 {_ADVICE}",
+        ),
+        ("echo $(killall x)", f"`killall x` kills every process named x {_ADVICE}"),
+        (
+            "/usr/bin/killall python3",
+            f"`killall python3` kills every process named python3 {_ADVICE}",
+        ),
+        (
+            "taskkill /IM python.exe /F",
+            f"`taskkill /IM python.exe` kills every process named python.exe {_ADVICE}",
+        ),
+        (
+            "taskkill.exe /f /im kicad.exe",
+            f"`taskkill /im kicad.exe` kills every process named kicad.exe {_ADVICE}",
+        ),
+        (
+            'taskkill /FI "IMAGENAME eq python.exe"',
+            "`taskkill /FI IMAGENAME eq python.exe` kills every process matching "
+            f"IMAGENAME eq python.exe {_ADVICE}",
+        ),
+        (
+            'powershell -Command "Stop-Process -Name python"',
+            f"`Stop-Process -Name python` kills every process named python {_ADVICE}",
+        ),
+    ],
+)
+def test_kill_by_name_is_flagged(command: str, reason: str) -> None:
+    assert classify(command) == reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kill 1234",
+        "kill -9 1234",
+        "kill -9 $PID",
+        'kill -TERM "$(cat job.pid)"',
+        "kill -s TERM 1234",
+        "kill -1 1234",
+        "kill %1",
+        "kill -l",
+        "kill $PID; sleep 1; pgrep -f run.py",
+        "kill $PID && ps -p $PID",
+        "pgrep -f run.py",
+        "pidof kicad",
+        "ps aux | grep python3",
+        "killall -l",
+        "pkill -F job.pid",
+        "taskkill /F /PID 1234",
+        "taskkill /PID 1234 /T",
+        "Stop-Process -Id 1234",
+        "python3 run.py & echo $! > job.pid",
+        "echo killall",
+    ],
+)
+def test_kill_by_pid_is_not_flagged(command: str) -> None:
+    assert classify(command) is None
