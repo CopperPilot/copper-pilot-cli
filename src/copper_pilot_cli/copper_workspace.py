@@ -22,6 +22,9 @@ IGNORED_NAMES = {
     "venv",
     "dist",
     "build",
+    # CopperPilot's working folder (reference projects, staging, scratch
+    # units): never the user's design, and it would eat the scan budget.
+    ".copperpilot",
 }
 
 

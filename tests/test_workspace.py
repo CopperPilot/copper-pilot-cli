@@ -36,6 +36,21 @@ def test_discovers_matching_kicad_artifacts(tmp_path) -> None:
     assert context.pcb_path == "boards/amp.kicad_pcb"
 
 
+def test_reference_and_staging_projects_are_never_the_active_design(tmp_path) -> None:
+    reference = tmp_path / ".copperpilot" / "references" / "r1"
+    reference.mkdir(parents=True)
+    for name in ("a_ref.kicad_pro", "a_ref.kicad_sch", "a_ref.kicad_pcb"):
+        (reference / name).write_text("")
+    board = tmp_path / "board"
+    board.mkdir()
+    for name in ("z.kicad_pro", "z.kicad_sch", "z.kicad_pcb"):
+        (board / name).write_text("")
+    context = discover_workspace(tmp_path.resolve())
+    assert context.project_files == ("board/z.kicad_pro",)
+    assert context.schematic_path == "board/z.kicad_sch"
+    assert context.pcb_path == "board/z.kicad_pcb"
+
+
 def test_launch_target_must_be_directory(tmp_path) -> None:
     file = tmp_path / "board.kicad_pro"
     file.write_text("")

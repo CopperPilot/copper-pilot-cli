@@ -150,10 +150,25 @@ def fix_prompt(actions: dict[str, Any]) -> str:
 # ---------------------------------------------------------------- renderers
 
 
+def skipped_notice(results: list[CheckResult]) -> str | None:
+    """One loud line naming skipped checks: a run with skips is not a pass."""
+    skipped = [result.check_id for result in results if result.status is Status.SKIPPED]
+    if not skipped:
+        return None
+    return (
+        f"INCOMPLETE: {len(skipped)} check(s) skipped ({', '.join(skipped)}). "
+        "This run does not show the design passes; do not report it as passing. "
+        "Re-run without --skip/--only/--gate/--until to validate the whole design."
+    )
+
+
 def render_markdown(report: dict[str, Any]) -> str:
+    results = [CheckResult.model_validate(raw) for raw in report["results"]]
+    notice = skipped_notice(results)
     lines = [
         f"# Validate report: {report['verdict']}",
         "",
+        *([f"**{notice}**", ""] if notice else []),
         f"- profile: {report['profile']}  gate: {report['gate']}",
         f"- design: {report['design_hash'][:12]}  kicad-cli: {report.get('kicad_version') or '-'}"
         f"  cli: {report['cli_version']}",

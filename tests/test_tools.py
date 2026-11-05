@@ -4,6 +4,7 @@ import asyncio
 import base64
 import os
 import re
+import sys
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -319,6 +320,67 @@ async def test_headless_rejects_outside_workspace_with_reason(tmp_path, monkeypa
     )
 
 
+_KILLALL_REASON = (
+    "`killall python3` kills every process named python3 for this user, not just the "
+    "agent's; kill the PID of the process you started instead"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(ApprovalMode))
+@pytest.mark.parametrize("dangerous", [False, True])
+async def test_kill_by_name_prompts_in_every_mode(tmp_path, monkeypatch, mode, dangerous) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    requests = []
+
+    async def decline(request):
+        requests.append(request)
+        return False
+
+    broker = LocalToolBroker(
+        workspace,
+        mode=mode,
+        approve=decline,
+        always_allow_shell_commands=True,
+        always_allow_dangerous_shell_commands=dangerous,
+    )
+    with pytest.raises(ToolRejected) as caught:
+        await broker.execute(tool("1", "bash", command="sleep 0; killall -9 python3"))
+    assert len(requests) == 1
+    assert requests[0].outside_workspace == _KILLALL_REASON
+    assert requests[0].reason == f"Outside the workspace: {_KILLALL_REASON}"
+    assert (
+        str(caught.value)
+        == f"blocked: outside the workspace ({_KILLALL_REASON}); the user declined"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(ApprovalMode))
+async def test_headless_refuses_kill_by_name_with_reason(tmp_path, monkeypatch, mode) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    broker = LocalToolBroker(workspace, mode=mode)
+    with pytest.raises(ToolRejected) as caught:
+        await broker.execute(tool("1", "bash", command="killall -9 python3"))
+    assert str(caught.value) == (
+        f"blocked: outside the workspace ({_KILLALL_REASON}); ask the user first"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kill_by_pid_runs_without_prompt_in_yolo(tmp_path, monkeypatch) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
+    # A PID kill must run without a prompt; the shell differs per OS (cmd.exe
+    # on Windows), the decision under test does not.
+    if sys.platform == "win32":
+        command = "taskkill /PID 999999 >NUL 2>&1 & echo done"
+    else:
+        command = "sleep 30 & pid=$!; kill -9 $pid; wait $pid; echo done"
+    result = await broker.execute(tool("1", "bash", command=command))
+    assert "done" in result["result"]
+
+
 @pytest.mark.asyncio
 async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monkeypatch) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
@@ -326,3 +388,177 @@ async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monk
     broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
     result = await broker.execute(tool("1", "bash", command="grep -rn VCC ."))
     assert "board.kicad_sch" in result["result"]
+
+
+@pytest.mark.asyncio
+async def test_kicad_purpose_read_returns_whole_file_raw(tmp_path) -> None:
+    body = "(kicad_sch\n" + "".join(f"\t(wire {i})\n" for i in range(500)) + ")\n"
+    (tmp_path / "board.kicad_sch").write_bytes(body.encode())
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(
+        tool("1", "read_file", file_path="board.kicad_sch", purpose="kicad_workspace_schematic")
+    )
+    assert result == {"result": body}
+
+
+@pytest.mark.asyncio
+async def test_plain_read_keeps_the_paged_window(tmp_path) -> None:
+    (tmp_path / "notes.txt").write_text("".join(f"{i}\n" for i in range(150)))
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(tool("1", "read_file", file_path="notes.txt"))
+    assert result["result"].startswith("@@ lines 1-100 of 150 | next offset 100 @@\n")
+
+
+async def _page_through(broker, file_path, **extra):
+    """Follow the CLI's pages like the server's bridge does."""
+    import re
+
+    pages, offset, n = [], None, 0
+    while True:
+        args = dict(extra, file_path=file_path)
+        if offset is not None:
+            args.update(offset=offset, limit=1_000_000)
+        n += 1
+        text = (await broker.execute(tool(f"p{n}", "read_file", **args)))["result"]
+        head, _, body = text.partition("\n")
+        match = re.match(r"@@ lines (\d+)-(\d+) of (\d+)", head)
+        assert match, head
+        pages.append(body)
+        end, total = int(match.group(2)), int(match.group(3))
+        if end >= total:
+            return "\n".join(pages), n
+        offset = end + 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_purpose_read_comes_back_in_raw_pages(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli import deepagents_tools
+
+    monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 2_000)
+    body = "".join(f"(segment {i})\n" for i in range(300))
+    (tmp_path / "big.kicad_pcb").write_bytes(body.encode())
+    broker = LocalToolBroker(tmp_path)
+    text, pages = await _page_through(broker, "big.kicad_pcb", purpose="kicad_workspace_pcb")
+    assert text == body
+    assert pages > 1
+
+
+@pytest.mark.asyncio
+async def test_big_external_library_is_paged_not_lost(tmp_path, monkeypatch) -> None:
+    """Connector_Generic.kicad_sym (6.7 MB) is over one frame; the native read
+    could not see it outside the workspace and said 'not found'."""
+    from copper_pilot_cli import deepagents_tools
+
+    monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 4_000)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    lib = tmp_path / "Connector_Generic.kicad_sym"
+    body = "(kicad_symbol_lib\n" + '\t(symbol "Conn" (pin 1))\n' * 500 + ")\n"
+    lib.write_bytes(body.encode())
+    broker = LocalToolBroker(workspace)
+    text, pages = await _page_through(broker, str(lib), external=True, platform="linux")
+    assert text == body
+    assert pages > 1
+
+
+@pytest.mark.asyncio
+async def test_internal_read_honours_offset_and_limit(tmp_path) -> None:
+    (tmp_path / "a.kicad_sch").write_bytes(b"l1\nl2\nl3\nl4")
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(
+        tool(
+            "1",
+            "read_file",
+            file_path="a.kicad_sch",
+            purpose="kicad_workspace_schematic",
+            offset=2,
+            limit=2,
+        )
+    )
+    assert result == {"result": "@@ lines 2-3 of 4 | next offset 3 @@\nl2\nl3"}
+
+
+@pytest.mark.asyncio
+async def test_binary_read_returns_every_byte_of_a_long_text_file(tmp_path) -> None:
+    body = "".join(f"(line {i})\n" for i in range(5000)).encode()
+    (tmp_path / "board.kicad_sch").write_bytes(body)
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(tool("1", "read_binary_file", file_path="board.kicad_sch"))
+    assert base64.b64decode(result["result"].partition(",")[2]) == body
+    assert result["byte_length"] == len(body)
+
+
+@pytest.mark.asyncio
+async def test_binary_read_keeps_unknown_binary_bytes(tmp_path) -> None:
+    data = bytes(range(256)) * 4
+    (tmp_path / "sheet.SchDoc").write_bytes(data)
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(tool("1", "read_binary_file", file_path="sheet.SchDoc"))
+    assert base64.b64decode(result["result"].partition(",")[2]) == data
+
+
+@pytest.mark.asyncio
+async def test_empty_binary_read_is_zero_bytes(tmp_path) -> None:
+    (tmp_path / "empty.kicad_pcb").write_bytes(b"")
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(tool("1", "read_binary_file", file_path="empty.kicad_pcb"))
+    assert result["byte_length"] == 0
+    assert result["result"].endswith(";base64,")
+
+
+@pytest.mark.asyncio
+async def test_external_kicad_library_reads_are_allowed(tmp_path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    lib = tmp_path / "stock" / "Device.kicad_sym"
+    lib.parent.mkdir()
+    lib.write_bytes(("(kicad_symbol_lib\n" + "\t(symbol x)\n" * 300 + ")\n").encode())
+    broker = LocalToolBroker(workspace)
+    text = await broker.execute(
+        tool("1", "read_file", file_path=str(lib), external=True, platform="linux")
+    )
+    assert text == {"result": lib.read_bytes().decode()}
+    binary = await broker.execute(
+        tool(
+            "2",
+            "read_binary_file",
+            file_path=str(lib),
+            external=True,
+            platform="linux",
+            purpose="kicad_symbol_library",
+        )
+    )
+    assert base64.b64decode(binary["result"].partition(",")[2]) == lib.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_external_reads_stay_blocked_without_flag_or_for_other_files(tmp_path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    lib = tmp_path / "Device.kicad_sym"
+    lib.write_text("(kicad_symbol_lib)")
+    secret = tmp_path / "id_rsa"
+    secret.write_text("secret")
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
+    with pytest.raises(ToolRejected):
+        await broker.execute(tool("1", "read_file", file_path=str(lib)))
+    with pytest.raises(ToolRejected):
+        await broker.execute(tool("2", "read_file", file_path=str(secret), external=True))
+    with pytest.raises(ToolRejected):
+        await broker.execute(
+            tool("3", "write_file", file_path=str(lib), content="x", external=True)
+        )
+    assert lib.read_text() == "(kicad_symbol_lib)"
+
+
+@pytest.mark.asyncio
+async def test_internal_reads_return_the_file_bytes_exactly(tmp_path) -> None:
+    """A KiCad file checked out with CRLF line ends comes back as written,
+    on every OS (the server parser handles both)."""
+    body = b"(kicad_sch\r\n\t(version 20260306)\r\n)\r\n"
+    (tmp_path / "crlf.kicad_sch").write_bytes(body)
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(
+        tool("1", "read_file", file_path="crlf.kicad_sch", purpose="kicad_workspace_schematic")
+    )
+    assert result == {"result": body.decode()}
