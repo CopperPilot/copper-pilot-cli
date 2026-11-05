@@ -338,16 +338,27 @@ Run `copper-pilot auth login` from a TTY first.
 ```console
 copper-pilot threads list [--all] [--limit N]
 copper-pilot threads delete THREAD_ID [-y]
+copper-pilot threads compact-db [--dry-run] [-y]
 ```
 
 `list` shows threads for the current workspace unless `--all` is set.
 `delete` prompts unless `-y` / `--yes` is passed; non-interactive delete
 without `--yes` exits `2`.
 
+Each chat keeps only its newest checkpoints (plus its first), and each turn
+prunes older ones. `compact-db` shrinks a database written by an older CLI:
+it prunes every chat at once, stores the replay log in its compact form, then
+runs `VACUUM`. It refuses to run while a chat is open (TUI, ACP or MCP; on
+POSIX), and refuses to `VACUUM` unless the free space next to the database is
+at least the database's size and twice its live data. `--dry-run` reports what
+would be removed and changes nothing. It prompts unless `-y` / `--yes` is
+passed.
+
 ```console
 copper-pilot threads list
 copper-pilot threads list --all --limit 50
 copper-pilot threads delete <thread_id> --yes
+copper-pilot threads compact-db --dry-run
 ```
 
 ## Approval modes

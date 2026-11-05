@@ -64,7 +64,17 @@ from copper_pilot_cli.copper_workspace import (
 )
 from copper_pilot_cli.diagnostics import configure_diagnostics
 from copper_pilot_cli.langchain import CopperPilotAgent
-from copper_pilot_cli.sessions import delete_thread, generate_thread_id, list_threads
+from copper_pilot_cli.sessions import (
+    NotEnoughSpaceError,
+    SessionsBusyError,
+    compact_database,
+    db_file_size,
+    delete_thread,
+    exclusive_sessions,
+    generate_thread_id,
+    get_db_path,
+    list_threads,
+)
 
 console = Console()
 
@@ -170,7 +180,7 @@ def parser() -> argparse.ArgumentParser:
 def command_parser(command: str) -> argparse.ArgumentParser:
     descriptions = {
         "auth": "Device login for the hosted CopperPilot agent.",
-        "threads": "List or delete CopperPilot chat threads.",
+        "threads": "List, delete or compact CopperPilot chat threads.",
         "mcp": "Run a stdio MCP server that delegates to the hosted agent.",
         "acp": "Run a stdio ACP (Agent Client Protocol) server for editors such as Zed.",
         "update": "Check for or install the latest CopperPilot CLI release.",
@@ -236,6 +246,21 @@ def command_parser(command: str) -> argparse.ArgumentParser:
         action="store_true",
         help="Do not prompt for confirmation",
     )
+    compacting = thread_sub.add_parser(
+        "compact-db",
+        help="Shrink the chat database: drop old checkpoints and replay frames, then VACUUM",
+    )
+    compacting.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be removed without changing anything",
+    )
+    compacting.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Do not prompt for confirmation",
+    )
     return result
 
 
@@ -261,7 +286,49 @@ async def _auth_command(action: str) -> int:
     return 0
 
 
+def _compact_db_command(args: argparse.Namespace) -> int:
+    path = get_db_path()
+    if not path.exists():
+        console.print(f"No chat database at {path}.", markup=False)
+        return 0
+    if not args.dry_run and not args.yes:
+        if not sys.stdin.isatty():
+            console.print("Use --yes to confirm in non-interactive mode.", markup=False)
+            return 2
+        size = db_file_size(path) / 1024**2
+        if not Confirm.ask(
+            f"Compact {path} ({size:,.0f} MiB)? Close every CopperPilot chat first."
+        ):
+            return 0
+    try:
+        with exclusive_sessions():
+            report = compact_database(dry_run=args.dry_run)
+    except (SessionsBusyError, NotEnoughSpaceError) as exc:
+        console.print(str(exc), style="red", markup=False, highlight=False)
+        return 1
+    mib = 1024**2
+    if args.dry_run:
+        console.print(
+            f"{path}: {report.size_before / mib:,.0f} MiB. Would delete "
+            f"{report.checkpoints_deleted} old checkpoints ({report.bytes_deleted / mib:,.0f} MiB) "
+            f"across {report.threads} chats.",
+            markup=False,
+            highlight=False,
+        )
+        return 0
+    console.print(
+        f"{path}: {report.size_before / mib:,.0f} MiB -> {report.size_after / mib:,.0f} MiB. "
+        f"Deleted {report.checkpoints_deleted} old checkpoints and compacted "
+        f"{report.rows_rewritten} event logs across {report.threads} chats.",
+        markup=False,
+        highlight=False,
+    )
+    return 0
+
+
 async def _threads_command(args: argparse.Namespace, workspace: Path) -> int:
+    if args.thread_action == "compact-db":
+        return await asyncio.to_thread(_compact_db_command, args)
     if args.thread_action == "delete":
         if not args.yes:
             if not sys.stdin.isatty():

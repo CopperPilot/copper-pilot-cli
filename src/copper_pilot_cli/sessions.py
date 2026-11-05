@@ -8,13 +8,15 @@ import logging
 import os
 import sqlite3
 import stat
+import sys
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Generator
 
     import aiosqlite
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -1585,3 +1587,343 @@ def get_thread_limit() -> int:
             _DEFAULT_THREAD_LIMIT,
         )
         return _DEFAULT_THREAD_LIMIT
+
+
+# --------------------------------------------------------- checkpoint bounds
+
+KEEP_CHECKPOINTS = 3
+"""Checkpoints kept per thread besides its first: one turn writes three.
+
+Every checkpoint row stores the whole state, so a thread that kept them all
+grew with the square of its turns. Nothing reads older ones: the CLI never
+time-travels, and the turn journal is a sidecar file. The first checkpoint is
+kept too (it is small) because its writes hold the thread's initial prompt.
+"""
+
+PRUNE_BYTES_PER_TURN = 256 * 1024 * 1024
+"""Most checkpoint bytes one turn's prune deletes (at least one row).
+
+Freeing a row reads its overflow pages, so a thread from before pruning is
+trimmed over a few turns instead of stalling one; `threads compact-db` does
+it all at once.
+"""
+
+COPPER_AGENT_NAME = "copper-pilot"
+
+
+async def _prune_thread(
+    conn: aiosqlite.Connection,
+    thread_id: str,
+    *,
+    keep: int = KEEP_CHECKPOINTS,
+    budget: int | None = None,
+) -> int:
+    """Delete a thread's old root-namespace checkpoints and their writes.
+
+    Returns:
+        The number of checkpoints deleted. The caller commits.
+    """
+    async with conn.execute(
+        "SELECT checkpoint_id, length(checkpoint) FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
+        (thread_id,),
+    ) as cursor:
+        rows = list(await cursor.fetchall())
+    if len(rows) <= keep + 1:
+        return 0
+    victims: list[str] = []
+    spent = 0
+    for checkpoint_id, size in rows[1:-keep]:
+        if budget is not None and victims and spent + (size or 0) > budget:
+            break
+        victims.append(checkpoint_id)
+        spent += size or 0
+    # The victims are every checkpoint between the first and the last victim;
+    # delete them by range, with their writes (and any orphaned writes there).
+    bounds = (thread_id, rows[0][0], victims[-1])
+    for table in ("writes", "checkpoints"):
+        await conn.execute(
+            f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_ns = '' "  # noqa: S608  # fixed table names
+            "AND checkpoint_id > ? AND checkpoint_id <= ?",
+            bounds,
+        )
+    return len(victims)
+
+
+async def prune_checkpoints(saver: AsyncSqliteSaver, thread_id: str) -> int:
+    """Bound a thread's checkpoint history after a turn (see `KEEP_CHECKPOINTS`).
+
+    Runs on the saver's own connection under its lock, so it never interleaves
+    with a checkpoint write.
+
+    Returns:
+        The number of checkpoints deleted.
+    """
+    async with saver.lock:
+        deleted = await _prune_thread(saver.conn, thread_id, budget=PRUNE_BYTES_PER_TURN)
+        if deleted:
+            await saver.conn.commit()
+    if deleted:
+        logger.debug("Pruned %s old checkpoints of thread %s", deleted, thread_id)
+    return deleted
+
+
+# ------------------------------------------------------------- open chats
+
+
+class SessionsBusyError(RuntimeError):
+    """A chat has the sessions database open (TUI, ACP or MCP)."""
+
+
+def _open_lock_path() -> Path:
+    db = get_db_path()
+    return db.with_name(f".{db.name}.open.lock")
+
+
+@contextlib.contextmanager
+def sessions_open() -> Generator[None]:
+    """Mark the sessions database as in use by a chat runtime (POSIX only).
+
+    Holds a shared lock for the runtime's lifetime; `exclusive_sessions` fails
+    while any is held.
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    import fcntl
+
+    with open(_open_lock_path(), "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def exclusive_sessions() -> Generator[None]:
+    """Hold the sessions database against every chat runtime (POSIX only).
+
+    Raises:
+        SessionsBusyError: A chat is open.
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    import fcntl
+
+    with open(_open_lock_path(), "a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            msg = (
+                "A CopperPilot chat is open (TUI, ACP or MCP). Close every chat, then run "
+                "`copper-pilot threads compact-db` again."
+            )
+            raise SessionsBusyError(msg) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+# --------------------------------------------------------- compact-db
+
+
+class NotEnoughSpaceError(RuntimeError):
+    """Too little free disk space to vacuum the sessions database safely."""
+
+
+@dataclass
+class CompactReport:
+    """What `compact_database` did (or, for a dry run, would do)."""
+
+    path: Path
+    size_before: int
+    size_after: int = 0
+    threads: int = 0
+    checkpoints_deleted: int = 0
+    bytes_deleted: int = 0
+    rows_rewritten: int = 0
+    vacuumed: bool = False
+
+
+def db_file_size(path: Path) -> int:
+    """Bytes of the database and its WAL."""
+    return sum(
+        candidate.stat().st_size
+        for candidate in (path, path.with_name(f"{path.name}-wal"))
+        if candidate.exists()
+    )
+
+
+def _compact_value(value: object) -> tuple[object, bool]:
+    from copper_pilot_cli.checkpoint_events import compact_events
+
+    if not isinstance(value, list):
+        return value, False
+    compacted = compact_events(value)
+    return compacted, compacted != value
+
+
+def compact_database(*, dry_run: bool = False, vacuum: bool = True) -> CompactReport:
+    """Shrink the sessions database: prune, compact events, then VACUUM.
+
+    For every CopperPilot thread: keep its first and newest `KEEP_CHECKPOINTS`
+    checkpoints, rewrite `copper_events` in what is left to the compact form,
+    then VACUUM to return the space to the disk. Callers hold
+    `exclusive_sessions` so no chat writes meanwhile.
+
+    VACUUM writes a full copy of the live data (its temporary file is put next
+    to the database) plus as much again to the WAL. It runs only when the free
+    space there is at least the database's size and twice the live data;
+    otherwise it raises `NotEnoughSpaceError` after pruning, which already
+    stops growth.
+
+    Raises:
+        NotEnoughSpaceError: Too little free space to VACUUM.
+    """
+    import shutil
+
+    path = get_db_path()
+    report = CompactReport(path=path, size_before=db_file_size(path))
+    if not path.exists():
+        return report
+    serde = _create_jsonplus_serializer()
+    conn = sqlite3.connect(str(path), timeout=30.0)
+    try:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "checkpoints" not in tables:
+            report.size_after = report.size_before
+            return report
+        has_writes = "writes" in tables
+        threads = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+            )
+        ]
+        for thread_id in threads:
+            agent = conn.execute(
+                "SELECT json_extract(metadata, '$.agent_name') FROM checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+            if not agent or agent[0] != COPPER_AGENT_NAME:
+                # Another agent's thread may rely on its history (delta channels).
+                continue
+            report.threads += 1
+            ids = conn.execute(
+                "SELECT checkpoint_id, length(checkpoint) FROM checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id",
+                (thread_id,),
+            ).fetchall()
+            victims = ids[1:-KEEP_CHECKPOINTS] if len(ids) > KEEP_CHECKPOINTS + 1 else []
+            report.checkpoints_deleted += len(victims)
+            report.bytes_deleted += sum(size or 0 for _id, size in victims)
+            if dry_run:
+                continue
+            if victims:
+                first, newest_kept = ids[0][0], ids[-KEEP_CHECKPOINTS][0]
+                if has_writes:
+                    conn.execute(
+                        "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = '' "
+                        "AND checkpoint_id > ? AND checkpoint_id < ?",
+                        (thread_id, first, newest_kept),
+                    )
+                conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
+                    "AND checkpoint_id > ? AND checkpoint_id < ?",
+                    (thread_id, first, newest_kept),
+                )
+            report.rows_rewritten += _rewrite_events(conn, serde, thread_id, has_writes=has_writes)
+            conn.commit()
+        if dry_run or not vacuum:
+            report.size_after = db_file_size(path)
+            return report
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free_pages = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        live = (pages - free_pages) * page_size
+        size = db_file_size(path)
+        free = shutil.disk_usage(path.parent).free
+        needed = max(size, 2 * live)
+        if free < needed:
+            msg = (
+                f"Not enough free disk space to VACUUM {path}: it needs {_gib(needed)} "
+                f"(the database is {_gib(size)}, {_gib(live)} of it live data) and "
+                f"{_gib(free)} is free. Old checkpoints were pruned, so it stops growing; "
+                "free some space and run `copper-pilot threads compact-db` again to shrink it."
+            )
+            raise NotEnoughSpaceError(msg)
+        previous = os.environ.get("SQLITE_TMPDIR")
+        # VACUUM's temporary copy goes next to the database, the disk just checked.
+        os.environ["SQLITE_TMPDIR"] = str(path.parent)
+        try:
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            if previous is None:
+                os.environ.pop("SQLITE_TMPDIR", None)
+            else:
+                os.environ["SQLITE_TMPDIR"] = previous
+        report.vacuumed = True
+    finally:
+        conn.close()
+    report.size_after = db_file_size(path)
+    return report
+
+
+def _rewrite_events(
+    conn: sqlite3.Connection, serde: JsonPlusSerializer, thread_id: str, *, has_writes: bool
+) -> int:
+    """Rewrite `copper_events` to the compact form in a thread's remaining rows."""
+    rewritten = 0
+    for checkpoint_id, type_, blob in conn.execute(
+        "SELECT checkpoint_id, type, checkpoint FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = ''",
+        (thread_id,),
+    ).fetchall():
+        try:
+            data = serde.loads_typed((type_, blob))
+        except Exception:  # noqa: BLE001 - leave an unreadable row as it is
+            logger.warning("Could not decode checkpoint %s of thread %s", checkpoint_id, thread_id)
+            continue
+        values = data.get("channel_values") if isinstance(data, dict) else None
+        if not isinstance(values, dict) or "copper_events" not in values:
+            continue
+        values["copper_events"], changed = _compact_value(values["copper_events"])
+        if changed:
+            conn.execute(
+                "UPDATE checkpoints SET type = ?, checkpoint = ? "
+                "WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+                (*serde.dumps_typed(data), thread_id, checkpoint_id),
+            )
+            rewritten += 1
+    if not has_writes:
+        return rewritten
+    for rowid, type_, blob in conn.execute(
+        "SELECT rowid, type, value FROM writes "
+        "WHERE thread_id = ? AND checkpoint_ns = '' AND channel = 'copper_events'",
+        (thread_id,),
+    ).fetchall():
+        try:
+            value = serde.loads_typed((type_, blob))
+        except Exception:  # noqa: BLE001 - leave an unreadable row as it is
+            logger.warning("Could not decode a copper_events write of thread %s", thread_id)
+            continue
+        # Lists only: an ``Overwrite`` write is already compact.
+        compacted, changed = _compact_value(value)
+        if changed:
+            conn.execute(
+                "UPDATE writes SET type = ?, value = ? WHERE rowid = ?",
+                (*serde.dumps_typed(compacted), rowid),
+            )
+            rewritten += 1
+    return rewritten
+
+
+def _gib(size: int) -> str:
+    return f"{size / 1024**3:.1f} GiB" if size >= 1024**3 else f"{size / 1024**2:.0f} MiB"
