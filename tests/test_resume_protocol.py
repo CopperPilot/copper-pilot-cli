@@ -417,8 +417,16 @@ def test_journal_round_trips_through_the_sidecar_store(tmp_path) -> None:
     [
         ("continue", True),
         ("/resume", True),
-        ("Continue where you left off with the plan.md", True),
         ("resume", True),
+        ("  Continue. ", True),
+        ("RESUME!", True),
+        ("/continue", True),
+        ("Continue where you left off", True),
+        ("continue where you left off.", True),
+        # Extra instructions start a new turn instead of being dropped.
+        ("Continue where you left off with the plan.md", False),
+        ("continue, but use 0603 resistors", False),
+        ("resume and then run DRC", False),
         ("Please continue", False),
         ("continued fractions are neat", False),
         ("continue " + "x" * 300, False),
@@ -660,7 +668,7 @@ async def test_continue_message_resumes_the_unfinished_turn(graph_env, monkeypat
     await run_turn(
         agent,
         graph_env,
-        {"messages": [HumanMessage(content="Continue where you left off with the plan.md")]},
+        {"messages": [HumanMessage(content="Continue where you left off")]},
     )
     payload = agent.payloads[-1]
     assert payload["resume"]["reason"] == "manual"

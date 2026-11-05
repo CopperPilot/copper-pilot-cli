@@ -76,8 +76,12 @@ PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_UNFINISHED = "unfinished"
 
-_RESUME_REQUEST = re.compile(r"^\s*/?(?:resume|continue)\b", re.IGNORECASE)
-_MAX_RESUME_REQUEST_CHARS = 200
+# Only a bare resume intent resumes the unfinished turn; a message with any
+# extra instruction ("continue, but use 0603 resistors") starts a new turn so
+# the instruction is not dropped. Compared after lowercasing, dropping a
+# leading "/" and punctuation, and collapsing spaces.
+_RESUME_INTENTS = frozenset({"continue", "resume", "continue where you left off"})
+_NOT_WORD = re.compile(r"[^a-z0-9]+")
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -92,16 +96,15 @@ def turn_resume_enabled() -> bool:
 
 
 def is_resume_request(text: Any) -> bool:
-    """Whether a short user message asks to continue the unfinished turn.
+    """Whether a user message is a bare request to continue the unfinished turn.
 
-    Matches ``resume``, ``/resume``, ``continue`` and phrases that start with
-    them, such as "Continue where you left off with the plan.md".
+    Matches ``continue``, ``resume``, ``/resume`` and "continue where you left
+    off", ignoring case and punctuation. Anything with more text is a new
+    instruction and starts a new turn.
     """
-    return (
-        isinstance(text, str)
-        and len(text) <= _MAX_RESUME_REQUEST_CHARS
-        and bool(_RESUME_REQUEST.match(text))
-    )
+    if not isinstance(text, str) or len(text) > 200:
+        return False
+    return " ".join(_NOT_WORD.split(text.lower())).strip() in _RESUME_INTENTS
 
 
 def _clip_text(text: str, limit: int) -> str:
