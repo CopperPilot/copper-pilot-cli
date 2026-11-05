@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 import pytest
 
 from copper_pilot_cli.shell_scope import classify_outside_workspace
 
-HOME = Path("/home/maker")
+
+def _native(path: str) -> Path:
+    """A POSIX-style absolute path as this OS sees it (on Windows it gains the
+    current drive, as a drive-less root does when the guard resolves it)."""
+    return Path(os.path.abspath(path))
+
+
+def shown(reason: str) -> str:
+    """The expected reason with absolute paths in this OS's display form."""
+    return re.sub(r"(?<=\s)/[^\s)]*", lambda m: str(_native(m.group(0))), reason)
+
+
+HOME = _native("/home/maker")
 WORKSPACE = HOME / "projects" / "board"
 APP_HOME = HOME / ".copper-pilot"
 
@@ -57,7 +71,7 @@ def classify(command: str, *, workspace: Path = WORKSPACE, home: Path = HOME) ->
     ],
 )
 def test_outside_workspace_commands_are_flagged(command: str, reason: str) -> None:
-    assert classify(command) == reason
+    assert classify(command) == shown(reason)
 
 
 @pytest.mark.parametrize(
@@ -113,11 +127,11 @@ def test_in_project_commands_are_not_flagged(command: str) -> None:
 
 def test_workspace_at_home_allows_searching_it() -> None:
     assert classify("grep -rn VCC ~", workspace=HOME) is None
-    assert classify("find / -name x", workspace=HOME) == "`find` searches /"
+    assert classify("find / -name x", workspace=HOME) == shown("`find` searches /")
 
 
 def test_workspace_outside_home_still_guards_home() -> None:
-    workspace = Path("/srv/work/board")
+    workspace = _native("/srv/work/board")
     assert classify("cat ~/other/x.kicad_sch", workspace=workspace) == (
         "touches ~/other/x.kicad_sch"
     )
@@ -134,5 +148,5 @@ def test_temp_dir_allowed_unless_it_holds_home(monkeypatch) -> None:
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(HOME / "tmp"))
     assert classify("cat ~/tmp/out.txt") is None
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/home")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(_native("/home")))
     assert classify("cat ~/other/x") == "touches ~/other/x"
