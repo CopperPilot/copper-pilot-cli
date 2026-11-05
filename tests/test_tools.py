@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -365,9 +366,13 @@ async def test_headless_refuses_kill_by_name_with_reason(tmp_path, monkeypatch, 
 async def test_kill_by_pid_runs_without_prompt_in_yolo(tmp_path, monkeypatch) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
     broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
-    result = await broker.execute(
-        tool("1", "bash", command="sleep 30 & pid=$!; kill -9 $pid; wait $pid; echo done")
-    )
+    # A PID kill must run without a prompt; the shell differs per OS (cmd.exe
+    # on Windows), the decision under test does not.
+    if sys.platform == "win32":
+        command = "taskkill /PID 999999 >NUL 2>&1 & echo done"
+    else:
+        command = "sleep 30 & pid=$!; kill -9 $pid; wait $pid; echo done"
+    result = await broker.execute(tool("1", "bash", command=command))
     assert "done" in result["result"]
 
 

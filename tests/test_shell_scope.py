@@ -15,6 +15,14 @@ def classify(command: str, *, workspace: Path = WORKSPACE, home: Path = HOME) ->
     return classify_outside_workspace(command, workspace, home, allowed=(APP_HOME,))
 
 
+def _classify_native(command: str) -> str | None:
+    """Native paths for this OS, so the kill tests hold on Windows too."""
+    import tempfile
+
+    workspace = Path(tempfile.gettempdir()) / "cp-kill-test" / "board"
+    return classify(command, workspace=workspace, home=workspace.parent)
+
+
 # Commands observed in long --yolo agent runs (2026-11-01/02), plus close variants.
 @pytest.mark.parametrize(
     ("command", "reason"),
@@ -236,7 +244,7 @@ _ADVICE = "for this user, not just the agent's; kill the PID of the process you 
     ],
 )
 def test_kill_by_name_is_flagged(command: str, reason: str) -> None:
-    assert classify(command) == reason
+    assert _classify_native(command) == reason
 
 
 @pytest.mark.parametrize(
@@ -265,4 +273,4 @@ def test_kill_by_name_is_flagged(command: str, reason: str) -> None:
     ],
 )
 def test_kill_by_pid_is_not_flagged(command: str) -> None:
-    assert classify(command) is None
+    assert _classify_native(command) is None
