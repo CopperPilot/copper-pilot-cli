@@ -1088,7 +1088,7 @@ def test_session_state_failure_never_fails_the_turn(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_history_after_interrupted_turns_new_message_versus_continue(graph_env) -> None:
     """New messages after interrupted turns send all earlier user messages; a
-    "continue …" message instead resumes the unfinished turn by resending its
+    bare "continue" instead resumes the unfinished turn by resending its
     original request (query = that turn's message, context = history before it)."""
     agent = GraphAgent(
         [
@@ -1108,7 +1108,8 @@ async def test_history_after_interrupted_turns_new_message_versus_continue(graph
         "Build me an ESP32 Dev board",
         "Decisions: 2-layer, 50x30 mm",
     ]
-    await turn(agent, graph_env, say("Continue with the build."))
+    # Only a bare resume intent resumes (#46 b5ebd2f); "continue, but …" is a new turn.
+    await turn(agent, graph_env, say("Continue."))
     resumed = agent.payloads[-1]
     assert resumed["resume"]["reason"] == "manual"
     assert resumed["messages"][-1].content == "Add a USB-C connector"
