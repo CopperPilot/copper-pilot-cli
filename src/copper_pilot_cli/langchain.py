@@ -12,6 +12,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from copper_pilot_cli.chat_context import after_cut
 from copper_pilot_cli.copper_auth import DeviceCredential, load_credential
 from copper_pilot_cli.copper_models import request_model
 from copper_pilot_cli.copper_protocol import (
@@ -56,9 +57,14 @@ def _messages(value: AgentInput) -> list[BaseMessage]:
     return messages
 
 
-def _context(messages: Sequence[BaseMessage]) -> list[ChatMessage]:
+def _context(messages: Sequence[BaseMessage], cut: str | None = None) -> list[ChatMessage]:
+    """Portable history for ``chat_start``: human and assistant prose before the query.
+
+    With a compaction ``cut`` only the messages after it are sent; the summary
+    travels in ``session_state``.
+    """
     result: list[ChatMessage] = []
-    for message in messages[:-1]:
+    for message in after_cut(messages[:-1], cut):
         role = "user" if message.type == "human" else "assistant"
         if message.type not in {"human", "ai"}:
             continue
@@ -121,6 +127,8 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         *,
         turn_id: str | None = None,
         resume: dict[str, Any] | None = None,
+        session_state: dict[str, Any] | None = None,
+        context_cut: str | None = None,
     ) -> ChatRequest:
         if not messages or messages[-1].type != "human":
             raise ValueError("The final input message must be a human message.")
@@ -129,7 +137,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             query = json.dumps(query)
         return ChatRequest(
             query=query,
-            context=_context(messages),
+            context=_context(messages, context_cut),
             workspace_path=str(self.workspace),
             conversation_id=self.conversation_id,
             mode=self.mode,
@@ -146,6 +154,7 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
             initial_file_tree=build_initial_file_tree(self.workspace) or None,
             turn_id=turn_id,
             resume=resume,
+            session_state=session_state,
         )
 
     async def astream_events_raw(
@@ -160,19 +169,34 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         ``continuation`` (a later attempt of the same logical turn). Later
         attempts keep the tool broker's results, so a repeated
         ``tool_call_id`` is answered from cache instead of running again.
+        ``session_state`` and ``context_cut`` (chat context protocol v1) are
+        the turn's pinned state and compaction cut, sent unchanged on every
+        attempt.
         """
         del config
         options = input if isinstance(input, Mapping) else {}
         resume = options.get("resume")
+        session_state = options.get("session_state")
+        cut = options.get("context_cut")
         request = self._request(
             _messages(input),
             turn_id=options.get("turn_id"),
             resume=resume if isinstance(resume, dict) else None,
+            session_state=session_state if isinstance(session_state, dict) else None,
+            context_cut=cut if isinstance(cut, str) else None,
         )
         if not options.get("continuation") and request.resume is None:
             self.tool_broker.begin_turn()
         async for event in self._client.stream(request, self.tool_broker.execute):
             yield event
+
+    async def acompact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run ``POST /analyze/compact`` with this agent's credential."""
+        return await self._client.compact(payload)
+
+    async def acount_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run ``POST /analyze/context/count`` with this agent's credential."""
+        return await self._client.count_context(payload)
 
     async def server_reachable(self) -> bool:
         """Whether the hosted service answers its heartbeat (checked before a resume)."""

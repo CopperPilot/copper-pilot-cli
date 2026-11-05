@@ -30,7 +30,8 @@ SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/btw", "Ask a side question without interrupting"),
     ("/build", "Build a saved plan"),
     ("/clear", "Clear the transcript"),
-    ("/context", "Show workspace and thread"),
+    ("/compact", "Summarize older messages to free context"),
+    ("/context", "Show context size, workspace and thread"),
     ("/copy", "Copy the last response"),
     ("/cwd", "Switch project folder"),
     ("/effort", "Switch balanced or intelligent"),
@@ -406,6 +407,14 @@ def _header_text(text: str, mode: ColorMode) -> list[str | tuple[str, str]]:
     return []
 
 
+_METER_TOKENS = {
+    "normal": "muted",
+    "warn": "status-warn",
+    "high": "status-warn",
+    "critical": "status-error",
+}
+
+
 def status_content(
     width: int,
     *,
@@ -414,8 +423,14 @@ def status_content(
     flash: str | None = None,
     mode: ColorMode | None = None,
     ascii: bool | None = None,
+    context: str | None = None,
+    context_level: str = "normal",
 ) -> Content:
-    """One status line. Under 40 columns, only the two icons remain."""
+    """One status line. Under 40 columns, only the two icons remain.
+
+    ``context`` is the context meter (``ctx 45% · 470K/1M``), shown before
+    ``/help`` when it fits; ``context_level`` colours it (warn, high, critical).
+    """
     color_mode = detect_color_mode() if mode is None else mode
     use_ascii = ascii_mode() if ascii is None else ascii
     mode_name = chat_mode if chat_mode in MODE_COPY else "agent"
@@ -450,9 +465,17 @@ def status_content(
     ]
     left = "".join(text for text, _token in segments)
     right = "/help"
+    meter = (
+        soften(context, ascii=use_ascii).replace("·", "-" if use_ascii else "·") if context else ""
+    )
+    if meter and len(left) + 2 + len(meter) + 2 + len(right) > width:
+        meter = ""
     if len(left) + 2 + len(right) <= width:
-        gap = width - len(left) - len(right)
+        gap = width - len(left) - len(right) - (len(meter) + 2 if meter else 0)
         segments.append((" " * gap, None))
+        if meter:
+            segments.append((meter, _METER_TOKENS.get(context_level, "muted")))
+            segments.append(("  ", None))
         segments.append((right, "orange-500"))
     else:
         plain = end_truncate(left, width, ascii=use_ascii)

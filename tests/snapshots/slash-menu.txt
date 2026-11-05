@@ -3,5 +3,5 @@
 /btw            Ask a side question without interrupting
 /build          Build a saved plan
 /clear          Clear the transcript
-/context        Show workspace and thread
+/compact        Summarize older messages to free context
 ↑↓ choose · enter run · esc close

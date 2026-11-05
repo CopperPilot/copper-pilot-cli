@@ -30,6 +30,27 @@ from textual.widgets.option_list import Option
 from copper_pilot_cli import copper_theme
 from copper_pilot_cli import textual_patches as _textual_patches  # noqa: F401
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.chat_context import (
+    COMPACT_CONFIRM_SECONDS,
+    COMPACTION_EVENT,
+    CONTEXT_COMPACTED_KIND,
+    CONTEXT_USAGE_KIND,
+    USAGE_KEY,
+    NothingToCompact,
+    active_workers,
+    active_workers_notice,
+    auto_compact_threshold,
+    compact_history,
+    compaction_notice,
+    context_limit,
+    count_context,
+    current_compaction,
+    describe_context,
+    meter_level,
+    meter_text,
+    parse_context_usage,
+    stored_usage,
+)
 from copper_pilot_cli.clipboard import copy_selection_to_clipboard
 from copper_pilot_cli.copper_api import format_token_limits, token_limits, usage_error_message
 from copper_pilot_cli.copper_auth import DeviceLogin, clear_credential
@@ -69,6 +90,7 @@ from copper_pilot_cli.copper_models import (
     model_fallback_notice,
     model_selector_enabled,
     normalize_model_id,
+    turn_model,
 )
 from copper_pilot_cli.copper_preferences import (
     acknowledge_auto_notice,
@@ -283,6 +305,12 @@ class CopperPilotApp(App[None]):
         self._capacity_notified = False
         self._loading: LoadingWidget | None = None
         self._turn_state = TurnState()
+        # Chat context protocol v1: the last measured context size and the
+        # current compaction record of this thread.
+        self._context_usage: dict[str, Any] | None = None
+        self._compaction: dict[str, Any] | None = None
+        # When /compact last warned about active subagent workers (monotonic).
+        self._compact_warned_at: float | None = None
         self._turn_query = ""
         self._turn_tool_start = 0
         self._btw = SideQuestionLog()
@@ -481,6 +509,9 @@ class CopperPilotApp(App[None]):
                 "copper.tool_result",
             }:
                 await self._custom_event(event)
+        self._context_usage = stored_usage(values)
+        self._compaction = current_compaction(values)
+        self._update_status()
         await self._show_unfinished_turn()
         if messages or events:
             self.query_one("#transcript", ChatScroll).scroll_end(animate=False)
@@ -612,12 +643,18 @@ class CopperPilotApp(App[None]):
         bar = self.query_one(StatusBar)
         bar.set_approval_mode(self.broker.mode.value)
         bar.set_session(mode=self.copper_mode.value, effort=self.copper_effort.value)
-        limit = self._turn_state.context_limit
-        tokens = self._turn_state.context_tokens
+        usage = self._context_usage or {}
+        tokens = usage.get("context_tokens")
+        limit = usage.get("context_limit") or self.catalog.context_window(
+            self.copper_effort, self.copper_model
+        )
         if isinstance(tokens, int) and isinstance(limit, int) and limit > 0:
-            bar.set_context_percent(min(100, round(100 * tokens / limit)))
+            bar.set_context(
+                meter_text(tokens, limit),
+                meter_level(tokens, limit, self.catalog.context_policy),
+            )
         else:
-            bar.set_context_percent(None)
+            bar.set_context(None)
         self.query_one(ChatInput).set_chrome(self.copper_mode.value, self.broker.mode.value)
         banner = self.query(WelcomeBanner)
         if banner:
@@ -1002,7 +1039,10 @@ class CopperPilotApp(App[None]):
                 self.notify(label, severity="warning", markup=False)
         elif kind == "copper.status_event" and isinstance(data, dict):
             await self._handle_status_event(data)
+        elif kind == COMPACTION_EVENT and isinstance(data, dict):
+            await self._compaction_progress(data, str(event.get("title") or ""))
         elif kind == "copper.final" and isinstance(data, dict):
+            self._note_context_usage(data.get("context_usage"))
             if (data.get("success") is False or data.get("error")) and self._work_run is not None:
                 self._work_run.mark_failed()
             self._finalize_work_run()
@@ -1064,7 +1104,41 @@ class CopperPilotApp(App[None]):
             self._countdown.stop()
             self._countdown = None
 
+    def _note_context_usage(self, value: Any) -> None:
+        usage = parse_context_usage(value)
+        if usage is not None:
+            self._context_usage = {**(self._context_usage or {}), **usage}
+            self._update_status()
+
+    async def _compaction_progress(self, data: dict[str, Any], title: str) -> None:
+        """Auto-compaction before a turn: a status while it runs, then a printed notice."""
+        stage = data.get("stage")
+        if stage == "started":
+            self._update_status("Compacting context")
+            return
+        if stage == "completed":
+            record = data.get("record")
+            if isinstance(record, dict):
+                self._compaction = record
+                post = record.get("post_tokens")
+                if isinstance(post, int):
+                    self._note_context_usage({"context_tokens": post})
+            await self._mount(AssistantMessage(f"*{title or compaction_notice(None)}*"))
+        elif stage == "failed":
+            self.notify(title, severity="warning", markup=False)
+            await self._mount(AssistantMessage(f"*{title}*"))
+
     async def _handle_status_event(self, data: dict[str, Any]) -> None:
+        if data.get("kind") == CONTEXT_USAGE_KIND:
+            self._note_context_usage(data)
+            return
+        if data.get("kind") == CONTEXT_COMPACTED_KIND:
+            compaction = data.get("compaction")
+            record = compaction if isinstance(compaction, dict) else None
+            if record is not None:
+                self._compaction = record
+            await self._mount(AssistantMessage(f"*{compaction_notice(record)}*"))
+            return
         if data.get("kind") == "subagent":
             identifier = str(data.get("id") or "")
             status = normalize_subagent_status(
@@ -1138,12 +1212,16 @@ class CopperPilotApp(App[None]):
                 self.notify("Copied the last CopperPilot response.", markup=False)
             else:
                 await self._mount(ErrorMessage("There is no assistant response to copy."))
+        elif command == "/compact":
+            await self._start_compaction(argument.strip() or None)
         elif command == "/context":
             context = self.runtime.agent.context
+            sizes = await self._context_lines()
             await self._mount(
                 AssistantMessage(
                     "\n".join(
                         [
+                            *(f"- {line}" for line in sizes),
                             f"- Workspace: `{self.workspace}`",
                             f"- Thread: `{self.thread_id}`",
                             f"- CopperPilot mode: `{self.copper_mode.value}`",
@@ -1175,6 +1253,8 @@ class CopperPilotApp(App[None]):
                 workspace = Path(choice)
                 self.workspace = workspace
                 self.thread_id = generate_thread_id()
+                self._context_usage = None
+                self._compaction = None
                 self.copper_effort = CopperEffort.BALANCED
                 self.copper_model = None
                 self.broker.set_workspace(workspace)
@@ -1322,6 +1402,115 @@ class CopperPilotApp(App[None]):
             await self._mount(ErrorMessage(f"Unknown command: {value}"))
         else:
             await self._mount(ErrorMessage(f"Unknown command: {command}"))
+
+    async def _start_compaction(self, focus: str | None) -> None:
+        """``/compact [focus]``: summarize older messages; the transcript is unchanged."""
+        if self._turn_task and not self._turn_task.done():
+            self.notify("A turn is already running.", severity="warning", markup=False)
+            return
+        if await self._unfinished_turn() is not None:
+            await self._mount(
+                ErrorMessage(
+                    "This chat has an unfinished turn. Type /resume (or “continue”) "
+                    "to finish it before compacting."
+                )
+            )
+            return
+        agent = self.runtime.agent
+        if getattr(agent, "credential", None) is None or not hasattr(agent, "acompact"):
+            await self._mount(ErrorMessage("Log in to CopperPilot to compact the context."))
+            return
+        workers = active_workers(self.workspace)
+        warned = self._compact_warned_at
+        if workers and (warned is None or monotonic() - warned > COMPACT_CONFIRM_SECONDS):
+            self._compact_warned_at = monotonic()
+            await self._mount(AssistantMessage(f"*{active_workers_notice(workers)}*"))
+            return
+        self._compact_warned_at = None
+        self._turn_task = asyncio.create_task(self._compact(focus))
+        try:
+            await self._turn_task
+        except asyncio.CancelledError:
+            self.notify("Compaction cancelled.", severity="warning", markup=False)
+        finally:
+            self._turn_task = None
+
+    async def _compact(self, focus: str | None) -> None:
+        await self._start_loading()
+        self._update_status("Compacting context")
+        try:
+            state = await self.runtime.aget_state(self._config())
+            values = dict(getattr(state, "values", {}) or {})
+            result = await compact_history(
+                self.runtime.agent,
+                values,
+                trigger="manual",
+                model=turn_model(self.catalog, self.copper_effort, self.copper_model),
+                instructions=focus,
+                workspace=self.workspace,
+                policy=self.catalog.context_policy,
+            )
+            await self.runtime.aupdate_state(self._config(), result.updates, as_node="copper_pilot")
+        except NothingToCompact as exc:
+            await self._mount(AssistantMessage(str(exc)))
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - shown to the user; history is unchanged
+            logger.warning("Compaction failed (%s): %s", type(exc).__name__, exc)
+            await self._mount(ErrorMessage(f"Could not compact the context: {exc}"))
+            return
+        finally:
+            await self._stop_loading()
+        self._compaction = result.record
+        self._note_context_usage(result.updates.get(USAGE_KEY))
+        await self._mount(AssistantMessage(f"*{compaction_notice(result.record)}*"))
+
+    async def _context_lines(self) -> list[str]:
+        """``/context`` size lines; counts the context when there is no fresh measurement."""
+        try:
+            state = await self.runtime.aget_state(self._config())
+            values = dict(getattr(state, "values", {}) or {})
+        except Exception as exc:  # noqa: BLE001 - the workspace lines still answer
+            logger.info("Context state unavailable (%s)", type(exc).__name__)
+            values = {}
+        usage = stored_usage(values) or self._context_usage
+        if usage is not None:
+            values[USAGE_KEY] = usage
+        model = turn_model(self.catalog, self.copper_effort, self.copper_model)
+        used = usage.get("context_tokens") if usage else None
+        breakdown: dict[str, Any] | None = None
+        estimated = False
+        agent = self.runtime.agent
+        stale = usage is None or (usage.get("model") and usage.get("model") != model)
+        if stale and getattr(agent, "credential", None) is not None:
+            try:
+                counted = await count_context(agent, values, model=model, workspace=self.workspace)
+            except Exception as exc:  # noqa: BLE001 - shown without a breakdown
+                logger.info("Context count unavailable (%s)", type(exc).__name__)
+            else:
+                parsed = parse_context_usage(
+                    {
+                        "context_tokens": counted.get("estimated_tokens"),
+                        "context_limit": counted.get("context_limit"),
+                        "auto_compact_at": counted.get("auto_compact_at"),
+                    }
+                )
+                if parsed is not None:
+                    used, estimated = parsed["context_tokens"], True
+                    values[USAGE_KEY] = parsed
+                raw = counted.get("breakdown")
+                breakdown = raw if isinstance(raw, dict) else None
+        return describe_context(
+            used=used,
+            limit=context_limit(values, self.catalog, self.copper_effort, self.copper_model),
+            auto_compact_at=auto_compact_threshold(
+                values, self.catalog, self.copper_effort, self.copper_model
+            ),
+            record=current_compaction(values) or self._compaction,
+            breakdown=breakdown,
+            estimated=estimated,
+        )
 
     def _live_turn(self) -> LiveTurn:
         running = self._turn_task is not None and not self._turn_task.done()

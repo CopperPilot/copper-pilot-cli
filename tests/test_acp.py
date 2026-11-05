@@ -34,6 +34,8 @@ from websockets.http11 import Response
 from copper_pilot_cli import copper_acp, copper_models
 from copper_pilot_cli.copper_acp import (
     ATTACHMENT_DIR,
+    COMPACT_COMMAND,
+    CONTEXT_COMMAND,
     EFFORT_COMMAND,
     EFFORT_CONFIG_ID,
     LOGIN_METHOD_ID,
@@ -724,6 +726,8 @@ async def test_prompt_streams_all_event_kinds(tmp_path, monkeypatch) -> None:
         EFFORT_COMMAND,
         MODEL_COMMAND,
         USAGE_COMMAND,
+        COMPACT_COMMAND,
+        CONTEXT_COMMAND,
         RESUME_COMMAND,
     ]
     updates = updates[1:]
@@ -1483,13 +1487,16 @@ def test_effort_command_parsing() -> None:
 
 @pytest.mark.usefixtures("model_selector_enabled")
 def test_available_commands_advertise_effort_model_and_usage() -> None:
-    effort, model, usage, resume = available_commands()
+    effort, model, usage, compact, context, resume = available_commands()
     assert effort.name == EFFORT_COMMAND
     assert effort.input.root.hint == "balanced | intelligence"
     assert model.name == MODEL_COMMAND
     assert model.input.root.hint == "model id"
     assert usage.name == USAGE_COMMAND
     assert usage.input is None
+    assert compact.name == COMPACT_COMMAND
+    assert compact.input.root.hint == "optional focus"
+    assert context.name == CONTEXT_COMMAND and context.input is None
     assert resume.name == RESUME_COMMAND
 
 
@@ -2166,6 +2173,8 @@ def test_available_commands_omit_model_while_the_selector_is_off() -> None:
     assert [command.name for command in available_commands()] == [
         EFFORT_COMMAND,
         USAGE_COMMAND,
+        COMPACT_COMMAND,
+        CONTEXT_COMMAND,
         RESUME_COMMAND,
     ]
 
@@ -2356,3 +2365,270 @@ async def test_continue_prompts_resume_the_unfinished_turn(
         assert runtime.values == {"copper_resume": {}}
     else:
         assert runtime.values["messages"][0].content == text
+
+
+# ------------------------------------------------------------ context protocol
+
+
+class ContextRuntime(FakeRuntime):
+    """FakeRuntime that also stores checkpoint updates and reports unfinished turns."""
+
+    def __init__(self, *args: Any, unfinished: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.unfinished = unfinished
+        self.updates: list[tuple[dict[str, Any], str | None]] = []
+
+    async def unfinished_turn(self, _config):
+        return self.unfinished
+
+    async def aupdate_state(self, _config, values, *, as_node=None):
+        self.updates.append((values, as_node))
+
+
+def usage_updates(conn: FakeConn) -> list[tuple[int, int]]:
+    return [
+        (update.used, update.size)
+        for _sid, update in conn.updates
+        if update.session_update == "usage_update"
+    ]
+
+
+def agent_text(conn: FakeConn) -> str:
+    return "".join(
+        update.content.text
+        for _sid, update in conn.updates
+        if update.session_update == "agent_message_chunk"
+    )
+
+
+CONTEXT_USAGE = {
+    "model": "gemini-3.8-flash",
+    "context_tokens": 470_000,
+    "context_limit": 1_048_576,
+    "auto_compact_at": 812_972,
+}
+
+
+def test_context_usage_update_never_sends_size_zero_when_the_limit_is_known() -> None:
+    update = copper_acp.context_usage_update(CONTEXT_USAGE)
+    assert update is not None and (update.used, update.size) == (470_000, 1_048_576)
+    assert copper_acp.context_usage_update({"context_tokens": 5}) is None
+    assert copper_acp.context_usage_update({"context_tokens": 5}, 100).size == 100
+    legacy = usage_update({"tokens_input": 7}, 1_000)
+    assert legacy is not None and (legacy.used, legacy.size) == (7, 1_000)
+    assert usage_update({"tokens_input": 7}).size == 0
+    assert copper_acp.compact_command("/compact focus on power") == (True, "focus on power")
+    assert copper_acp.compact_command("/compact") == (True, None)
+    assert copper_acp.context_command("/context")
+
+
+async def test_turn_publishes_context_usage_and_compaction_progress(tmp_path, monkeypatch) -> None:
+    events = [
+        {"type": "copper.compaction", "data": {"stage": "started", "trigger": "auto"}},
+        {
+            "type": "copper.compaction",
+            "data": {
+                "stage": "completed",
+                "trigger": "auto",
+                "record": {"pre_tokens": 182_000, "post_tokens": 31_000},
+            },
+            "title": "Context compacted · 182K → 31K tokens",
+        },
+        {"type": "copper.status_event", "data": {"kind": "context_usage", **CONTEXT_USAGE}},
+        # Throttled: a second live update right away is not sent.
+        {
+            "type": "copper.status_event",
+            "data": {"kind": "context_usage", **CONTEXT_USAGE, "context_tokens": 480_000},
+        },
+        {"type": "copper.usage", "data": {"tokens_input": 999}},
+        {
+            "type": "copper.status_event",
+            "data": {"kind": "context_compacted", "compaction": {"pre_tokens": 900_000}},
+        },
+        {
+            "type": "copper.final",
+            "data": {
+                "success": True,
+                "context_usage": {**CONTEXT_USAGE, "context_tokens": 500_000},
+            },
+        },
+    ]
+    runtime = FakeRuntime(
+        events,
+        state_values={
+            "messages": [AIMessage(content="x")],
+            "copper_context_usage": {**CONTEXT_USAGE, "context_tokens": 500_000, "measured_at": 1},
+        },
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(session_id=session_id, prompt=[TextContentBlock(type="text", text="Go")])
+    sent = usage_updates(conn)
+    # The compaction's 31K had no known window yet (the bundled catalog has none), so
+    # no size-less update was sent; once the server named the limit every update has it.
+    assert sent[:2] == [(470_000, 1_048_576), (500_000, 1_048_576)]
+    assert all(size for _used, size in sent)
+    assert (999, 0) not in sent
+    text = agent_text(conn)
+    assert "Compacting context…" in text
+    assert "Context compacted · 182K → 31K tokens" in text
+    assert "Context compacted" in text.split("31K tokens", 1)[1]
+
+
+async def test_compact_command_runs_locally_and_stores_the_record(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli.chat_context import CompactionResult
+
+    runtime = ContextRuntime(state_values={"messages": [HumanMessage(content="hi")]})
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    calls: list[dict[str, Any]] = []
+    record = {"id": "cmp_1", "summary": "s", "pre_tokens": 182_000, "post_tokens": 31_000}
+
+    async def fake_compact(_agent, values, **kwargs):
+        calls.append({"values": values, **kwargs})
+        return CompactionResult(
+            record,
+            {
+                "copper_compaction": record,
+                "copper_context_usage": {"context_tokens": 31_000, "context_limit": 1_048_576},
+            },
+        )
+
+    monkeypatch.setattr(copper_acp, "compact_history", fake_compact)
+    response = await agent.prompt(
+        session_id=session_id,
+        prompt=[TextContentBlock(type="text", text="/compact focus on the power tree")],
+    )
+    assert response.stop_reason == "end_turn"
+    assert runtime.values is None  # no hosted chat turn
+    (call,) = calls
+    assert call["trigger"] == "manual" and call["instructions"] == "focus on the power tree"
+    assert call["model"] == BALANCED_MODEL
+    ((updates, as_node),) = runtime.updates
+    assert updates["copper_compaction"] is record and as_node == "copper_pilot"
+    text = agent_text(conn)
+    assert text.startswith("Compacting context…")
+    assert text.endswith("Context compacted · 182K → 31K tokens")
+    assert usage_updates(conn) == [(31_000, 1_048_576)]
+
+
+async def test_compact_command_refuses_mid_turn_and_reports_failures(tmp_path, monkeypatch) -> None:
+    runtime = ContextRuntime(state_values={"messages": []}, unfinished=object())
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+
+    async def failing(*_args, **_kwargs):
+        raise ProtocolError("This CopperPilot server does not support context compaction yet.")
+
+    monkeypatch.setattr(copper_acp, "compact_history", failing)
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/compact")]
+    )
+    assert "unfinished turn" in agent_text(conn)
+    runtime.unfinished = None
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/compact")]
+    )
+    assert "Could not compact the context: This CopperPilot server does not support" in agent_text(
+        conn
+    )
+    assert runtime.updates == []
+
+
+async def test_context_command_reports_size_and_counts_without_a_measurement(
+    tmp_path, monkeypatch
+) -> None:
+    runtime = ContextRuntime(
+        state_values={
+            "messages": [HumanMessage(content="hi")],
+            "copper_context_usage": CONTEXT_USAGE,
+            "copper_compaction": {"summary": "s", "pre_tokens": 182_000, "post_tokens": 31_000},
+        }
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/context")]
+    )
+    assert agent_text(conn) == (
+        "- Context: 45% used · 470K / 1M tokens\n"
+        "- Auto-compacts at: 813K tokens\n"
+        "- Compacted: 182K → 31K tokens (manual)"
+    )
+
+    counted: list[dict[str, Any]] = []
+
+    async def fake_count(_agent, values, **kwargs):
+        counted.append(kwargs)
+        return {
+            "estimated_tokens": 51_234,
+            "context_limit": 1_048_576,
+            "auto_compact_at": 812_972,
+            "breakdown": {"system_and_tools": 23_000, "history": 26_000},
+        }
+
+    monkeypatch.setattr(copper_acp, "count_context", fake_count)
+    runtime.state_values = {"messages": [HumanMessage(content="hi")]}
+    conn.updates.clear()
+    await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="/context")]
+    )
+    assert counted and agent_text(conn) == (
+        "- Context (estimated): 5% used · 51K / 1M tokens\n"
+        "- Auto-compacts at: 813K tokens\n"
+        "- Breakdown: system and tools 23K · history 26K"
+    )
+
+
+async def test_load_session_sends_stored_usage_and_the_compaction_note(
+    tmp_path, monkeypatch
+) -> None:
+    runtime = FakeRuntime(
+        state_values={
+            "messages": [HumanMessage(content="Hi"), AIMessage(content="Hello")],
+            "copper_context_usage": CONTEXT_USAGE,
+            "copper_compaction": {"summary": "s", "last_message_id": "x"},
+        }
+    )
+    _patch(monkeypatch, runtime)
+    agent = CopperAcpAgent()
+    conn = FakeConn()
+    agent.on_connect(conn)
+    await agent.load_session(cwd=str(tmp_path), session_id="thread-1")
+    assert kinds(conn) == [
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_message_chunk",
+        "usage_update",
+    ]
+    assert "compacted earlier" in conn.updates[2][1].content.text
+    assert usage_updates(conn) == [(470_000, 1_048_576)]
+
+
+async def test_compact_command_with_active_subagents_needs_a_second_compact(
+    tmp_path, monkeypatch
+) -> None:
+    from copper_pilot_cli.chat_context import CompactionResult
+
+    folder = tmp_path / ".copperpilot" / "scratch"
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text(
+        '{"version": 2, "units": {"a": {"unit_id": "a", "status": "paused"}}}', encoding="utf-8"
+    )
+    runtime = ContextRuntime(state_values={"messages": [HumanMessage(content="hi")]})
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    calls: list[Any] = []
+
+    async def fake_compact(_agent, values, **kwargs):
+        calls.append(kwargs)
+        return CompactionResult({"summary": "s"}, {"copper_compaction": {"summary": "s"}})
+
+    monkeypatch.setattr(copper_acp, "compact_history", fake_compact)
+    compact = [TextContentBlock(type="text", text="/compact")]
+    await agent.prompt(session_id=session_id, prompt=compact)
+    assert calls == [] and agent_text(conn) == (
+        "1 subagent worker is still queued/running/paused; compacting now drops context "
+        "a resume needs. Run /compact again to compact anyway."
+    )
+    agent.sessions[session_id].compact_warned_at -= 61
+    await agent.prompt(session_id=session_id, prompt=compact)
+    assert calls == []
+    await agent.prompt(session_id=session_id, prompt=compact)
+    assert len(calls) == 1 and len(runtime.updates) == 1

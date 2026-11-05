@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -1862,3 +1863,206 @@ async def test_provider_capacity_waits_show_a_countdown_not_an_error(tmp_path) -
         assert not list(app.query(ErrorMessage))
     assert seen[0].startswith("High demand — waiting to continue (next try in ")
     assert seen[1].startswith("CopperPilot is under high demand; continuing in ")
+
+
+# ------------------------------------------------------------ context protocol
+
+CONTEXT_USAGE = {
+    "model": "gemini-3.8-flash",
+    "context_tokens": 470_000,
+    "context_limit": 1_048_576,
+    "auto_compact_at": 812_972,
+}
+
+
+class ContextAgent(FakeAgent):
+    credential = object()
+    effort = CopperEffort.BALANCED
+    conversation_id = "thread"
+
+    def __init__(self) -> None:
+        self.context = SimpleNamespace(schematic_path=None, pcb_path=None)
+        self.requests: list[dict[str, Any]] = []
+        self.counts: list[dict[str, Any]] = []
+
+    async def acompact(self, payload):
+        self.requests.append(payload)
+        return {
+            "compaction": {
+                "id": "cmp_1",
+                "summary": "## Session intent\nBoard",
+                "pre_tokens": 182_000,
+                "post_tokens": 31_000,
+            },
+            "keep_from_index": 2,
+        }
+
+    async def acount_context(self, payload):
+        self.counts.append(payload)
+        return {
+            "estimated_tokens": 51_234,
+            "context_limit": 1_048_576,
+            "auto_compact_at": 812_972,
+            "breakdown": {"system_and_tools": 23_000, "history": 26_000},
+        }
+
+
+class ContextRuntime(FakeRuntime):
+    def __init__(self, values: dict[str, Any]) -> None:
+        super().__init__()
+        self.agent = ContextAgent()
+        self.values = values
+        self.updates: list[dict[str, Any]] = []
+
+    async def aget_state(self, _config):
+        return SimpleNamespace(values=self.values)
+
+    async def aupdate_state(self, _config, values, *, as_node=None):
+        assert as_node == "copper_pilot"
+        self.updates.append(values)
+        self.values = {**self.values, **{k: v for k, v in values.items() if k != "copper_events"}}
+
+    async def unfinished_turn(self, _config):
+        return None
+
+
+def chat_values(**extra: Any) -> dict[str, Any]:
+    return {
+        "messages": [
+            HumanMessage(content="Build a board", id="h1"),
+            AIMessage(content="Planned it.", id="a1"),
+            HumanMessage(content="Route it", id="h2"),
+            AIMessage(content="Routed.", id="a2"),
+        ],
+        **extra,
+    }
+
+
+def test_status_line_shows_the_context_meter_when_it_fits() -> None:
+    from copper_pilot_cli.copper_chrome import status_content
+    from copper_pilot_cli.copper_theme import ColorMode
+
+    line = status_content(
+        120, chat_mode="agent", effort="balanced", mode=ColorMode.NONE, context="ctx 45% · 470K/1M"
+    ).plain
+    assert line.endswith("ctx 45% · 470K/1M  /help") and len(line) == 120
+    narrow = status_content(
+        60, chat_mode="agent", effort="balanced", mode=ColorMode.NONE, context="ctx 45% · 470K/1M"
+    ).plain
+    assert "ctx" not in narrow
+
+
+@pytest.mark.asyncio
+async def test_meter_follows_stored_and_live_context_usage(tmp_path) -> None:
+    runtime = ContextRuntime(chat_values(copper_context_usage=CONTEXT_USAGE))
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        assert "ctx 45% · 470K/1M" in str(app.query_one(StatusBar).render())
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {"kind": "context_usage", **CONTEXT_USAGE, "context_tokens": 900_000},
+            }
+        )
+        assert "ctx 86% · 900K/1M" in str(app.query_one(StatusBar).render())
+        await app._custom_event(
+            {
+                "type": "copper.final",
+                "data": {"success": True, "context_usage": {**CONTEXT_USAGE, "context_tokens": 1}},
+            }
+        )
+        assert "ctx 0% · 1/1M" in str(app.query_one(StatusBar).render())
+        await app._custom_event(
+            {
+                "type": "copper.status_event",
+                "data": {
+                    "kind": "context_compacted",
+                    "compaction": {"pre_tokens": 9, "post_tokens": 1},
+                },
+            }
+        )
+        assert list(app.query(AssistantMessage))[-1].content == "*Context compacted · 9 → 1 tokens*"
+
+
+@pytest.mark.asyncio
+async def test_compact_command_stores_the_record_and_prints_a_notice(tmp_path) -> None:
+    runtime = ContextRuntime(chat_values(copper_context_usage=CONTEXT_USAGE))
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._handle_submission("/compact the power tree")
+        (request,) = runtime.agent.requests
+        assert request["trigger"] == "manual" and request["instructions"] == "the power tree"
+        (updates,) = runtime.updates
+        assert updates["copper_compaction"]["last_message_id"] == "a1"
+        assert (
+            list(app.query(AssistantMessage))[-1].content
+            == "*Context compacted · 182K → 31K tokens*"
+        )
+        assert "ctx 3% · 31K/1M" in str(app.query_one(StatusBar).render())
+        assert app._turn_task is None
+
+        await app._handle_submission("/context")
+        text = list(app.query(AssistantMessage))[-1].content
+        assert "- Context: 3% used · 31K / 1M tokens" in text
+        assert "- Compacted: 182K → 31K tokens (manual)" in text
+        assert "- Workspace:" in text
+        assert runtime.agent.counts == []
+
+
+@pytest.mark.asyncio
+async def test_context_command_counts_without_a_measurement(tmp_path) -> None:
+    runtime = ContextRuntime(chat_values())
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        assert "ctx" not in str(app.query_one(StatusBar).render())
+        await app._handle_submission("/context")
+        (count,) = runtime.agent.counts
+        assert [item["role"] for item in count["context"]] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        text = list(app.query(AssistantMessage))[-1].content
+        assert "- Context (estimated): 5% used · 51K / 1M tokens" in text
+        assert "- Breakdown: system and tools 23K · history 26K" in text
+
+
+@pytest.mark.asyncio
+async def test_compact_command_needs_a_login(tmp_path) -> None:
+    app = CopperPilotApp(FakeRuntime(), LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._handle_submission("/compact")
+        assert "Log in" in str(list(app.query(ErrorMessage))[-1].render())
+
+
+@pytest.mark.asyncio
+async def test_compact_with_active_subagents_needs_a_second_compact(tmp_path) -> None:
+    folder = tmp_path / ".copperpilot" / "scratch"
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text(
+        '{"version": 2, "units": {"a": {"unit_id": "a", "status": "running"},'
+        ' "b": {"unit_id": "b", "status": "queued"}}}',
+        encoding="utf-8",
+    )
+    runtime = ContextRuntime(chat_values(copper_context_usage=CONTEXT_USAGE))
+    app = CopperPilotApp(runtime, LocalToolBroker(tmp_path), tmp_path, "thread")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._handle_submission("/compact")
+        assert runtime.agent.requests == []
+        assert list(app.query(AssistantMessage))[-1].content == (
+            "*2 subagent workers are still queued/running/paused; compacting now drops "
+            "context a resume needs. Run /compact again to compact anyway.*"
+        )
+        # A warning older than 60 s does not count as confirmation.
+        app._compact_warned_at -= 61
+        await app._handle_submission("/compact")
+        assert runtime.agent.requests == []
+        await app._handle_submission("/compact")
+        assert len(runtime.agent.requests) == 1
+        assert "Context compacted" in list(app.query(AssistantMessage))[-1].content
