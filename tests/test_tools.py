@@ -393,7 +393,7 @@ async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monk
 @pytest.mark.asyncio
 async def test_kicad_purpose_read_returns_whole_file_raw(tmp_path) -> None:
     body = "(kicad_sch\n" + "".join(f"\t(wire {i})\n" for i in range(500)) + ")\n"
-    (tmp_path / "board.kicad_sch").write_text(body)
+    (tmp_path / "board.kicad_sch").write_bytes(body.encode())
     broker = LocalToolBroker(tmp_path)
     result = await broker.execute(
         tool("1", "read_file", file_path="board.kicad_sch", purpose="kicad_workspace_schematic")
@@ -436,7 +436,7 @@ async def test_oversized_purpose_read_comes_back_in_raw_pages(tmp_path, monkeypa
 
     monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 2_000)
     body = "".join(f"(segment {i})\n" for i in range(300))
-    (tmp_path / "big.kicad_pcb").write_text(body)
+    (tmp_path / "big.kicad_pcb").write_bytes(body.encode())
     broker = LocalToolBroker(tmp_path)
     text, pages = await _page_through(broker, "big.kicad_pcb", purpose="kicad_workspace_pcb")
     assert text == body
@@ -454,7 +454,7 @@ async def test_big_external_library_is_paged_not_lost(tmp_path, monkeypatch) -> 
     workspace.mkdir()
     lib = tmp_path / "Connector_Generic.kicad_sym"
     body = "(kicad_symbol_lib\n" + '\t(symbol "Conn" (pin 1))\n' * 500 + ")\n"
-    lib.write_text(body)
+    lib.write_bytes(body.encode())
     broker = LocalToolBroker(workspace)
     text, pages = await _page_through(broker, str(lib), external=True, platform="linux")
     assert text == body
@@ -463,7 +463,7 @@ async def test_big_external_library_is_paged_not_lost(tmp_path, monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_internal_read_honours_offset_and_limit(tmp_path) -> None:
-    (tmp_path / "a.kicad_sch").write_text("l1\nl2\nl3\nl4")
+    (tmp_path / "a.kicad_sch").write_bytes(b"l1\nl2\nl3\nl4")
     broker = LocalToolBroker(tmp_path)
     result = await broker.execute(
         tool(
@@ -512,12 +512,12 @@ async def test_external_kicad_library_reads_are_allowed(tmp_path) -> None:
     workspace.mkdir()
     lib = tmp_path / "stock" / "Device.kicad_sym"
     lib.parent.mkdir()
-    lib.write_text("(kicad_symbol_lib\n" + "\t(symbol x)\n" * 300 + ")\n")
+    lib.write_bytes(("(kicad_symbol_lib\n" + "\t(symbol x)\n" * 300 + ")\n").encode())
     broker = LocalToolBroker(workspace)
     text = await broker.execute(
         tool("1", "read_file", file_path=str(lib), external=True, platform="linux")
     )
-    assert text == {"result": lib.read_text()}
+    assert text == {"result": lib.read_bytes().decode()}
     binary = await broker.execute(
         tool(
             "2",
@@ -549,3 +549,16 @@ async def test_external_reads_stay_blocked_without_flag_or_for_other_files(tmp_p
             tool("3", "write_file", file_path=str(lib), content="x", external=True)
         )
     assert lib.read_text() == "(kicad_symbol_lib)"
+
+
+@pytest.mark.asyncio
+async def test_internal_reads_return_the_file_bytes_exactly(tmp_path) -> None:
+    """A KiCad file checked out with CRLF line ends comes back as written,
+    on every OS (the server parser handles both)."""
+    body = b"(kicad_sch\r\n\t(version 20260306)\r\n)\r\n"
+    (tmp_path / "crlf.kicad_sch").write_bytes(body)
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(
+        tool("1", "read_file", file_path="crlf.kicad_sch", purpose="kicad_workspace_schematic")
+    )
+    assert result == {"result": body.decode()}
