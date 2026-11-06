@@ -7,6 +7,651 @@ Changelog
 
 Fix
 ~~~
+- Name what earlier attempts saw in a turn's final error. [AdityaNG,
+  Claude Opus 5.5]
+
+  During a hosted outage on 2026-10-30 (rea-hardware thin-laptop i12) every
+  attempt of a turn failed differently (dropped sockets, close code 1012
+  service restart, keepalive timeouts, HTTP 503 on reconnect, generic failed
+  finals), but the turn error only carried the last attempt's generic
+  "CopperPilot ran into an error. (... after N s ...)". The causes the
+  client did see never reached the caller.
+
+  When a turn fails after retries, its error now appends the earlier
+  attempts' failure type and message, or says all attempts failed the same
+  way.
+- Do not double the period in the update notice. [AdityaNG, Claude Opus
+  5.5]
+
+  A feature note that ends in a period printed 'shortcuts.. Run:'.
+- Close the side-question review findings. [Cursor, Naveen_Copperpilot]
+
+  A side question that stops its own stream now reports the answer instead of a
+  connection error, a dropped question no longer keeps its request running, and
+  clearing the chat forgets the request the panel would show.
+- Resume on a fresh hosted conversation when the service refuses it as
+  too large. [AdityaNG, Claude Opus 5.5]
+
+  validate arch.review on a large RK3566 tablet board ERRORed with "This
+  conversation is too large to continue". The review was not over-sized:
+  the hosted turn failed after 698 s of tool work (generic failed final),
+  the in-turn retry from #39 resumed on the same conversation id, and the
+  service refused that resume within 245 ms with 413 chat_request_too_large
+  because it judges the size of the history it stores per conversation,
+  not the request (a 190-byte repair prompt was refused the same way).
+
+  The stitched resume already carries its own transcript, so when the
+  service refuses a turn as too large (413 / chat_request_too_large, not
+  the client's own PAYLOAD_TOO_LARGE), the turn now continues once on a
+  fresh hosted conversation id. A second refusal still ends the turn.
+- Retry a failed hosted final inside the turn and say what is known.
+  [AdityaNG, Claude Opus 5.5]
+
+  rea-hardware turns 5-30 min in ended with only "CopperPilot ran into an
+  error." and lost their work. The hosted service sends that as a failed
+  final (success false, zero tokens, no turn id); 5 of 6 sessions on
+  2026-10-27 hit it after exactly 300 s of model silence (11 "Planning next
+  moves" heartbeats), i.e. the hosted model-call cap.
+
+  A failed final is now a retryable failed attempt (HOSTED_TURN_FAILED):
+  the existing stitched resume re-sends the partial transcript with backoff,
+  up to the usual 4 attempts, and the failed final is held back so a
+  recovered turn is not reported as an error. A final with tos_blocked is
+  not retried. When retries run out, the error names elapsed time, model,
+  content-policy block and turn id when the service sends them. The hosted
+  error copy echoed as text is kept out of the resume transcript.
+- Wait until the loading spinner is removed after cancel. [Cursor,
+  Naveen_Copperpilot]
+
+  Scheduling the removal left the spinner mounted when the turn finished, so the interface still showed it as running.
+- Finish turn cleanup when cancel lands during startup. [Cursor,
+  Naveen_Copperpilot]
+
+  A cancel while the spinner is still mounting skipped the turn's cleanup, so the turn never finished and the UI stayed busy.
+
+Other
+~~~~~
+- Version inc. [AdityaNG]
+- Merge pull request #48 from
+  CopperPilot/feat/harness_tools_over_scripts_4_nov_2026. [Aditya]
+
+  Tools over scripts: whole-file KiCad reads, read-only stock libraries, loud INCOMPLETE validate
+- Test: read tests write their fixtures as bytes (Windows CRLF)
+  [AdityaNG]
+
+  On windows-latest, write_text turned the fixtures' newlines into CRLF and
+  the whole-file / paged read tests compared them with LF strings. The read
+  tools return the file's exact bytes (right for a CRLF checkout too), so
+  the fixtures are now written as bytes and a test pins byte-exactness with
+  a CRLF file.
+- Merge remote-tracking branch 'origin/main' into
+  feat/harness_tools_over_scripts_4_nov_2026. [AdityaNG]
+
+  # Conflicts:
+  #	tests/test_tools.py
+- Merge pull request #49 from
+  CopperPilot/fix/cli_checkpoint_growth_5_nov_2026. [Aditya]
+
+  Sessions DB: compact event log, bounded checkpoints, threads compact-db
+- Merge remote-tracking branch 'origin/feat/chat_compaction_4_nov_2026'
+  into fix/cli_checkpoint_growth_5_nov_2026. [AdityaNG]
+- Feat(sessions): threads compact-db shrinks a database from an older
+  CLI. [AdityaNG]
+
+  Pruning per turn stops growth, but space already used stays in the file.
+  `copper-pilot threads compact-db [--dry-run] [-y]`:
+  - prunes every CopperPilot thread to its first and newest checkpoints
+    (threads another agent wrote are left alone)
+  - rewrites copper_events in the remaining checkpoints and writes to the
+    compact form
+  - VACUUMs only when the free space next to the database is at least its
+    size and twice its live data (the temporary copy goes there too);
+    otherwise it stops after pruning with a clear message
+  - never runs while a chat is open: chat runtimes hold a shared lock on
+    .sessions.db.open.lock and compact-db needs it exclusively (POSIX; on
+    Windows it relies on the prompt)
+  - --dry-run reports what would go and changes nothing
+- Fix(sessions): keep only the newest checkpoints of a thread.
+  [AdityaNG]
+
+  Each turn writes three checkpoints and each holds the whole state, so a
+  thread's rows grew with the square of its turns and nothing pruned them.
+  - after every turn and state update the runtime deletes the thread's
+    older root-namespace checkpoints and their writes, keeping the first
+    (its writes hold the initial prompt) and the newest KEEP_CHECKPOINTS (3)
+  - nothing reads older ones: the CLI never time-travels and the turn
+    journal is a sidecar file; LangGraph's SQLite saver has no prune API, so
+    this deletes by checkpoint_id range under the saver's own lock
+  - one prune frees at most 256 MiB of checkpoints, so a large thread from
+    before is trimmed over a few turns instead of stalling one
+  - a failed prune is logged and never fails the turn
+- Fix(sessions): store copper_events in a compact replay form.
+  [AdityaNG]
+
+  Every checkpoint row stores the whole state, and copper_events kept every
+  streamed frame (one per text chunk, plus tool arguments and results), so
+  each turn re-stored the thread's whole event history.
+  - drop text, tool_request and tool_result frames: the TUI never replays
+    them (they are in messages), and ACP, headless and MCP read messages only
+  - join consecutive reasoning chunks into one event, only where the TUI's
+    TurnState accepts every chunk; the joined event keeps the last sequence,
+    so replay renders the same text and ends in the same turn state
+  - keep every other event (status, todo_list, subagent, final, error,
+    compaction) unchanged; latest_todos and session_state read the same
+  - a thread stored before this is rewritten to the compact form once, on
+    its next turn (LangGraph Overwrite)
+  Tests compare the TUI's replay of a raw log with its compact form.
+- Merge pull request #47 from
+  CopperPilot/feat/chat_compaction_4_nov_2026. [Aditya]
+
+  Chat context v1: pinned state, /compact, /context, ACP usage size (CLI + ACP)
+- Merge remote-tracking branch 'origin/main' into
+  feat/chat_compaction_4_nov_2026. [AdityaNG]
+- Fix(context): pin plans written to "/.copperpilot/..." on Windows.
+  [AdityaNG]
+
+  Deep Agents writes plans to workspace-rooted virtual paths. On Windows
+  "/.copperpilot/plans/x.plan.md" has no drive, so Path.is_absolute() is
+  False and joining it to the workspace landed on the drive root: the plan
+  was never pinned (3 tests failed on windows-latest only).
+- Merge pull request #46 from
+  CopperPilot/feat/async_subagents_3_nov_2026. [Aditya]
+
+  Subagent status in the turn journal, concurrent agent lanes, bare resume intents
+- Merge main into feat/async_subagents_3_nov_2026. [AdityaNG]
+- Merge pull request #45 from
+  CopperPilot/feat/chat_resilience_resume_1_nov_2026. [Aditya]
+
+  Chat drops: keepalive, journaled turn resume, -r/`/resume`, ACP continue
+- Test: the late background process outlives the first turn on slow
+  runners. [AdityaNG]
+
+  It slept 0.4 s, so on a loaded runner (ubuntu 3.13 on #46) it finished
+  before the first turn ended and no background_processes_waiting event was
+  emitted. It now sleeps 3 s.
+- Test: Windows-safe outside-workspace guard tests, wait for TUI focus.
+  [AdityaNG]
+
+  The shell-scope and tools tests compared against POSIX display paths
+  ("/", "/usr", "~" for /home/maker). On Windows a drive-less root
+  resolves to the current drive ("D:\\"), so HOME and the expected reasons
+  now use the OS's absolute form; the tools tests expect the workspace
+  drive's root. The ask-user TUI test waits for focus instead of asserting
+  it right after one pause (flaky on windows-latest).
+- Test: kill-by-name tests hold on Windows too. [AdityaNG]
+
+  The PID-kill run test used a POSIX shell line; on Windows (cmd.exe) it
+  runs the equivalent taskkill /PID. The classification tests use native
+  paths from the OS temp dir instead of the shared /home/maker fixture, so
+  they don't depend on the POSIX-path fix pending in #45.
+- Fix(tools): ask before killing processes by name. [AdityaNG]
+
+  The agent ran `killall -9 python3` to stop its own background job and
+  killed every python3 of the user, the CLI itself included. Process
+  kills by name (killall, pkill incl. -f, killall5, taskkill /IM or /FI,
+  Stop-Process -Name, kill fed by pgrep/pidof/ps, kill -1, kill 0) now go
+  through the outside-the-workspace path: asked in every approval mode,
+  YOLO and Auto included, and refused in headless runs with the reason
+  and what to do instead (kill the PID of the process you started).
+  kill <PID> and taskkill /PID stay ordinary commands.
+- Fix(tools): page big internal KiCad reads ourselves, outside the
+  workspace too. [AdityaNG]
+
+  A KiCad read too big for one frame fell back to Deep Agents' read_file,
+  which sees only the workspace: stock libraries such as Connector_Generic
+  (6.7 MB with JSON escaping) came back 'File not found', so placing a
+  header from it failed (tool-usage arm 4). Internal KiCad reads now return
+  the whole file raw when it fits, and otherwise raw frame-sized pages under
+  an '@@ lines a-b of N | next offset b @@' header, honouring offset/limit;
+  the server's bridge follows the pages.
+- Workspace: never pick a project under .copperpilot. [AdityaNG]
+
+  Discovery walked into .copperpilot, so a downloaded reference project or a
+  staging copy could become the active design (fewest folders, then path
+  order) and its files used up the 2000-file scan budget. Ignore the folder
+  like the validate snapshot already does.
+- Validate: name skipped checks in a loud INCOMPLETE line. [AdityaNG]
+
+  A tool-usage baseline agent ran validate with --skip pcb.drc (and every
+  other PCB stage), saw a clean-looking summary and reported "all
+  verification stages passing" on a board with 556 DRC errors. Print one
+  line, in the console summary and at the top of REPORT.md, that names each
+  skipped check and says the run does not show the design passes. Exit codes
+  are unchanged.
+- Fix(tools): whole-file KiCad reads for the hosted bridge. [AdityaNG]
+
+  - read_file with a KiCad workspace purpose returns the whole file raw (no
+    100-line window), like the desktop harness; files too big for one frame
+    fall back to the paged native read.
+  - read_binary_file reads bytes from disk instead of Deep Agents' 2000-line
+    text window, which cut text files silently and mangled unknown binaries.
+  - External reads are allowed only when flagged and only for KiCad library
+    files (.kicad_sym, .kicad_mod, 3D models); external writes stay blocked.
+- Test(context): resume with a bare "Continue." (only bare resume
+  intents resume since #46 b5ebd2f) [AdityaNG]
+- Feat(context): never compact while subagent workers are queued,
+  running or paused. [AdityaNG]
+
+  A resumed turn restarts unfinished async subagents from
+  .copperpilot/scratch/manifest.json and they need the uncompacted context.
+  - auto-compaction is skipped (logged, nothing shown) while any manifest
+    unit has status queued, running or paused
+  - manual /compact (TUI and ACP) warns with the worker count and compacts
+    only on a second /compact within 60 s
+  - a missing, unreadable or malformed manifest counts as no active workers
+- Fix(context): count inline base64 images at a fixed cost, never send
+  them raw. [AdityaNG]
+
+  The model gets an inline data:image/...;base64 URI (the schematic
+  visualizer's <img>) as an image block, so chars/4 overstated it ~50x.
+  Estimates (context_estimate, the live-measurement remainder, now
+  pending_tokens) count each image as IMAGE_TOKENS = 1600. Compaction
+  context entries, tool digest excerpts, the interrupted-turn entry, the
+  pending query and earlier_user_messages replace image URIs with
+  [image], and search_chat_history neither matches nor snippets base64.
+- Fix(context): estimate counts only content after the measurement.
+  [AdityaNG]
+
+  A turn's stored context usage recorded measured_at = len(original), the
+  messages before the turn, so the next estimate re-added the turn's own
+  answer (already in next_turn_tokens) and, for a resumed turn, its
+  "continue" messages. In cli-forced-2 the 339K-char answer of the resumed
+  u3 added ~85K tokens (estimate 234204 vs next_turn_tokens 149173).
+
+  measured_at is now the checkpoint length after the turn (state messages,
+  including continue messages, plus the turn's additions). A mid-turn
+  (live) measurement also stores the assistant text streamed after it as
+  pending_chars. An interrupted turn's journal usage covers the messages
+  present when it started. Tool messages are never counted.
+- Fix(context): auto-compact a new turn that supersedes an interrupted
+  one. [AdityaNG]
+
+  A new message after an interrupted turn supersedes it (no longer
+  resumable), so the never-mid-turn rule no longer blocks compaction. The
+  pre-turn check now also runs there, after the interrupted turn's facts are
+  merged, measured from its carried context usage (next_turn_tokens when the
+  server sends it). The interrupted turn's work, which never reached the
+  checkpoint, goes into the compaction context as one assistant entry with
+  tool digests from its journal, and the pending message ends the context so
+  the server's cut keeps it. Resume attempts (/resume, -r, "continue")
+  still never compact, and session_state is still pinned after compaction.
+- Test(context): history after interrupted turns: new message vs
+  continue. [AdityaNG]
+
+  Pins the #45 resume semantics behind the chat_context tap counts
+  [0, 1, 1, 1]: a new message after interrupted turns sends every earlier
+  user message, while a "continue …" message resumes the unfinished turn by
+  resending its original request.
+- Fix(plans): parse agent-written plans with unquoted colons;
+  session_state never fails a turn. [AdityaNG]
+
+  Found in the live headless story: the agent wrote a plan whose todo text had
+  unquoted ': ' (invalid YAML), and every following turn crashed in
+  parse_plan via session_state with yaml.ScannerError. /build in the TUI and
+  ACP hit the same parser. Plain values are now quoted and re-parsed on a YAML
+  error, and a failure to build session_state sends {version: 1} with a
+  warning instead of failing the turn.
+- Fix(context): keep interrupted turns' answers, todos, plan and size in
+  session_state. [AdityaNG]
+
+  An interrupted turn (Ctrl-C, SIGINT) cancels the graph node, so its
+  messages and copper_events never reach the checkpoint; only its turn
+  journal survives. The journal now also records the turn's latest todo list
+  and context usage. The next turn lifts the facts out of the abandoned
+  journal (ask_user_question answers incl. rejected/unanswered as skipped,
+  plan files written, todos, context size), carries them in its own journal
+  so consecutive interruptions chain, and stores them under
+  copper_interrupted_facts once a turn returns. session_state merges them by
+  transcript position and timestamp, deduplicated against the checkpoint.
+- Feat(tui): /compact, context-aware /context and a ctx meter in the
+  status bar. [AdityaNG]
+
+  - status bar meter 'ctx 45% · 470K/1M' from stored usage, live
+    context_usage events and finals; warn/high/critical colours
+  - /compact [focus] runs manual compaction locally (refused mid-turn and
+    while a turn is unfinished) and prints a notice
+  - /context adds used/limit, auto-compacts-at and the compaction; counts the
+    context via the count endpoint when there is no fresh measurement
+  - printed notices for auto and in-turn compaction
+- Feat(acp): /compact and /context commands, context usage_update with
+  size. [AdityaNG]
+
+  - advertise /compact (hint: optional focus) and /context; both answered
+    locally without a hosted chat turn
+  - usage_update{used: context_tokens, size: context_limit} from finals, live
+    context_usage events (throttled to 2 s), compaction and session/load;
+    billing token counts no longer drive the meter once context usage exists
+  - compaction progress and results as agent message text
+  - session/load notes a compacted chat
+- Feat(context): pinned session state, compaction store and history
+  search. [AdityaNG]
+
+  Chat context protocol v1 on the CLI graph:
+  - ChatRequest.session_state snapshotted once per logical turn (ask answers,
+    latest todos, working plan, compaction summary and earlier user messages),
+    journaled with the compaction cut so every resume resends it unchanged
+  - copper_compaction / copper_compaction_superseded / copper_context_usage
+    checkpoint keys; context after the cut only; history_omitted reported
+  - auto-compaction before a new turn (never while a turn is unfinished),
+    in-turn compaction from status events or the final frame
+  - POST /analyze/compact and /analyze/context/count client with tool digests
+  - search_chat_history routed by the broker to the local transcript;
+    chat_history_search capability for checkpointed chats
+  - catalog context_window and context_policy parsing
+- Fix(diagnostics): keep numeric log args numeric when redacting.
+  [AdityaNG]
+
+  RedactingFormatter turned every argument into a string, so any %d / %.1f
+  line written to the diagnostics file (e.g. "Chat turn finished ... wall=%.1fs")
+  raised "TypeError: must be real number, not str". Numbers and None now pass
+  through; everything else is still redacted, and mapping args are redacted
+  per value.
+- Fix(resume): only a bare resume intent resumes the unfinished turn.
+  [AdityaNG]
+
+  A message like "continue, but use 0603 resistors" used to resume and drop
+  the instruction. Now only "continue", "resume", "/resume" and "continue
+  where you left off" (case and punctuation ignored) resume; anything with
+  extra text starts a new turn.
+- Feat(protocol): run subagents' tool requests concurrently, one lane
+  per agent. [AdityaNG]
+
+  Tool requests tagged with agent_id ('main' or a subagent id) run on one
+  lane per agent: an agent's requests keep their order, different agents
+  run at the same time (they used to be awaited one by one, so parallel
+  subagents queued behind each other). Results stream back as they finish
+  and are all reported before the final; after a dropped socket the lanes
+  still finish so their results reach the journal. Approval prompts stay
+  one at a time (the broker's prompt lock). Untagged requests from older
+  servers are still awaited inline.
+- Feat(resume): journal subagent status and send it on resume.
+  [AdityaNG]
+
+  Each subagent chip (unit, status, scratch folder) is kept in the turn
+  journal and returned in request.resume, matching the desktop client.
+- Docs: outside-the-workspace shell approval. [AdityaNG, Claude Opus
+  5.5]
+- Tui: show the outside-the-workspace reason and drop the Auto option.
+  [AdityaNG, Claude Opus 5.5]
+
+  The approval menu adds a warning line with the reason and offers only yes
+  and no; the Auto shortcut is ignored for these prompts.
+- Acp: carry the outside-the-workspace reason on permission requests.
+  [AdityaNG, Claude Opus 5.5]
+
+  The request title is prefixed with "Outside the workspace:", the reason is
+  in the tool-call content, and "Allow all for this session" is not offered,
+  so a YOLO session still asks for each such command and a stray
+  session-wide allow neither approves nor switches modes.
+- Tools: ask before outside-the-workspace shell in every approval mode.
+  [AdityaNG, Claude Opus 5.5]
+
+  The broker classifies each execute request before the mode check. A flagged
+  command is sent to the approver even in Auto and YOLO, with the reason on
+  ApprovalRequest.outside_workspace, and approval is never cached. With no
+  approver (headless -n, MCP) it is refused with the tool error
+  "blocked: outside the workspace (<reason>); ask the user first". The
+  validate reviewer, which has no human, declines these requests.
+- Shell: keep the temp-dir allowance from covering a sandboxed HOME.
+  [AdityaNG, Claude Opus 5.5]
+
+  A TMPDIR that contains the home directory would have allowed every path
+  under it, so it is skipped.
+- Shell: classify agent commands that reach outside the workspace.
+  [AdityaNG, Claude Opus 5.5]
+
+  classify_outside_workspace(command, workspace_root, home) returns a short
+  reason for recursive searches rooted at /, a system top-level dir or a home
+  dir (find, grep -r, rg, fd, du, tree, ls -R), filesystem index searches,
+  paths under the home dir outside the workspace (KiCad locations, the CLI
+  home and TMPDIR excepted), and docker/podman/kubectl/sudo/ssh. It follows
+  &&/||/;/| chains, cd, $(...), sh -c and common wrappers. Commands seen in
+  long --yolo runs are flagged; relative and in-project commands are not.
+- Graph: never resume a provider_busy pause before retry_after_s.
+  [AdityaNG, Claude Opus 5.5]
+
+  The jitter only adds up to 20% on top of the server's retry_after_s, so a
+  resume never lands earlier than the server asked.
+- Docs: high-demand waits, provider_busy resumes and the capacity_wait
+  JSON event. [AdityaNG, Claude Opus 5.5]
+- Acp: capacity waits and provider-busy pauses as progress thoughts.
+  [AdityaNG, Claude Opus 5.5]
+
+  capacity_wait events and provider-busy resume pauses become agent thought
+  lines ("High demand — waiting to continue (next try in N s)", "continuing
+  in N s"), which T3 Code shows as progress. A turn whose provider-busy
+  budget ran out ends like other unfinished turns, with high-demand copy and
+  the continue hint instead of the error wording.
+- Tui: high-demand countdown for capacity waits and provider-busy
+  pauses. [AdityaNG, Claude Opus 5.5]
+
+  A capacity_wait shows "High demand — waiting to continue (next try in N s)"
+  on the working line with a live countdown and one toast per turn; a
+  provider-busy pause counts down "continuing in N s"; the next normal frame
+  clears it. When the provider-busy budget runs out the turn shows the
+  high-demand resume notice instead of an error.
+- Headless: show capacity waits and provider-busy pauses; --json
+  capacity_wait lines. [AdityaNG, Claude Opus 5.5]
+
+  Text mode prints a yellow "High demand — waiting to continue (next try in
+  N s)" line per wait and "continuing in N s" for a provider-busy pause; a
+  turn whose provider-busy budget ran out prints the high-demand copy with the
+  -n -r resume command. --json emits {"type": "capacity_wait", ...} with the
+  event fields at the top level next to the turn ids and ts.
+- Graph: wait out provider_busy finals on their own resume budget.
+  [AdityaNG, Claude Opus 5.5]
+
+  A provider_busy resumable final (the LLM provider stayed out of capacity for
+  the server's whole wait budget) no longer resends at once into an exhausted
+  quota. The turn waits retry_after_s (+/-20%, at least 15 s) and resumes from
+  the journal with reason provider_busy. These resumes have their own budget,
+  6 in a row or 30 minutes per logical turn, and spend none of the transport
+  budget; any model progress starts a new streak. When the budget runs out
+  the turn ends manually resumable with high-demand copy instead of an error.
+
+  capacity_wait status events become copper.capacity_wait progress events
+  with a one-line high-demand title, and INFO logs (ids and timings only)
+  record each wait, pause, budget reset and stop. A resumable final's echoed
+  error copy is no longer streamed as answer text.
+- Protocol: capacity_wait extends the idle bound; provider_busy finals
+  carry retry_after_s. [AdityaNG, Claude Opus 5.5]
+
+  A capacity_wait status event means the hosted model is waiting for LLM
+  provider capacity; the turn is healthy, so the next-frame bound grows by the
+  longer of the announced retry delay and the server's remaining wait budget
+  until a resumed or normal frame arrives. A provider_busy resumable final now
+  passes retry_after_s through and classifies as its own error type.
+- Test: wire-level resume after a drop mid tool result. [AdityaNG,
+  Claude Opus 5.5]
+
+  A real agent and protocol stack over fake sockets: the second
+  chat_start resends the original query/context/effort with a new turn_id,
+  turn_resume_v1 and the journal (tool completed with its clipped result,
+  reason tool_result_undeliverable), and a repeated tool_call_id is
+  answered from the broker cache instead of running again.
+- Acp: let the graph pick app_restart or manual for a resumed turn.
+  [AdityaNG, Claude Opus 5.5]
+- Docs: turn durability, unfinished-turn resume, and --json turn fields.
+  [AdityaNG, Claude Opus 5.5]
+- Acp: end an unfinished turn cleanly; "continue" resumes its journal.
+  [AdityaNG, Claude Opus 5.5]
+
+  When automatic resumes run out, the prompt now ends with stop reason
+  max_turn_requests and a message naming the last error and how to
+  continue, instead of a JSON-RPC error. Usage-limit and auth failures
+  keep their existing errors. The next "continue …" prompt (also inside a
+  T3 Code <user_request> envelope) or /resume (advertised as a command)
+  resumes the unfinished turn from its journal instead of sending
+  "continue" as a new request; with no unfinished turn, "continue" is a
+  normal prompt. Server restarts and socket rotations show a thought line.
+- Tui: offer /resume for an unfinished turn. [AdityaNG, Claude Opus 5.5]
+
+  Opening a thread whose last turn did not finish (crash, quit, Ctrl-C,
+  exhausted auto-resumes) shows a notice with the query, the recorded tool
+  calls and the last error category. /resume now continues that turn from
+  its journal; with no unfinished turn it still opens the thread picker
+  (/threads and Ctrl+R are unchanged). A "continue" message does the same
+  through the graph. Resume progress updates the status line, and a turn
+  that stops unfinished shows the same affordance inline.
+- Headless: -n -r resumes the unfinished turn; JSON events carry turn
+  ids. [AdityaNG, Claude Opus 5.5]
+
+  - `copper-pilot -n -r [thread]` without --message resumes that thread's
+    unfinished turn (crash, Ctrl-C, exhausted auto-resumes) with its
+    journal; it exits 2 with a clear message when there is none. A turn
+    that stops unfinished prints the exact command to resume it.
+  - `--json` lines keep type/data/title and add turn_id, root_turn_id,
+    resume_attempt (client resume count) and ts (epoch seconds), plus
+    sequence and server_resume_attempt when the frame carried them.
+    copper.resume events surface as type "resume" with attempt, reason,
+    delay_s and will_retry.
+- Graph: resume dropped turns from a client-side journal. [AdityaNG,
+  Claude Opus 5.5]
+
+  The copper_pilot node now keeps a journal of each logical turn (original
+  request, assistant text, tool calls with completed/failed/interrupted
+  outcomes) and resumes a dropped attempt by resending the ORIGINAL request
+  with a new turn_id and request.resume, instead of the stitched transcript
+  plus "Resume where we left off" prose. The prose path stays behind
+  COPPER_PILOT_TURN_RESUME=0 for servers without turn_resume_v1.
+
+  Retry policy (protocol v1): up to 8 automatic resumes or 10 min of
+  recovery per logical turn, backoff 1,2,5,10,20,30,60,60 s with +-20%
+  jitter, and a GET /api/heartbeat wait before each resume that does not
+  use an attempt. A resumable final (server_restarting/socket_rotation)
+  resumes after 0-2 s outside the error budget, capped at 20 resumes.
+  Later attempts keep the broker's tool-result cache.
+
+  The journal is rewritten to a sidecar file while the turn runs and kept
+  in the checkpoint (copper_turn_journal) when the turn ends unfinished,
+  so a crash, Ctrl-C or exhausted budget can be resumed with
+  copper_resume input or a "continue" message. Events carry root_turn_id,
+  turn_attempt and ts; copper.resume reports each resume. INFO logs record
+  drops (close code, attempt, elapsed), resume start/success and turn
+  completion (wall time, attempts, tool counts), without content.
+- Protocol: keepalive, 330 s idle bound, and a reader that never stops.
+  [AdityaNG, Claude Opus 5.5]
+
+  Turn resume protocol v1, transport side:
+
+  - ping_interval=15 / ping_timeout=20 on the chat socket; the idle bound
+    drops to 330 s (longer than the server's 300 s quiet timeout) and an
+    idle socket is closed with 4000 client_liveness_timeout.
+  - A reader task drains the socket for the whole turn, so frames and the
+    library's pong handling keep flowing while a long local tool runs.
+    Frames are still processed in order, one tool step at a time.
+  - A tool result whose socket is gone is still reported (delivered=false)
+    instead of being dropped, including the rest of a running batch.
+  - chat_start carries turn_id, request.resume, and advertises
+    turn_resume_v1; final frames surface resumable/error_code.
+  - Drops carry close code/reason and a resume reason; heartbeat() probes
+    GET /api/heartbeat.
+  - turn_journal.py holds the client-side journal and its sidecar store.
+- Merge pull request #44 from CopperPilot/fix/turn-error-attempt-
+  history. [Aditya]
+
+  fix: name what earlier attempts saw in a turn's final error
+- Validate: connector_edge reads role-named references like J_ETH (#43)
+  [Aditya, Claude Opus 5.5]
+
+  Agents often name connectors by role (J_ETH, J_USBA, J_HDMI) instead of
+  J1, J2. The reference pattern required a digit right after the prefix, so
+  those parts were never checked and the check passed with "0 external
+  connector(s) checked" on a board whose USB-C and micro-HDMI face inward.
+  Accept a separator after the prefix too; JMP_EMMC still doesn't match.
+- Validate: ungated connector-edge and 3D-model checks; agent shell
+  finds CLI tools (#42) [Aditya, Claude Opus 5.5]
+
+  Add two deterministic, no-LLM builtin checks that run even after a stage
+  gate halts the run (new `ungated: true` check field):
+
+  - pcb.connector_edge (S5): external connectors (USB, RJ45, HDMI, DP, DVI,
+    barrel/audio jacks, D-Sub) must sit on the board edge with the mating
+    face pointing out. The face direction comes from the pad centroid to the
+    Fab/courtyard body centre (or a "PCB Edge" drawing note), rotated into
+    the board frame, and is ray-cast against Edge.Cuts. Inward, sideways or
+    inboard connectors are P1, set-back ones P2. Headers, board-to-board,
+    vertical and ambiguous parts are not judged.
+  - pcb.models_3d (S2): every footprint (model ...) path must resolve
+    (${KIPRJMOD}, ${KICADn_3DMODEL_DIR} for any version, KiCad's configured
+    path variables, the system 3D directory next to kicad-cli, project-
+    relative paths). Missing files are P1; bodies with no model are P2.
+
+  parts.footprints no longer rates a missing 3D model as P3.
+
+  Agent shell commands now append the CLI environment's scripts folder to
+  PATH, so tools installed alongside the CLI by pipx or `uv tool` (e.g.
+  easyeda2kicad) are runnable without shadowing the user's own python.
+  easyeda2kicad is offered as the optional `easyeda` extra because it is
+  AGPL-3.0, which the CI license gate rejects in the default install.
+- Merge pull request #38 from naveen-forkd/feat/cli-self-update.
+  [Aditya]
+
+  Add a self-update command and one-line feature notices
+- Merge main (with /btw) into feat/cli-self-update. [AdityaNG, Claude
+  Opus 5.5]
+- Merge pull request #36 from naveen-forkd/feat/btw-side-questions.
+  [Aditya]
+
+  Add /btw side questions that do not interrupt the running turn
+- Docs: note that long btw answers are shortened in the panel. [Cursor,
+  Naveen_Copperpilot]
+- Perf: ask side answers to stay brief. [Cursor, Naveen_Copperpilot]
+- Perf: cap the lines rendered in the btw panel. [Cursor,
+  Naveen_Copperpilot]
+- Perf: skip re-rendering an unchanged btw answer. [Cursor,
+  Naveen_Copperpilot]
+- Docs: document /btw side questions. [Cursor, Naveen_Copperpilot]
+- Test: cover /btw panel, keys and turn isolation in the tui. [Cursor,
+  Naveen_Copperpilot]
+- Test: cover side question builder, runner and log. [Cursor,
+  Naveen_Copperpilot]
+- Test: refresh chrome snapshots for /btw. [Cursor, Naveen_Copperpilot]
+- Feat: list /btw in slash commands and key help. [Cursor,
+  Naveen_Copperpilot]
+- Feat: wire /btw command into the app. [Cursor, Naveen_Copperpilot]
+- Feat: let esc close the btw panel before stopping the turn. [Cursor,
+  Naveen_Copperpilot]
+- Feat: add btw panel widget. [Cursor, Naveen_Copperpilot]
+- Feat: run side questions on a tool-less hosted stream. [Cursor,
+  Naveen_Copperpilot]
+- Feat: add side question log and request builder. [Cursor,
+  Naveen_Copperpilot]
+- Merge pull request #41 from CopperPilot/fix/resume-on-fresh-
+  conversation. [Aditya]
+
+  fix: resume on a fresh hosted conversation when the service refuses it as too large
+- Merge pull request #39 from CopperPilot/fix/retry-hosted-failed-final.
+  [Aditya]
+
+  fix: retry a failed hosted final inside the turn and say what is known
+- Test: prove batched reads overlap instead of timing them. [Cursor,
+  Naveen_Copperpilot]
+
+  A wall-clock cutoff of half a second failed when CI was only slightly slower than the ideal overlap, even though the reads still ran together.
+- Test: cover self-update behavior and document the command. [Cursor,
+  Naveen_Copperpilot]
+
+  Record the check, confirmation, and notice rules so a release cannot announce more than one feature line.
+- Feat: show feature update notices inside the app. [Cursor,
+  Naveen_Copperpilot]
+
+  Textual captures stderr while the interface is open, so show the one-line notice in the app and keep tests off the network.
+- Feat: add a confirmed package-manager update command. [Cursor,
+  Naveen_Copperpilot]
+
+  Let users check or apply an update through pipx or the active environment, without replacing an editable checkout.
+- Feat: resolve a one-line feature notice from PyPI. [Cursor,
+  Naveen_Copperpilot]
+
+  Keep update checks throttled and fail-open, and publish only a validated one-line feature note with each release.
+
+
+1.0.0 (2026-10-27)
+------------------
+
+Fix
+~~~
 - Do not count echoed request fields toward the stream byte budget.
   [AdityaNG, Claude Opus 5.5]
 
@@ -67,6 +712,7 @@ Fix
 
 Other
 ~~~~~
+- Release: version 1.0.0 🚀 [AdityaNG]
 - Merge pull request #37 from CopperPilot/fix/stream-byte-budget.
   [Aditya]
 
