@@ -155,8 +155,10 @@ class FakeAgent:
         model=None,
         runtime_context=None,
         tool_broker=None,
+        resume_policy=None,
     ):
         self.workspace = workspace
+        self.resume_policy = resume_policy
         self.credential = credential
         self.conversation_id = conversation_id
         self.mode = mode
@@ -2245,6 +2247,7 @@ EXHAUSTED = [
             "will_retry": False,
             "manual_resume": True,
             "error_type": "connection",
+            "root_turn_id": "root-1",
         },
         "title": "Turn unfinished",
     },
@@ -2268,6 +2271,25 @@ async def test_exhausted_auto_resume_ends_the_prompt_with_a_resume_hint(
     message = conn.updates[-1][1].content.text
     assert "Chat socket closed before a final response" in message
     assert "continue" in message and "/resume" in message
+    # Headless callers get a machine-readable marker, not just prose.
+    meta = response.model_dump(by_alias=True)["_meta"]["copperpilot"]
+    assert meta["unfinishedTurn"] is True and meta["resumable"] is True
+    assert meta["resumeWith"] == "/resume" and meta["rootTurnId"] == "root-1"
+    assert meta["reason"] == "connection_lost" and meta["errorType"] == "connection"
+
+
+async def test_acp_agents_ride_out_long_outages(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli.copper_graph import HeadlessResumePolicy
+
+    agent, _conn, _runtime, session_id = await _connected_agent(
+        tmp_path, monkeypatch, JournalRuntime([{"type": "copper.text", "data": "ok"}])
+    )
+    response = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="Route it")]
+    )
+    assert response.stop_reason == "end_turn" and response.field_meta is None
+    policy = FakeAgent.last.resume_policy
+    assert isinstance(policy, HeadlessResumePolicy) and policy.window_seconds == 3600.0
 
 
 async def test_provider_capacity_shows_as_progress_and_pauses_with_high_demand_copy(

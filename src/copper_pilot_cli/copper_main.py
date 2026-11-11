@@ -39,6 +39,7 @@ from copper_pilot_cli.copper_graph import (
     RESUME_EVENT,
     RETRY_EVENT,
     create_copper_graph,
+    headless_resume_policy,
 )
 from copper_pilot_cli.copper_models import (
     BUNDLED_MODELS,
@@ -707,6 +708,8 @@ async def async_main(args: argparse.Namespace) -> int:
                 "--message is required in non-interactive mode "
                 "(or -r to resume a thread's unfinished turn)."
             )
+        # No one is there to press Resume: ride out longer outages on our own.
+        agent.resume_policy = headless_resume_policy()
         notice = asyncio.create_task(notify_background_update())
         try:
             async with create_copper_graph(agent) as runtime:

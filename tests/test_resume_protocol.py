@@ -453,6 +453,39 @@ def test_backoff_follows_the_protocol_schedule_with_jitter() -> None:
     assert (reason, immediate) == ("socket_rotation", True) and 0 <= delay <= 2
 
 
+def test_headless_backoff_is_exponential_capped_and_bounded_by_the_window() -> None:
+    from types import SimpleNamespace
+
+    from copper_pilot_cli.copper_graph import HeadlessResumePolicy
+
+    policy = HeadlessResumePolicy(window_seconds=3600.0)
+    run = _TurnRun(agent=SimpleNamespace(resume_policy=policy), writer=lambda _e: None, original=[])  # type: ignore[arg-type]
+    drop = ProtocolError("gone", code="STREAM_ENDED_WITHOUT_FINAL", retryable=True)
+    delays = []
+    for _ in range(12):  # far past the interactive budget of 8
+        plan = run._plan_resume(drop, classify_error(drop))
+        assert plan is not None
+        delays.append(plan[1])
+        run.error_resumes += 1
+    for delay, base in zip(delays, (5, 10, 20, 40, 80, 160, 300, 300, 300), strict=False):
+        assert base * 0.8 <= delay <= base * 1.2
+    assert run._can_resume_again()
+    run.streak_started -= 3601  # an hour of outage: stop and leave it to the caller
+    assert run._plan_resume(drop, classify_error(drop)) is None
+    assert not run._can_resume_again()
+
+
+def test_headless_window_can_be_set_from_the_environment(monkeypatch) -> None:
+    from copper_pilot_cli.copper_graph import HEADLESS_RESUME_WINDOW_ENV, headless_resume_policy
+
+    monkeypatch.setenv(HEADLESS_RESUME_WINDOW_ENV, "7200")
+    assert headless_resume_policy().window_seconds == 7200.0
+    monkeypatch.setenv(HEADLESS_RESUME_WINDOW_ENV, "soon")
+    assert headless_resume_policy().window_seconds == 3600.0
+    monkeypatch.delenv(HEADLESS_RESUME_WINDOW_ENV)
+    assert headless_resume_policy().window_seconds == 3600.0
+
+
 # ------------------------------------------------------------------- graph
 
 
@@ -1020,3 +1053,39 @@ async def test_headless_json_capacity_wait_event_shape(graph_env, capsys, sleeps
     (resume,) = [line for line in lines if line["type"] == "resume"]
     assert resume["data"]["reason"] == "provider_busy"
     assert resume["data"]["delay_s"] >= 30
+
+
+@pytest.mark.asyncio
+async def test_a_long_connected_attempt_starts_a_new_failure_streak(graph_env, monkeypatch) -> None:
+    """The budget is per run of failures (desktop client parity), not per logical turn."""
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 2)
+    monkeypatch.setattr(copper_graph, "STREAK_RESET_CONNECTED_SECONDS", 0.0)
+    worked = [CopperEvent(EventKind.TEXT, "step "), DROP]
+    agent = Agent([list(worked) for _ in range(5)] + [DONE])
+    _events, values, unfinished = await run_turn(agent, graph_env, FIRST)
+    assert len(agent.payloads) == 6 and unfinished is None
+    assert values["copper_turn_journal"] is None
+
+
+@pytest.mark.asyncio
+async def test_drops_with_no_progress_still_exhaust_the_interactive_budget(
+    graph_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(copper_graph, "MAX_AUTO_RESUMES", 2)
+    monkeypatch.setattr(copper_graph, "STREAK_RESET_CONNECTED_SECONDS", 0.0)
+    agent = Agent([[CopperEvent(EventKind.TEXT, "start "), DROP], [DROP], [DROP], DONE])
+    _events, _values, unfinished = await run_turn(agent, graph_env, FIRST)
+    assert len(agent.payloads) == 3 and unfinished is not None
+
+
+@pytest.mark.asyncio
+async def test_headless_turn_rides_out_more_drops_than_the_interactive_budget(
+    graph_env, monkeypatch
+) -> None:
+    from copper_pilot_cli.copper_graph import HeadlessResumePolicy
+
+    agent = Agent([[DROP] for _ in range(12)] + [DONE])
+    agent.resume_policy = HeadlessResumePolicy(window_seconds=3600.0, base_delay=0.0)  # type: ignore[attr-defined]
+    _events, values, unfinished = await run_turn(agent, graph_env, FIRST)
+    assert len(agent.payloads) == 13 and unfinished is None
+    assert values["messages"][-1].content == " done"

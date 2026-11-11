@@ -99,8 +99,12 @@ class CopperPilotAgent(Runnable[AgentInput, Any]):
         plan_context: PlanContext | None = None,
         runtime_context: dict[str, Any] | None = None,
         tool_broker: LocalToolBroker | None = None,
+        resume_policy: Any = None,
     ) -> None:
         self.workspace = canonical_workspace(workspace)
+        # ``copper_graph.HeadlessResumePolicy`` for callers with no person to press
+        # Resume (ACP, -n, MCP); None keeps the interactive budget.
+        self.resume_policy = resume_policy
         self.context = discover_workspace(self.workspace)
         self.credential = credential or load_credential()
         if self.credential is None:

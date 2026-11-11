@@ -37,11 +37,13 @@ import asyncio
 import json
 import logging
 import operator
+import os
 import random
 import time
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -130,6 +132,45 @@ RESUME_WINDOW_SECONDS = 600.0
 IMMEDIATE_RESUME_CODES = frozenset({"server_restarting", "socket_rotation"})
 IMMEDIATE_RESUME_MAX_DELAY = 2.0
 MAX_TOTAL_RESUMES = 20
+# A resumed attempt that stays connected this long starts a new failure streak
+# (the desktop client's STREAK_RESET_CONNECTED_MS): the budget above is per run
+# of failures, not per logical turn. Without it, a long turn that met brief
+# drops hours apart ran out of resumes although each drop recovered at once.
+STREAK_RESET_CONNECTED_SECONDS = 120.0
+HEADLESS_RESUME_WINDOW_ENV = "COPPER_PILOT_HEADLESS_RESUME_WINDOW_SECONDS"
+
+
+@dataclass(frozen=True)
+class HeadlessResumePolicy:
+    """Automatic resumes when no person is there to press Resume (ACP, ``-n``, MCP).
+
+    The interactive budget (8 resumes or 10 minutes per failure streak) suits a
+    person who can resume by hand. A headless caller would otherwise get a
+    normal-looking end of turn after a ten-minute outage. Here a failure streak
+    may last ``window_seconds`` of wall time (heartbeat waits included), with
+    exponential backoff from ``base_delay`` to ``max_delay`` (+-20% jitter).
+    """
+
+    window_seconds: float = 3600.0
+    base_delay: float = 5.0
+    max_delay: float = 300.0
+    factor: float = 2.0
+    max_total_resumes: int = 500
+
+    def delay(self, failures: int) -> float:
+        return min(self.max_delay, self.base_delay * self.factor ** max(0, failures))
+
+
+def headless_resume_policy() -> HeadlessResumePolicy:
+    """The headless policy, with ``COPPER_PILOT_HEADLESS_RESUME_WINDOW_SECONDS`` applied."""
+    raw = os.environ.get(HEADLESS_RESUME_WINDOW_ENV, "").strip()
+    try:
+        window = float(raw) if raw else HeadlessResumePolicy.window_seconds
+    except ValueError:
+        window = HeadlessResumePolicy.window_seconds
+    return HeadlessResumePolicy(window_seconds=max(0.0, window))
+
+
 # Before each resume the client waits for ``GET /api/heartbeat`` to answer 200.
 # ``provider_busy`` finals (the LLM provider stayed out of capacity for the
 # server's whole wait budget): wait ``retry_after_s`` (up to 20% more, at
@@ -488,6 +529,10 @@ class _TurnRun:
         self.busy_started: float | None = None
         self.capacity_waits = 0
         self.recovery_seconds = 0.0
+        # Headless callers (ACP, -n, MCP) set ``agent.resume_policy``;
+        # None keeps the interactive budget.
+        self.policy: HeadlessResumePolicy | None = getattr(agent, "resume_policy", None)
+        self.streak_started: float | None = None
         self.observed = False
         self.manual_resume = False
         self.tos_blocked = False
@@ -875,6 +920,20 @@ class _TurnRun:
                     return False
                 if not self.observed:
                     self.recovery_seconds += elapsed
+                elif elapsed >= STREAK_RESET_CONNECTED_SECONDS and (
+                    self.error_resumes or self.streak_started is not None
+                ):
+                    # It ran for a while before this drop: a new failure streak.
+                    logger.info(
+                        "Resume budget reset after %.0fs connected "
+                        "(root_turn_id=%s, error_resumes=%s)",
+                        elapsed,
+                        self.journal.root_turn_id,
+                        self.error_resumes,
+                    )
+                    self.error_resumes = 0
+                    self.recovery_seconds = 0.0
+                    self.streak_started = None
                 busy = info.type == PROVIDER_BUSY_CODE
                 plan = self._plan_resume(exc, info)
                 if plan is None and self._can_resume_again() and self._start_fresh(exc):
@@ -960,7 +1019,7 @@ class _TurnRun:
                     unreachable = ErrorInfo(
                         "network",
                         "CopperPilot did not come back online in time "
-                        f"({HEARTBEAT_MAX_WAIT_SECONDS / 60:g} min of failed heartbeats).",
+                        f"({self._outage_limit() / 60:g} min of failed heartbeats).",
                         True,
                     )
                     self.manual_resume = True
@@ -985,7 +1044,18 @@ class _TurnRun:
                         retry_event("restarted", run_attempt + 1, error=info, will_retry=True)
                     )
 
+    def _max_total_resumes(self) -> int:
+        return self.policy.max_total_resumes if self.policy else MAX_TOTAL_RESUMES
+
+    def _streak_seconds(self) -> float:
+        return 0.0 if self.streak_started is None else time.monotonic() - self.streak_started
+
     def _can_resume_again(self) -> bool:
+        if self.policy is not None:
+            return (
+                self.total_resumes < self.policy.max_total_resumes
+                and self._streak_seconds() < self.policy.window_seconds
+            )
         return (
             self.total_resumes < MAX_TOTAL_RESUMES
             and self.error_resumes < MAX_AUTO_RESUMES
@@ -994,7 +1064,7 @@ class _TurnRun:
 
     def _plan_resume(self, exc: BaseException, info: ErrorInfo) -> tuple[str, float, bool] | None:
         """``(reason, delay, immediate)`` for the next resume, or ``None`` to stop."""
-        if not info.retryable or self.total_resumes >= MAX_TOTAL_RESUMES:
+        if not info.retryable or self.total_resumes >= self._max_total_resumes():
             return None
         reason = resume_reason_for(exc)
         if info.type == PROVIDER_BUSY_CODE:
@@ -1006,6 +1076,12 @@ class _TurnRun:
         ):
             delay = random.uniform(0, IMMEDIATE_RESUME_MAX_DELAY)  # noqa: S311
             return reason, delay, True
+        if self.policy is not None:
+            if self.streak_started is None:
+                self.streak_started = time.monotonic()
+            if self._streak_seconds() >= self.policy.window_seconds:
+                return None
+            return reason, _jitter(self.policy.delay(self.error_resumes)), False
         if self.error_resumes >= MAX_AUTO_RESUMES or self.recovery_seconds >= RESUME_WINDOW_SECONDS:
             return None
         base = RETRY_BACKOFF_SECONDS[min(self.error_resumes, len(RETRY_BACKOFF_SECONDS) - 1)]
@@ -1060,7 +1136,8 @@ class _TurnRun:
                 logger.info("Heartbeat probe unavailable (%s)", type(exc).__name__)
                 return True
             waited = time.monotonic() - started
-            if waited >= HEARTBEAT_MAX_WAIT_SECONDS:
+            limit = self._heartbeat_limit()
+            if waited >= limit:
                 return False
             if not announced:
                 announced = True
@@ -1073,7 +1150,17 @@ class _TurnRun:
                 )
             delay = HEARTBEAT_POLL_SECONDS[min(index, len(HEARTBEAT_POLL_SECONDS) - 1)]
             index += 1
-            await asyncio.sleep(min(delay, max(HEARTBEAT_MAX_WAIT_SECONDS - waited, 0.0)))
+            await asyncio.sleep(min(delay, max(limit - waited, 0.0)))
+
+    def _outage_limit(self) -> float:
+        """The longest outage this turn rides out on its own, in seconds."""
+        return self.policy.window_seconds if self.policy else HEARTBEAT_MAX_WAIT_SECONDS
+
+    def _heartbeat_limit(self) -> float:
+        """How long to wait for the heartbeat: headless waits count against its window."""
+        if self.policy is None:
+            return HEARTBEAT_MAX_WAIT_SECONDS
+        return max(0.0, self.policy.window_seconds - self._streak_seconds())
 
     def _with_history(self, info: ErrorInfo, attempt: int) -> ErrorInfo:
         if not self.attempt_failures:
