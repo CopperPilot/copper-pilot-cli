@@ -73,7 +73,7 @@ def _patch_aiosqlite() -> None:
         # Dynamically adding a method to aiosqlite.Connection at runtime.
         # Type checkers can't understand this monkey-patch, so we suppress the
         # "attr-defined" error that would otherwise be raised.
-        _aiosqlite.Connection.is_alive = _is_alive  # ty: ignore[unresolved-attribute]
+        _aiosqlite.Connection.is_alive = _is_alive  # ty: ignore[missing-attribute]
 
     _aiosqlite_patched = True
 
@@ -160,7 +160,7 @@ def _guard_sqlite_handle(conn: aiosqlite.Connection) -> None:
     conn._connector = open_and_record
     # Shadows the bound method on this one instance; the declared type is the
     # unbound `stop(self)`, which a zero-argument replacement cannot match.
-    conn.stop = stop_and_close  # ty: ignore[invalid-assignment]
+    conn.stop = stop_and_close
 
 
 def _new_connection(timeout: float = _DEFAULT_SQLITE_TIMEOUT) -> aiosqlite.Connection:
