@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage
 from mcp.server.fastmcp import Context, FastMCP
 
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
-from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph
+from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph, headless_resume_policy
 from copper_pilot_cli.copper_models import (
     ChatModelCatalog,
     cached_chat_model_catalog,
@@ -223,6 +223,7 @@ async def collect_turn(
         effort=initial_effort,
         model=model,
         tool_broker=broker,
+        resume_policy=headless_resume_policy(),
     )
     events: list[dict[str, Any]] = []
     subagents: dict[str, SubagentStatus] = {}

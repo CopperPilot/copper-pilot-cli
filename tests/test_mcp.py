@@ -52,8 +52,10 @@ class FakeAgent:
         effort,
         tool_broker,
         model=None,
+        resume_policy=None,
     ) -> None:
         self.workspace = workspace
+        self.resume_policy = resume_policy
         self.credential = credential
         self.conversation_id = conversation_id
         self.mode = mode

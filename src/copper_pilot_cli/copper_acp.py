@@ -106,6 +106,7 @@ from copper_pilot_cli.copper_graph import (
     RESUME_EVENT,
     RETRY_EVENT,
     create_copper_graph,
+    headless_resume_policy,
 )
 from copper_pilot_cli.copper_models import (
     ChatModelCatalog,
@@ -278,6 +279,8 @@ class AcpSession:
     unfinished: bool = False
     # The unfinished turn paused because the LLM provider stayed out of capacity.
     provider_busy: bool = False
+    # Why automatic resumes stopped (the last resume event), for the prompt's _meta.
+    unfinished_info: dict[str, Any] | None = None
     # Chat context protocol v1: the latest context size and when it was last
     # sent as a usage update (live updates are throttled).
     context_usage: dict[str, Any] | None = None
@@ -564,6 +567,33 @@ def available_commands() -> list[AvailableCommand]:
         )
     )
     return commands
+
+
+UNFINISHED_META_KEY = "copperpilot"
+
+
+def unfinished_turn_meta(session: Any, error: str) -> dict[str, Any]:
+    """Machine-readable marker for a prompt that ended with its turn unfinished.
+
+    A headless caller (rea-hardware, T3) must not mistake this end for a finished
+    task: ``stopReason`` alone is ``max_turn_requests`` and the text is for people.
+    Send ``resumeWith`` (``/resume``) as the next prompt to continue the turn from
+    its journal.
+    """
+    info = dict(getattr(session, "unfinished_info", None) or {})
+    return {
+        UNFINISHED_META_KEY: {
+            "unfinishedTurn": True,
+            "resumable": True,
+            "resumeWith": "/resume",
+            "reason": "provider_busy"
+            if getattr(session, "provider_busy", False)
+            else info.get("reason"),
+            "errorType": info.get("error_type"),
+            "rootTurnId": info.get("root_turn_id"),
+            "error": error[:500],
+        }
+    }
 
 
 def resume_request(message: str) -> str | None:
@@ -935,7 +965,12 @@ class CopperAcpAgent:
         credential = self._require_credential()
         if model_selector_enabled():
             await load_chat_model_catalog(credential)
-        agent = CopperPilotAgent(workspace, credential=credential, conversation_id=session_id)
+        agent = CopperPilotAgent(
+            workspace,
+            credential=credential,
+            conversation_id=session_id,
+            resume_policy=headless_resume_policy(),
+        )
         async with create_copper_graph(agent) as runtime:
             state = await runtime.aget_state(runtime.config(session_id, workspace))
         values = getattr(state, "values", None) or {}
@@ -1037,6 +1072,7 @@ class CopperAcpAgent:
         session.tool_paths = {}
         session.failure = None
         session.unfinished = False
+        session.unfinished_info = None
         session.provider_busy = False
         query = with_attachment_paths(message or IMAGE_ONLY_QUERY, attachments)
         session.turn = asyncio.create_task(
@@ -1072,7 +1108,10 @@ class CopperAcpAgent:
                         session_id=session.session_id,
                         update=update_agent_message_text("\n\n" + text),
                     )
-                    return PromptResponse(stop_reason="max_turn_requests")
+                    return PromptResponse(
+                        stop_reason="max_turn_requests",
+                        field_meta=unfinished_turn_meta(session, str(exc)),
+                    )
                 raise (limited or self._map_turn_failure(exc)) from exc
         finally:
             session.turn = None
@@ -1163,6 +1202,7 @@ class CopperAcpAgent:
             model=session.model,
             runtime_context=encode_runtime_context(attachments=attachments),
             tool_broker=session.broker,
+            resume_policy=headless_resume_policy(),
         )
         failure: str | None = None
         async with create_copper_graph(agent) as runtime:
@@ -1326,6 +1366,7 @@ class CopperAcpAgent:
             effort=session.effort,
             model=session.model,
             tool_broker=session.broker,
+            resume_policy=headless_resume_policy(),
         )
 
     def _context_limit(self, session: AcpSession) -> int | None:
@@ -1585,6 +1626,7 @@ class CopperAcpAgent:
                 session.unfinished = bool(payload.get("manual_resume")) and (
                     payload.get("error_type") not in _ACCOUNT_FAILURES
                 )
+                session.unfinished_info = dict(payload) if session.unfinished else None
                 session.provider_busy = (
                     session.unfinished and payload.get("reason") == "provider_busy"
                 )
