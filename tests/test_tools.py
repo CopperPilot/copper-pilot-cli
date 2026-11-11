@@ -492,6 +492,48 @@ async def test_oversized_purpose_read_comes_back_in_raw_pages(tmp_path, monkeypa
     assert pages > 1
 
 
+def _big_netlist() -> str:
+    """Over the Deep Agents read budget (~80k characters) in 100 lines."""
+    comps = "".join(f'  (comp (ref "R{i}") (value "{"x" * 900}"))\n' for i in range(100))
+    return "(export (version E)\n (components\n" + comps + " ))\n"
+
+
+@pytest.mark.asyncio
+async def test_unmarked_large_read_puts_a_notice_above_the_header(tmp_path) -> None:
+    """Why server reads need a purpose: the agent's windowed read (kept for
+    the model) puts its truncation notice above the "@@ lines" header."""
+    (tmp_path / "review.net").write_bytes(_big_netlist().encode())
+    broker = LocalToolBroker(tmp_path)
+    text = (await broker.execute(tool("1", "read_file", file_path="review.net")))["result"]
+    first, second = text.split("\n", 2)[:2]
+    assert first.startswith("[") and "truncated" in first.lower()
+    assert second.startswith("@@ lines 1-")
+
+
+@pytest.mark.asyncio
+async def test_server_internal_read_returns_the_netlist_whole_and_raw(tmp_path) -> None:
+    body = _big_netlist()
+    (tmp_path / "review.net").write_bytes(body.encode())
+    broker = LocalToolBroker(tmp_path)
+    result = await broker.execute(
+        tool("1", "read_file", file_path="review.net", purpose="server_internal_text")
+    )
+    assert result == {"result": body}
+
+
+@pytest.mark.asyncio
+async def test_oversized_server_internal_read_pages_header_first(tmp_path, monkeypatch) -> None:
+    from copper_pilot_cli import deepagents_tools
+
+    monkeypatch.setattr(deepagents_tools, "_DIRECT_READ_MAX_BYTES", 20_000)
+    body = _big_netlist()
+    (tmp_path / "drc.json").write_bytes(body.encode())
+    broker = LocalToolBroker(tmp_path)
+    text, pages = await _page_through(broker, "drc.json", purpose="server_internal_text")
+    assert text == body
+    assert pages > 1
+
+
 @pytest.mark.asyncio
 async def test_big_external_library_is_paged_not_lost(tmp_path, monkeypatch) -> None:
     """Connector_Generic.kicad_sym (6.7 MB) is over one frame; the native read

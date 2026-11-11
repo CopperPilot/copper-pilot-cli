@@ -34,14 +34,19 @@ if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
 
-# Server-internal KiCad bootstrap reads want the whole file, raw (no status
-# header, no 100-line window), as the desktop harness returns it.
+# Server-internal reads want the whole file, raw (no status header, no
+# 100-line window), as the desktop harness returns it. "server_internal_text"
+# covers the server's other reads (netlists, DRC/ERC reports): through the
+# Deep Agents read, a page over its character budget got a truncation notice
+# ABOVE the "@@ lines" header, and servers that only looked at line 1 took
+# that page for the whole file, so sync_schematic_to_pcb parsed a cut netlist.
 RAW_KICAD_READ_PURPOSES = frozenset(
     {
         "kicad_workspace_schematic",
         "kicad_workspace_pcb",
         "kicad_workspace_symbol_library",
         "kicad_workspace_footprint",
+        "server_internal_text",
     }
 )
 # Files outside the workspace the hosted agent may read (never write): KiCad

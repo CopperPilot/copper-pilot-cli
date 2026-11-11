@@ -584,7 +584,7 @@ def _model_tool(fn: Callable[..., Awaitable[dict[str, Any]]]) -> Any:
     paragraphs = inspect.cleandoc(fn.__doc__ or "").split("\n\n")
     wrapper.__doc__ = "\n\n".join(item for item in paragraphs if not item.startswith("model "))
     signature = inspect.signature(fn, eval_str=True)
-    wrapper.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]
+    wrapper.__signature__ = signature.replace(  # ty: ignore[missing-attribute]
         parameters=[item for item in signature.parameters.values() if item.name != "model"]
     )
     del wrapper.__annotations__["model"]
