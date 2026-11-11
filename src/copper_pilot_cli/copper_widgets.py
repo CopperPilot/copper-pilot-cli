@@ -1391,7 +1391,7 @@ class ApprovalMenu(Container):
             (APPROVAL_OPTIONS[2], "reject"),
         ]
         if request.outside_workspace:
-            # Asked every time; switching to Auto would not cover it anyway.
+            # Asked every time; a one-off "Auto" switch is not offered for it.
             self._options = [option for option in self._options if option[1] != "auto"]
         self._option_widgets: list[Static] = []
         self._reason_active = False
@@ -1408,7 +1408,7 @@ class ApprovalMenu(Container):
             yield Static(
                 literal_text(
                     f"Outside the workspace: {self.request.outside_workspace}. "
-                    "Asked in every approval mode."
+                    "Asked unless dangerous shell commands are auto-allowed."
                 ),
                 classes="approval-scope",
             )

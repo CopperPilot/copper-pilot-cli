@@ -376,8 +376,10 @@ searches run freely. Writes, edits, deletes, and shell commands are gated:
 
 ### Outside the workspace
 
-Some shell commands reach beyond the project folder, and they need explicit
-approval in every mode, Auto and YOLO included:
+Some shell commands reach beyond the project folder. They count as dangerous
+shell commands: they need explicit approval unless you run in YOLO, or in Auto
+with "always allow dangerous shell commands" turned on (the same switch as the
+desktop app's "Always Allow Dangerous Shell Commands"):
 
 - recursive searches rooted at `/`, a system top-level directory (`/usr`,
   `/etc`, `/home`, ...), or your home directory: `find /`, `grep -r ... ~`,
@@ -387,11 +389,14 @@ approval in every mode, Auto and YOLO included:
   KiCad's library and settings folders, `~/.copper-pilot` and `TMPDIR` are
   allowed.
 - `docker`, `podman`, `kubectl`, `sudo`, `ssh`, `scp`, and similar
+- killing processes by name: `killall`, `pkill`, `kill $(pgrep ...)`
 
 The CLI follows `&&`/`;`/`|` chains, `cd`, `$(...)` and `sh -c`. The TUI
 prompt shows the reason and offers only yes or no. ACP clients get a
 permission request titled "Outside the workspace: ..." with the reason and no
-"Allow all for this session". Each approval covers that one call only.
+"Allow all for this session". Each approval covers that one call only. With
+nobody to approve (headless, MCP) they are refused, unless dangerous shell
+commands are auto-allowed as above.
 
 With nobody to ask (headless `-n`, MCP), the command is refused and the agent
 gets the tool error `blocked: outside the workspace (<reason>); ask the user

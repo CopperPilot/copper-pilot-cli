@@ -1637,7 +1637,7 @@ class CopperAcpAgent:
             content = None
             scope = request.outside_workspace
             if scope:
-                # Asked every time, even in YOLO; no session-wide allow.
+                # Asked every time it reaches here; no session-wide allow.
                 title = f"Outside the workspace: {title}"
                 options = [option for option in options if option.kind != "allow_always"]
                 content = [

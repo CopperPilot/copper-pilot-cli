@@ -459,7 +459,8 @@ class LocalToolBroker:
         if canonical_name == "execute":
             scope = outside_workspace_reason(request.arguments.get("command"), self.workspace)
             if scope is not None:
-                await self._authorize_outside_workspace(request, canonical_name, scope)
+                if not self._auto_allows_dangerous_shell():
+                    await self._authorize_outside_workspace(request, canonical_name, scope)
                 return
         gated = canonical_name in _MUTATION_TOOLS or canonical_name == "execute"
         if not gated or self.mode is ApprovalMode.YOLO:
@@ -486,13 +487,24 @@ class LocalToolBroker:
         if not approved:
             raise ToolRejected(f"{request.tool_name} was rejected.")
 
+    def _auto_allows_dangerous_shell(self) -> bool:
+        """Whether dangerous shell commands run without asking in this mode."""
+
+        if self.mode is ApprovalMode.YOLO:
+            return True
+        return self.mode is ApprovalMode.AUTO and self.always_allow_dangerous_shell_commands
+
     async def _authorize_outside_workspace(
         self,
         request: ToolRequest,
         canonical_name: str,
         scope: str,
     ) -> None:
-        """Ask every time, in every mode; refuse when nobody can answer."""
+        """Ask every time (no session-wide allow); refuse when nobody can answer.
+
+        Only reached when dangerous shell commands are not auto-allowed: YOLO,
+        or Auto with "always allow dangerous shell commands", runs them as-is.
+        """
 
         if not self.has_approver:
             raise ToolRejected(outside_workspace_blocked(scope))

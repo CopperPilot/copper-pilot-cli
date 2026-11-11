@@ -268,8 +268,8 @@ def _home_workspace(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", [ApprovalMode.AUTO, ApprovalMode.YOLO])
-async def test_outside_workspace_shell_prompts_in_auto_and_yolo(
+@pytest.mark.parametrize("mode", [ApprovalMode.MANUAL, ApprovalMode.AUTO])
+async def test_outside_workspace_shell_prompts_unless_dangerous_auto_allowed(
     tmp_path, monkeypatch, mode
 ) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
@@ -279,7 +279,14 @@ async def test_outside_workspace_shell_prompts_in_auto_and_yolo(
         requests.append(request)
         return True
 
-    broker = LocalToolBroker(workspace, mode=mode, approve=approve)
+    # The normal shell switch alone never covers an outside-the-workspace command.
+    broker = LocalToolBroker(
+        workspace,
+        mode=mode,
+        approve=approve,
+        always_allow_shell_commands=True,
+        always_allow_dangerous_shell_commands=False,
+    )
     result = await broker.execute(tool("1", "bash", command="cat ~/other/secret.kicad_sch"))
 
     assert "other project" in result["result"]
@@ -293,24 +300,63 @@ async def test_outside_workspace_shell_prompts_in_auto_and_yolo(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "dangerous"),
+    [(ApprovalMode.AUTO, True), (ApprovalMode.YOLO, False), (ApprovalMode.YOLO, True)],
+)
+@pytest.mark.parametrize("interactive", [False, True])
+async def test_outside_workspace_shell_runs_when_dangerous_auto_allowed(
+    tmp_path, monkeypatch, mode, dangerous, interactive
+) -> None:
+    workspace = _home_workspace(tmp_path, monkeypatch)
+    requests = []
+
+    async def approve(request):
+        requests.append(request)
+        return False
+
+    broker = LocalToolBroker(
+        workspace,
+        mode=mode,
+        approve=approve if interactive else None,
+        always_allow_shell_commands=False,
+        always_allow_dangerous_shell_commands=dangerous,
+    )
+    # Headless and MCP runs too: nobody is asked, the command just runs.
+    assert broker.has_approver is interactive
+    result = await broker.execute(tool("1", "bash", command="cat ~/other/secret.kicad_sch"))
+
+    assert "other project" in result["result"]
+    assert requests == []
+
+
+@pytest.mark.asyncio
 async def test_outside_workspace_shell_rejected_by_user(tmp_path, monkeypatch) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
 
     async def decline(_request):
         return False
 
-    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO, approve=decline)
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.AUTO, approve=decline)
     # "/" is the workspace drive's root ("C:\\" on Windows).
     root = re.escape("/" if os.name != "nt" else workspace.anchor)
     with pytest.raises(ToolRejected, match=rf"outside the workspace \(`find` searches {root}\)"):
         await broker.execute(tool("1", "bash", command="find / -name kicad-cli"))
 
 
+# YOLO, or Auto with dangerous shell auto-allowed, would run these commands; the
+# refusal tests below stay in the settings that ask (a real `grep /` or
+# `killall` must never run from the test suite).
+_ASKING = [(ApprovalMode.MANUAL, False), (ApprovalMode.MANUAL, True), (ApprovalMode.AUTO, False)]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", list(ApprovalMode))
-async def test_headless_rejects_outside_workspace_with_reason(tmp_path, monkeypatch, mode) -> None:
+@pytest.mark.parametrize(("mode", "dangerous"), _ASKING)
+async def test_headless_rejects_outside_workspace_with_reason(
+    tmp_path, monkeypatch, mode, dangerous
+) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
-    broker = LocalToolBroker(workspace, mode=mode)
+    broker = LocalToolBroker(workspace, mode=mode, always_allow_dangerous_shell_commands=dangerous)
     assert broker.has_approver is False
     with pytest.raises(ToolRejected) as caught:
         await broker.execute(tool("1", "bash", command='grep -rn "VCC" / 2>/dev/null'))
@@ -327,9 +373,10 @@ _KILLALL_REASON = (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", list(ApprovalMode))
-@pytest.mark.parametrize("dangerous", [False, True])
-async def test_kill_by_name_prompts_in_every_mode(tmp_path, monkeypatch, mode, dangerous) -> None:
+@pytest.mark.parametrize(("mode", "dangerous"), _ASKING)
+async def test_kill_by_name_prompts_unless_dangerous_auto_allowed(
+    tmp_path, monkeypatch, mode, dangerous
+) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
     requests = []
 
@@ -356,10 +403,12 @@ async def test_kill_by_name_prompts_in_every_mode(tmp_path, monkeypatch, mode, d
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", list(ApprovalMode))
-async def test_headless_refuses_kill_by_name_with_reason(tmp_path, monkeypatch, mode) -> None:
+@pytest.mark.parametrize(("mode", "dangerous"), _ASKING)
+async def test_headless_refuses_kill_by_name_with_reason(
+    tmp_path, monkeypatch, mode, dangerous
+) -> None:
     workspace = _home_workspace(tmp_path, monkeypatch)
-    broker = LocalToolBroker(workspace, mode=mode)
+    broker = LocalToolBroker(workspace, mode=mode, always_allow_dangerous_shell_commands=dangerous)
     with pytest.raises(ToolRejected) as caught:
         await broker.execute(tool("1", "bash", command="killall -9 python3"))
     assert str(caught.value) == (
