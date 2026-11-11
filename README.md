@@ -182,8 +182,9 @@ searches run freely. Writes, edits, deletes, and shell commands are gated by
 Manual approval by default. Auto permits only deterministic routine actions;
 unknown actions still ask. YOLO must be selected explicitly. Shell commands
 that reach outside the workspace (`find /`, `grep -r ~`, other projects under
-the home directory, `docker`, `sudo`, `ssh`) ask in every mode, YOLO included,
-and are refused when nobody can approve them (headless, MCP). See
+the home directory, `docker`, `sudo`, `ssh`, `pkill`) count as dangerous: they
+ask unless you run YOLO or Auto with dangerous shell commands auto-allowed, and
+otherwise are refused when nobody can approve them (headless, MCP). See
 [docs/cli.md](docs/cli.md#outside-the-workspace).
 
 Filesystem, search, edit, and shell execution use Deep Agents' native

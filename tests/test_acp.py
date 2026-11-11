@@ -1297,7 +1297,7 @@ async def test_outside_workspace_permission_carries_reason(tmp_path, monkeypatch
     assert broker.mode is ApprovalMode.YOLO
 
 
-async def test_acp_yolo_session_still_asks_for_outside_workspace_shell(
+async def test_acp_auto_session_still_asks_for_outside_workspace_shell(
     tmp_path, monkeypatch
 ) -> None:
     home = tmp_path / "home"
@@ -1308,7 +1308,8 @@ async def test_acp_yolo_session_still_asks_for_outside_workspace_shell(
         workspace, monkeypatch, responses=[selected(OPTION_REJECT)]
     )
     broker = agent.sessions[session_id].broker
-    broker.mode = ApprovalMode.YOLO
+    broker.mode = ApprovalMode.AUTO
+    broker.always_allow_dangerous_shell_commands = False
     with pytest.raises(ToolRejected, match="the user declined"):
         await broker.execute(
             ToolRequest(
