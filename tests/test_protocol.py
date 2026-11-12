@@ -9,6 +9,7 @@ import pytest
 from copper_pilot_cli._version import __version__
 from copper_pilot_cli.copper_protocol import (
     MAX_CHAT_START_BYTES,
+    MAX_CONTEXT_MESSAGE_BYTES,
     ChatMessage,
     ChatRequest,
     CopperEffort,
@@ -72,6 +73,29 @@ def test_context_strips_inline_attachments_and_keeps_newest() -> None:
     assert bounded[-1].content == "new"
     assert "data:image" not in bounded[-2].content
     assert "inline attachment omitted" in bounded[-2].content
+
+
+@pytest.mark.parametrize("filler", ["x", "é", "🔧"])
+def test_clipped_context_message_fits_the_server_limit(filler: str) -> None:
+    # The server rejects any context message over MAX_CONTEXT_MESSAGE_BYTES
+    # with 413 chat_request_too_large, and every later turn resends it. A
+    # long build-turn reply (ERC/DRC report text) must clip to the limit
+    # with its marker inside it, including when a multi-byte char straddles
+    # the cut.
+    reply = filler * (MAX_CONTEXT_MESSAGE_BYTES + 5_000)
+    bounded = bound_context([ChatMessage(role="assistant", content=reply)])
+    content = bounded[-1].content
+    assert content.endswith("[truncated]")
+    assert len(content.encode()) <= MAX_CONTEXT_MESSAGE_BYTES
+    frame = make_chat_start(request(context=[ChatMessage(role="assistant", content=reply)]))
+    sent = frame["request"]["context"][-1]["content"]
+    assert len(sent.encode()) <= MAX_CONTEXT_MESSAGE_BYTES
+
+
+def test_message_at_the_limit_is_sent_unchanged() -> None:
+    exact = "y" * MAX_CONTEXT_MESSAGE_BYTES
+    bounded = bound_context([ChatMessage(role="assistant", content=exact)])
+    assert bounded[-1].content == exact
 
 
 def test_oversized_start_frame_is_rejected() -> None:
