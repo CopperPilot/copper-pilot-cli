@@ -436,11 +436,24 @@ def _strip_data_uris(text: str) -> str:
     return _DATA_URI.sub(replace, text)
 
 
+_TRUNCATION_MARKER = "\n[truncated]"
+
+
 def _truncate_utf8(text: str, limit: int) -> str:
+    """Clip ``text`` to at most ``limit`` UTF-8 bytes, marker included.
+
+    The server rejects a context message over its byte limit (413
+    ``chat_request_too_large``), so the marker must fit inside the limit:
+    clipping to ``limit`` and then appending it made every clipped message
+    12 bytes too large and ended the chat for good.
+    """
     encoded = text.encode()
     if len(encoded) <= limit:
         return text
-    return encoded[:limit].decode(errors="ignore") + "\n[truncated]"
+    marker = _TRUNCATION_MARKER.encode()
+    if limit <= len(marker):
+        return encoded[:limit].decode(errors="ignore")
+    return encoded[: limit - len(marker)].decode(errors="ignore") + _TRUNCATION_MARKER
 
 
 _OMITTED_NOTE = re.compile(r"\[\d+ older messages omitted\]")
