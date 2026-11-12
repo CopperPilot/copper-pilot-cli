@@ -43,7 +43,7 @@ dependencies = [
 
 [project.optional-dependencies]
 acp = [
-  "agent-client-protocol>=0.12,<1",
+  "agent-client-protocol>=0.12,<2",
 ]
 # LCSC/EasyEDA -> KiCad symbol, footprint and 3D model importer the agent runs as a
 # command (`easyeda2kicad --full --lcsc_id=C2040`). Optional because it is
@@ -52,7 +52,7 @@ easyeda = [
   "easyeda2kicad>=1.0.1,<2",
 ]
 dev = [
-  "agent-client-protocol>=0.12,<1",
+  "agent-client-protocol>=0.12,<2",
   "build>=1.4,<2",
   "gitchangelog==3.0.4",
   "pip-audit>=2.10,<3",
