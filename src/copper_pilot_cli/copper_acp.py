@@ -109,6 +109,7 @@ from copper_pilot_cli.copper_graph import (
     headless_resume_policy,
 )
 from copper_pilot_cli.copper_models import (
+    AUTO_MODEL,
     ChatModelCatalog,
     cached_chat_model_catalog,
     is_model_fallback_event,
@@ -364,12 +365,16 @@ def config_options(
             description="Intelligence model; choosing one selects Intelligence (paid plan)",
             category="model",
             type="select",
-            current_value=source.effective_model(effort, model),
+            current_value=(
+                source.selection(model)
+                if normalize_effort(effort) is CopperEffort.INTELLIGENCE
+                else source.effective_model(effort, model)
+            ),
             options=[
                 SessionConfigSelectOption(
                     value=item.id, name=item.label, description=source.describe(item)
                 )
-                for item in source.models
+                for item in source.picker_models
             ],
         )
     )
@@ -825,7 +830,7 @@ class CopperAcpAgent:
         model = catalog.get(value)
         if model is None:
             raise RequestError.invalid_params(
-                {"details": f"Unknown model {value!r}. Known ids: {', '.join(catalog.ids)}."}
+                {"details": f"Unknown model {value!r}. Known ids: {', '.join(catalog.picker_ids)}."}
             )
         session.model = model.id
         if session.effort is not CopperEffort.INTELLIGENCE and model.id != catalog.balanced_model:
@@ -1306,9 +1311,9 @@ class CopperAcpAgent:
         catalog = self.catalog
         listing = "\n".join(
             f"- `{item.id}` — {item.label}"
-            + (" (Intelligence default)" if item.id == catalog.default_intelligence_model else "")
+            + (" (Intelligence default)" if item.id == AUTO_MODEL else "")
             + (" (Balanced model)" if item.id == catalog.balanced_model else "")
-            for item in catalog.models
+            for item in catalog.picker_models
         )
         if argument is None:
             text = (

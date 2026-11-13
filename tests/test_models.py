@@ -68,6 +68,7 @@ def _reset_catalog():
 
 def test_bundled_catalog_mirrors_the_desktop_client() -> None:
     assert FALLBACK_CATALOG.ids == (
+        "gemini-4-carbon",
         "gemini-4-argon",
         "gemini-3.8-flash",
         "claude-opus-5-5",
@@ -75,11 +76,13 @@ def test_bundled_catalog_mirrors_the_desktop_client() -> None:
         "gpt-6-astra",
         "gpt-6.1-sol",
     )
-    assert DEFAULT_INTELLIGENCE_MODEL == "gemini-4-argon"
+    assert DEFAULT_INTELLIGENCE_MODEL == "gemini-4-carbon"
+    assert BALANCED_MODEL == "gemini-4-carbon"
     assert FALLBACK_CATALOG.default_intelligence_model == DEFAULT_INTELLIGENCE_MODEL
     assert FALLBACK_CATALOG.balanced_model == BALANCED_MODEL
     assert FALLBACK_CATALOG.from_server is False
-    assert len(BUNDLED_MODELS) == 6
+    assert len(BUNDLED_MODELS) == 7
+    assert FALLBACK_CATALOG.picker_ids == ("auto", *FALLBACK_CATALOG.ids)
 
 
 def test_normalize_and_effective_model() -> None:
@@ -92,6 +95,14 @@ def test_normalize_and_effective_model() -> None:
     assert catalog.effective_model("balanced", "claude-opus-5-5") == BALANCED_MODEL
     assert catalog.effective_model(CopperEffort.INTELLIGENCE, None) == DEFAULT_INTELLIGENCE_MODEL
     assert catalog.effective_model("intelligence", "gemini-4-argon") == "gemini-4-argon"
+    assert catalog.normalize("AUTO") == DEFAULT_INTELLIGENCE_MODEL
+    assert catalog.effective_model("intelligence", "auto") == DEFAULT_INTELLIGENCE_MODEL
+    assert catalog.selection(None) == "auto"
+    assert catalog.selection("auto") == "auto"
+    assert catalog.selection("mystery") == "auto"
+    assert catalog.selection("GPT-6.1-Sol") == "gpt-6.1-sol"
+    assert catalog.label("auto") == "Auto (Gemini 4 Carbon)"
+    assert catalog.short_label("auto") == "Auto"
     assert catalog.label("gpt-6-astra") == "OpenAI GPT-6 Astra"
     assert catalog.label("mystery") == "mystery"
     assert catalog.label("") == "the selected model"
@@ -100,21 +111,26 @@ def test_normalize_and_effective_model() -> None:
 
 def test_describe_lists_vendor_price_and_role() -> None:
     catalog = FALLBACK_CATALOG
-    argon = catalog.get("gemini-4-argon")
+    auto = catalog.get("auto")
+    carbon = catalog.get("gemini-4-carbon")
     opus = catalog.get("claude-opus-5-5")
     flash = catalog.get("gemini-3.8-flash")
-    assert argon is not None and opus is not None and flash is not None
-    assert catalog.describe(argon) == "Google · $2 in / $10 out per Mtok · Intelligence default"
+    assert auto is not None and carbon is not None and opus is not None and flash is not None
+    assert catalog.describe(auto) == (
+        "CopperPilot picks the model (now Google Gemini 4 Carbon) · Intelligence default"
+    )
+    assert catalog.describe(carbon) == "Google · $2 in / $10 out per Mtok · Balanced model"
     assert catalog.describe(opus) == "Anthropic · $4 in / $20 out per Mtok"
-    assert catalog.describe(flash) == "Google · $1.5 in / $7.5 out per Mtok · Balanced model"
+    assert catalog.describe(flash) == "Google · $1.5 in / $7.5 out per Mtok"
 
 
 @pytest.mark.usefixtures("model_selector_enabled")
 def test_request_model_is_sent_only_for_intelligence() -> None:
     assert request_model("balanced", "claude-opus-5-5") is None
     assert request_model("intelligence", " Claude-Opus-5-5 ") == "claude-opus-5-5"
-    assert request_model("intelligence", None) is None
-    assert request_model("intelligence", "   ") is None
+    assert request_model("intelligence", None) == "auto"
+    assert request_model("intelligence", "   ") == "auto"
+    assert request_model("intelligence", "Auto") == "auto"
 
 
 def test_catalog_from_payload_parses_server_shape() -> None:
@@ -128,6 +144,10 @@ def test_catalog_from_payload_parses_server_shape() -> None:
     assert future.input_usd_per_mtok == 1.25
     assert future.output_usd_per_mtok == 0.0
     assert catalog.default_intelligence_model == "claude-opus-5-5"
+    assert catalog.auto_label == "Auto"
+    assert catalog.label("auto") == "Auto (Opus 5.5)"
+    labelled = catalog_from_payload({**SERVER_PAYLOAD, "auto_model": {"label": "Automatic"}})
+    assert labelled is not None and labelled.label("auto") == "Automatic (Opus 5.5)"
     assert catalog.balanced_model == "gemini-3.8-flash"
 
 
@@ -242,9 +262,10 @@ def test_model_selector_ships_off() -> None:
 
 def test_request_model_pins_the_default_while_the_selector_is_off() -> None:
     assert request_model("balanced", "claude-opus-5-5") is None
-    assert request_model("intelligence", "claude-opus-5-5") == DEFAULT_INTELLIGENCE_MODEL
-    assert request_model("intelligence", None) == DEFAULT_INTELLIGENCE_MODEL
-    assert DEFAULT_INTELLIGENCE_MODEL == "gemini-4-argon"
+    # The server resolves "auto" to its default model (Gemini 4 Carbon today).
+    assert request_model("intelligence", "claude-opus-5-5") == "auto"
+    assert request_model("intelligence", "gemini-4-argon") == "auto"
+    assert request_model("intelligence", None) == "auto"
 
 
 def test_model_fallback_notice_names_no_model_while_the_selector_is_off() -> None:

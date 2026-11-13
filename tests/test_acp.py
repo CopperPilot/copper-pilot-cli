@@ -83,7 +83,6 @@ from copper_pilot_cli.copper_auth import DeviceCredential, save_credential
 from copper_pilot_cli.copper_graph import retry_event
 from copper_pilot_cli.copper_models import (
     BALANCED_MODEL,
-    DEFAULT_INTELLIGENCE_MODEL,
     FALLBACK_CATALOG,
     MODEL_FALLBACK_GENERIC_NOTICE,
 )
@@ -324,11 +323,12 @@ def test_config_options_expose_mode_effort_and_model() -> None:
     assert [item.value for item in by_id[EFFORT_CONFIG_ID].options] == ["balanced", "intelligence"]
     model = by_id[MODEL_CONFIG_ID]
     assert model.category == "model"
-    # Intelligence without an explicit choice runs on the default model.
-    assert model.current_value == DEFAULT_INTELLIGENCE_MODEL
-    assert [item.value for item in model.options] == list(FALLBACK_CATALOG.ids)
-    assert model.options[0].name == "Google Gemini 4 Argon"
+    # Intelligence without an explicit choice is on Auto (the server default).
+    assert model.current_value == "auto"
+    assert [item.value for item in model.options] == ["auto", *FALLBACK_CATALOG.ids]
+    assert model.options[0].name == "Auto (Gemini 4 Carbon)"
     assert "Intelligence default" in (model.options[0].description or "")
+    assert model.options[1].name == "Google Gemini 4 Carbon"
 
 
 @pytest.mark.usefixtures("model_selector_enabled")
@@ -338,7 +338,7 @@ def test_model_option_tracks_the_model_that_will_answer() -> None:
     intelligence = config_options(CopperMode.AGENT, CopperEffort.INTELLIGENCE, "gpt-6.1-sol")
     assert intelligence[2].current_value == "gpt-6.1-sol"
     unknown = config_options(CopperMode.AGENT, CopperEffort.INTELLIGENCE, "mystery")
-    assert unknown[2].current_value == DEFAULT_INTELLIGENCE_MODEL
+    assert unknown[2].current_value == "auto"
 
 
 @pytest.mark.parametrize(
@@ -1777,9 +1777,9 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     ]
     options = {option.id: option for option in conn.updates[1][1].config_options}
     assert options[EFFORT_CONFIG_ID].current_value == "intelligence"
-    assert options[MODEL_CONFIG_ID].current_value == DEFAULT_INTELLIGENCE_MODEL
+    assert options[MODEL_CONFIG_ID].current_value == "auto"
     assert conn.updates[2][1].content.text == (
-        "Effort set to Intelligence; model Google Gemini 4 Argon (`gemini-4-argon`)."
+        "Effort set to Intelligence; model Google Gemini 4 Carbon (`gemini-4-carbon`)."
     )
 
     conn.updates.clear()
@@ -1788,7 +1788,7 @@ async def test_effort_command_runs_locally(tmp_path, monkeypatch) -> None:
     )
     assert kinds(conn, commands=True) == ["agent_message_chunk"]
     assert conn.updates[0][1].content.text.startswith(
-        "Effort is Intelligence; model Google Gemini 4 Argon (`gemini-4-argon`)."
+        "Effort is Intelligence; model Google Gemini 4 Carbon (`gemini-4-carbon`)."
     )
 
     conn.updates.clear()
@@ -1827,8 +1827,9 @@ async def test_model_command_runs_locally(tmp_path, monkeypatch) -> None:
     assert runtime.values is None
     assert kinds(conn) == ["agent_message_chunk"]
     listing = conn.updates[-1][1].content.text
-    assert listing.startswith("Model is Google Gemini 3.8 Flash (`gemini-3.8-flash`) on Balanced.")
-    assert "- `gemini-4-argon` — Google Gemini 4 Argon (Intelligence default)" in listing
+    assert listing.startswith("Model is Google Gemini 4 Carbon (`gemini-4-carbon`) on Balanced.")
+    assert "- `auto` — Auto (Gemini 4 Carbon) (Intelligence default)" in listing
+    assert "- `gemini-4-carbon` — Google Gemini 4 Carbon (Balanced model)" in listing
     assert session.effort is CopperEffort.BALANCED
 
     conn.updates.clear()

@@ -671,13 +671,14 @@ class CopperPilotApp(App[None]):
             if model is None:
                 await self._mount(
                     ErrorMessage(
-                        f"Unknown model {argument!r}. Known ids: {', '.join(self.catalog.ids)}."
+                        f"Unknown model {argument!r}. "
+                        f"Known ids: {', '.join(self.catalog.picker_ids)}."
                     )
                 )
                 return
             choice: str | None = model.id
         else:
-            current = self._effective_model()
+            current = self.catalog.selection(self.copper_model)
             choice = await self._wait_for_modal(
                 ChoiceScreen(
                     "CopperPilot model (Intelligence)",
@@ -686,7 +687,7 @@ class CopperPilotApp(App[None]):
                             item.id,
                             f"{item.label}{' (current)' if item.id == current else ''}",
                         )
-                        for item in self.catalog.models
+                        for item in self.catalog.picker_models
                     ],
                 )
             )
