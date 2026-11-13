@@ -1,8 +1,9 @@
 """Intelligence chat model catalog shared by the TUI, headless CLI, MCP, and ACP.
 
 Balanced turns always run on the server's default model; the server ignores
-any model the client sends for them. Intelligence turns (paid plans) may pick
-one model from the catalog. The server publishes the catalog at
+any model the client sends for them. Intelligence turns (paid plans) send
+``"auto"`` (:data:`AUTO_MODEL`) so the server picks the model, or, while the
+model selector is on, one model from the catalog. The server publishes the catalog at
 ``GET /api/copperpilot/chat/models``; the bundled list below mirrors it and is
 used until the first successful fetch, or when the deployment predates the
 endpoint, so the pickers always have something to show.
@@ -24,13 +25,19 @@ logger = logging.getLogger(__name__)
 
 # Lets users see and pick the Intelligence model in the TUI, headless CLI,
 # MCP, and ACP. While False no surface names a model or offers a choice, and
-# every Intelligence turn asks for DEFAULT_INTELLIGENCE_MODEL.
+# every Intelligence turn asks for AUTO_MODEL.
 ENABLE_MODEL_SELECTOR = False
 
 CHAT_MODELS_PATH = "/api/copperpilot/chat/models"
 CATALOG_TIMEOUT_SECONDS = 5.0
-DEFAULT_INTELLIGENCE_MODEL = "gemini-4-argon"
-BALANCED_MODEL = "gemini-3.8-flash"
+# Model id that lets the server pick the Intelligence model (its
+# ``default_intelligence_model``), so a server-side default change reaches
+# every client without a release.
+AUTO_MODEL = "auto"
+AUTO_LABEL = "Auto"
+# Bundled mirror of the server defaults, used until the catalog loads.
+DEFAULT_INTELLIGENCE_MODEL = "gemini-4-carbon"
+BALANCED_MODEL = "gemini-4-carbon"
 MODEL_FALLBACK_EVENT_KIND = "model_fallback"
 MODEL_FALLBACK_GENERIC_NOTICE = (
     "The Intelligence model is unavailable right now. Switched this chat to a backup model."
@@ -84,6 +91,7 @@ DEFAULT_CONTEXT_POLICY = ContextPolicy()
 
 # Picker order mirrors the desktop client: Gemini first, then Anthropic, then OpenAI.
 BUNDLED_MODELS: tuple[ChatModel, ...] = (
+    ChatModel("gemini-4-carbon", "Google Gemini 4 Carbon", "Gemini 4 Carbon", "Google", 2.0, 10.0),
     ChatModel("gemini-4-argon", "Google Gemini 4 Argon", "Gemini 4 Argon", "Google", 2.0, 10.0),
     ChatModel(
         "gemini-3.8-flash", "Google Gemini 3.8 Flash", "Gemini 3.8 Flash", "Google", 1.5, 7.5
@@ -105,22 +113,59 @@ class ChatModelCatalog:
     from_server: bool = False
     balanced_context_window: int | None = None
     context_policy: ContextPolicy = DEFAULT_CONTEXT_POLICY
+    auto_label: str = AUTO_LABEL
     _by_id: dict[str, ChatModel] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_by_id", {model.id: model for model in self.models})
 
     @property
+    def auto_model(self) -> ChatModel:
+        """Picker entry for ``"auto"``, labelled with the model it runs on today."""
+        target = self._by_id.get(self.default_intelligence_model)
+        if target is None:
+            return ChatModel(AUTO_MODEL, self.auto_label, self.auto_label, "")
+        return ChatModel(
+            id=AUTO_MODEL,
+            label=f"{self.auto_label} ({target.short_label})",
+            short_label=self.auto_label,
+            vendor="",
+            input_usd_per_mtok=target.input_usd_per_mtok,
+            output_usd_per_mtok=target.output_usd_per_mtok,
+            context_window=target.context_window,
+            max_output_tokens=target.max_output_tokens,
+        )
+
+    @property
+    def picker_models(self) -> tuple[ChatModel, ...]:
+        """What a model picker offers: Auto first (the default), then the catalog."""
+        return (self.auto_model, *self.models)
+
+    @property
     def ids(self) -> tuple[str, ...]:
+        """Catalog model ids (``auto`` excluded)."""
         return tuple(model.id for model in self.models)
 
+    @property
+    def picker_ids(self) -> tuple[str, ...]:
+        """Every id a user may choose, ``auto`` first."""
+        return tuple(model.id for model in self.picker_models)
+
     def get(self, model_id: Any) -> ChatModel | None:
-        """Catalog entry for an id, or None when unknown."""
-        return self._by_id.get(normalize_model_id(model_id))
+        """Picker entry for an id (``auto`` included), or None when unknown."""
+        normalized = normalize_model_id(model_id)
+        if normalized == AUTO_MODEL:
+            return self.auto_model
+        return self._by_id.get(normalized)
+
+    def selection(self, model_id: Any) -> str:
+        """Picker id for a stored choice: a catalog id, else ``auto``."""
+        model = self._by_id.get(normalize_model_id(model_id))
+        return model.id if model is not None else AUTO_MODEL
 
     def normalize(self, model_id: Any) -> str:
-        """Known id as-is; unknown or missing ids resolve to the Intelligence default."""
-        model = self.get(model_id)
+        """Catalog id as-is; ``auto``, unknown or missing ids resolve to the default."""
+        model = self._by_id.get(normalize_model_id(model_id))
         return model.id if model is not None else self.default_intelligence_model
 
     def effective_model(self, effort: Any, model_id: Any) -> str:
@@ -154,13 +199,16 @@ class ChatModelCatalog:
 
     def describe(self, model: ChatModel) -> str:
         """One-line picker description: vendor, list price, and routing role."""
+        if model.id == AUTO_MODEL:
+            return (
+                f"CopperPilot picks the model (now {self.label(self.default_intelligence_model)})"
+                " · Intelligence default"
+            )
         parts = [model.vendor] if model.vendor else []
         if model.input_usd_per_mtok or model.output_usd_per_mtok:
             parts.append(
                 f"${model.input_usd_per_mtok:g} in / ${model.output_usd_per_mtok:g} out per Mtok"
             )
-        if model.id == self.default_intelligence_model:
-            parts.append("Intelligence default")
         if model.id == self.balanced_model:
             parts.append("Balanced model")
         return " · ".join(parts)
@@ -184,14 +232,15 @@ def model_selector_enabled() -> bool:
 def request_model(effort: Any, model_id: Any) -> str | None:
     """Model id to send in ``chat_start``; Balanced never sends one.
 
-    While the selector is off every Intelligence turn asks for the default
-    model, including threads saved with another one.
+    While the selector is off every Intelligence turn sends ``auto`` so the
+    server picks the model, including threads saved with another one. With
+    the selector on, a thread with no choice (or ``auto``) sends ``auto`` too.
     """
     if normalize_effort(effort) is not CopperEffort.INTELLIGENCE:
         return None
     if not model_selector_enabled():
-        return DEFAULT_INTELLIGENCE_MODEL
-    return normalize_model_id(model_id) or None
+        return AUTO_MODEL
+    return normalize_model_id(model_id) or AUTO_MODEL
 
 
 def turn_model(catalog: ChatModelCatalog, effort: Any, model_id: Any) -> str:
@@ -242,6 +291,8 @@ def catalog_from_payload(payload: Any) -> ChatModelCatalog | None:
         flagged = [model.id for model in models if _is_default(raw_models, model.id)]
         default = flagged[0] if flagged else models[0].id
     balanced = normalize_model_id(payload.get("balanced_model")) or BALANCED_MODEL
+    auto = payload.get("auto_model")
+    auto_label = str(auto.get("label") or "").strip() if isinstance(auto, dict) else ""
     return ChatModelCatalog(
         models=tuple(models),
         default_intelligence_model=default,
@@ -249,6 +300,7 @@ def catalog_from_payload(payload: Any) -> ChatModelCatalog | None:
         from_server=True,
         balanced_context_window=_tokens(payload.get("balanced_context_window")),
         context_policy=context_policy_from_payload(payload.get("context_policy")),
+        auto_label=auto_label or AUTO_LABEL,
     )
 
 

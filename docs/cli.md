@@ -275,20 +275,23 @@ nested chats or execute through the local tool broker.
 
 > **Model selection is currently off.** `ENABLE_MODEL_SELECTOR` in
 > `src/copper_pilot_cli/copper_models.py` is `False`: every Intelligence turn
-> runs on Gemini 4 Argon, no surface names a model, and `--model`, `/model`,
+> sends the model `auto` (the server picks; Gemini 4 Carbon today), no surface names a model, and `--model`, `/model`,
 > the MCP `models` tool and `model` argument, and the ACP `model` config option
 > are not offered. A fallback notice reads "Switched this chat to a backup
 > model." The rest of this section describes the behaviour when it is `True`.
 
-Balanced always runs on the server's Balanced model (Google Gemini 3.8 Flash);
-there is no model choice on a free account. Intelligence runs on one model
-from the catalog, Gemini 4 Argon by default (the server's catalog order and
-default win when it is reachable):
+Balanced always runs on the server's Balanced model (Google Gemini 4 Carbon);
+there is no model choice on a free account. Intelligence runs on `auto` by
+default, which lets the server pick (Gemini 4 Carbon today), or on one model
+from the catalog (the server's catalog order and default win when it is
+reachable):
 
 | Id | Model |
 |----|-------|
-| `gemini-4-argon` | Google Gemini 4 Argon (Intelligence default) |
-| `gemini-3.8-flash` | Google Gemini 3.8 Flash (Balanced model) |
+| `auto` | Auto: the server's Intelligence default (Intelligence default) |
+| `gemini-4-carbon` | Google Gemini 4 Carbon (Balanced model) |
+| `gemini-4-argon` | Google Gemini 4 Argon |
+| `gemini-3.8-flash` | Google Gemini 3.8 Flash |
 | `claude-opus-5-5` | Claude Opus 5.5 |
 | `claude-sonnet-5-5` | Claude Sonnet 5.5 |
 | `gpt-6-astra` | OpenAI GPT-6 Astra |

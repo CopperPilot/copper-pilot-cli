@@ -185,7 +185,8 @@ Further session updates:
 > Model selection is currently off (`ENABLE_MODEL_SELECTOR = False`): only the
 > `mode` and `effort` options and the `/effort` and `/usage` commands are
 > offered, a `model` config change is rejected as an unknown option, and
-> Intelligence runs on Gemini 4 Argon. The rest of this section, the `/model`
+> Intelligence sends the model `auto` so the server picks it (Gemini 4 Carbon
+> today). The rest of this section, the `/model`
 > command above, and the MCP `models` tool apply when it is on.
 
 `session/new` and `session/load` return three select options: `mode`
