@@ -1868,7 +1868,7 @@ async def test_provider_capacity_waits_show_a_countdown_not_an_error(tmp_path) -
 # ------------------------------------------------------------ context protocol
 
 CONTEXT_USAGE = {
-    "model": "gemini-3.8-flash",
+    "model": "gemini-4-carbon",
     "context_tokens": 470_000,
     "context_limit": 1_048_576,
     "auto_compact_at": 812_972,
