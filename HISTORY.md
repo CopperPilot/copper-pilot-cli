@@ -7,6 +7,97 @@ Changelog
 
 Fix
 ~~~
+- Keep the truncation marker inside the context message limit.
+  [AdityaNG]
+
+  _truncate_utf8 clipped a chat-history message to MAX_CONTEXT_MESSAGE_BYTES
+  and then appended "\n[truncated]", so every clipped message was 12 bytes
+  over the server's 64 KiB per-message limit. The server answered 413
+  chat_request_too_large and, because each later turn (and the fresh-
+  conversation fallback) resends the same history, the chat could never
+  continue.
+
+  Found in the 12 Nov design bench: an L1 Balanced build turn streamed more
+  than 64 KiB of ERC/DRC report text into its reply, and the next turn died
+  with "This conversation is too large to continue". The marker now fits
+  inside the limit, including when a multi-byte character straddles the cut.
+- Read server-internal files raw (purpose server_internal_text)
+  [AdityaNG]
+
+  The server's own reads of netlists and DRC/ERC reports went through the
+  Deep Agents read_file. Over its ~80k character budget that read put
+  '[Output was truncated due to size limits...]' above the '@@ lines' page
+  header; the server took the page for the whole file and parsed a cut
+  netlist (sync_schematic_to_pcb ExpectClosingBracket, query_design XML
+  ParseError, run_drc JSON errors in the Nov 6 design bench).
+
+  Servers now tag those reads server_internal_text; read them raw like the
+  workspace KiCad purposes, whole or header-first pages.
+
+Other
+~~~~~
+- Merge pull request #56 from
+  CopperPilot/feat/auto_intelligence_model_13_nov_2026. [Aditya]
+
+  Send model auto on Intelligence turns so the server picks the model
+- Test: context-usage fixture names the Balanced model (Gemini 4 Carbon)
+  [AdityaNG]
+- Send model "auto" on Intelligence turns so the server picks the model.
+  [AdityaNG]
+
+  While the model selector is off every Intelligence turn now asks for "auto"
+  instead of pinning gemini-4-argon, so a server-side default change (Gemini 4
+  Carbon today) reaches every CLI without a release. With the selector on, the
+  TUI /model picker, ACP model option and /model listing offer "Auto
+  (<model>)" first as the default. Bundled offline catalog adds Gemini 4
+  Carbon and mirrors the server defaults (Carbon for Balanced and Auto).
+- Merge pull request #55 from
+  CopperPilot/fix/context_truncation_marker_12_nov_2026. [Aditya]
+
+  Keep the truncation marker inside the 64 KiB context message limit
+- Merge pull request #52 from
+  CopperPilot/fix/headless_turn_resume_12_nov_2026. [Aditya]
+
+  Headless turns ride out long outages; per-streak resume budget; ACP unfinished-turn marker
+- Headless turns ride out long outages; failure streaks reset after a
+  long connection; ACP marks unfinished turns. [AdityaNG]
+- Merge pull request #50 from
+  CopperPilot/fix/dangerous_toggle_outside_workspace_11_nov_2026.
+  [Aditya]
+
+  YOLO and dangerous shell auto-allow cover outside-workspace commands
+- Merge remote-tracking branch 'origin/main' into
+  fix/dangerous_toggle_outside_workspace_11_nov_2026. [AdityaNG]
+- Merge pull request #51 from
+  CopperPilot/feat/raw_server_internal_reads_11_nov_2026. [Aditya]
+
+  Read server-internal files raw (purpose server_internal_text)
+- Test: write the new netlist fixtures as bytes so Windows keeps LF.
+  [AdityaNG]
+- Chore: update ty ignore comments for ty 0.0.101 (main CI has failed
+  since Nov 6) [AdityaNG]
+
+  unresolved-attribute was renamed missing-attribute, and the
+  invalid-assignment ignore in sessions.py is no longer needed.
+- Fix(tools): YOLO and dangerous shell auto-allow cover outside-
+  workspace commands. [AdityaNG]
+
+  Outside-the-workspace shell commands asked in every mode, even YOLO and
+  Auto with always_allow_dangerous_shell_commands on. They now count as
+  dangerous shell commands: YOLO, or Auto with the dangerous switch, runs
+  them without a prompt (headless and MCP included). Otherwise they still
+  ask per call, with no session-wide allow, and are refused without an
+  approver.
+
+  Tests that would now really run grep / or killall -9 python3 stay in the
+  asking settings.
+
+
+1.0.1 (2026-11-06)
+------------------
+
+Fix
+~~~
 - Name what earlier attempts saw in a turn's final error. [AdityaNG,
   Claude Opus 5.5]
 
@@ -71,6 +162,7 @@ Fix
 
 Other
 ~~~~~
+- Release: version 1.0.1 🚀 [AdityaNG]
 - Version inc. [AdityaNG]
 - Merge pull request #48 from
   CopperPilot/feat/harness_tools_over_scripts_4_nov_2026. [Aditya]
