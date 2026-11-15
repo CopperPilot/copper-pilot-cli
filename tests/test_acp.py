@@ -481,6 +481,21 @@ def test_tool_result_payload_variants() -> None:
     assert long_text.endswith("[truncated]") and len(long_text) < 5000
 
 
+def test_acp_raw_shortens_long_strings_for_the_client() -> None:
+    # a whole-file KiCad read is megabytes; the client gets the start and a count
+    board = "(kicad_pcb\n" + "x" * 3_000_000
+    raw = copper_acp.acp_raw(
+        {"result": board, "path": "hardware/b.kicad_pcb", "n": 3, "items": [board]}
+    )
+    assert raw["path"] == "hardware/b.kicad_pcb" and raw["n"] == 3
+    assert raw["result"].startswith("(kicad_pcb") and len(raw["result"]) < 2_200
+    assert "more characters not sent to the client" in raw["result"]
+    assert len(raw["items"][0]) < 2_200
+    assert copper_acp.acp_raw("short") == "short"
+    _text, _err, out = copper_acp._tool_result_payload({"result": board})
+    assert len(out["result"]) < 2_200
+
+
 def test_replay_updates_projects_history() -> None:
     messages = [
         HumanMessage(content="Review"),
