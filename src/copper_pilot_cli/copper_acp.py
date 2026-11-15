@@ -198,6 +198,11 @@ OPTION_SKIP = "skip"
 IMAGE_ONLY_QUERY = "Analyze the attached image."
 ATTACHMENT_DIR = Path(".copperpilot") / "attachments"
 _MAX_TOOL_OUTPUT_CHARS = 4_000
+# ACP clients store raw_input/raw_output verbatim (T3 Code keeps each twice). Whole-file
+# KiCad reads are 3-8 MB, and a few hundred of them made one client thread 3.7 GB and ran
+# its backend out of memory. Strings longer than this are shortened in what the client
+# sees; the tool and the server still get the full value.
+_MAX_ACP_RAW_STRING_CHARS = 2_000
 _IMAGE_SUFFIX = re.compile(r"^[a-z0-9]{1,10}$")
 _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _MODEL_COMMAND = re.compile(r"^/model(?:\s+(\S+))?\s*$", re.IGNORECASE)
@@ -508,6 +513,22 @@ def question_options(arguments: Any) -> tuple[str, list[str]] | None:
     return prompt or "Clarification", options
 
 
+def acp_raw(value: Any, limit: int = _MAX_ACP_RAW_STRING_CHARS) -> Any:
+    """A client-sized copy of a tool's raw input or output.
+
+    Long strings keep their start and say how much was cut.
+    """
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value
+        return f"{value[:limit]}\n[{len(value) - limit} more characters not sent to the client]"
+    if isinstance(value, dict):
+        return {k: acp_raw(v, limit) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [acp_raw(v, limit) for v in value]
+    return value
+
+
 def _tool_result_payload(result: Any) -> tuple[str, bool, Any]:
     """Return (text, is_error, raw_output) for a hosted tool result."""
     if isinstance(result, dict):
@@ -521,7 +542,7 @@ def _tool_result_payload(result: Any) -> tuple[str, bool, Any]:
     text = content if isinstance(content, str) else repr(content)
     if len(text) > _MAX_TOOL_OUTPUT_CHARS:
         text = text[:_MAX_TOOL_OUTPUT_CHARS] + "\n[truncated]"
-    return text, is_error, result
+    return text, is_error, acp_raw(result)
 
 
 def available_commands() -> list[AvailableCommand]:
@@ -1584,7 +1605,7 @@ class CopperAcpAgent:
                     kind=tool_kind(name),
                     status="in_progress",
                     locations=locations,
-                    raw_input=arguments,
+                    raw_input=acp_raw(arguments),
                 ),
             )
         elif kind == EventKind.TOOL_RESULT.value and isinstance(payload, dict):
@@ -1704,7 +1725,7 @@ class CopperAcpAgent:
                     status="pending",
                     content=content,
                     locations=tool_locations(request.arguments),
-                    raw_input=request.arguments,
+                    raw_input=acp_raw(request.arguments),
                 ),
                 options=options,
             )
@@ -1796,7 +1817,7 @@ class CopperAcpAgent:
                         title=prompt,
                         kind="other",
                         status="pending",
-                        raw_input=arguments,
+                        raw_input=acp_raw(arguments),
                     ),
                     options=[
                         *(
@@ -1913,7 +1934,7 @@ def replay_updates(messages: list[Any]) -> list[Any]:
                         kind=tool_kind(name),
                         status="completed",
                         locations=tool_locations(arguments),
-                        raw_input=arguments,
+                        raw_input=acp_raw(arguments),
                     )
                 )
         elif kind == "tool":
