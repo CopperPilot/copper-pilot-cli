@@ -41,6 +41,8 @@ from copper_pilot_cli.agents.catalog import CLAUDE_MODELS, AgentModel, effort_la
 from copper_pilot_cli.agents.claude_driver import CLAUDE_INSTALL_HINT, claude_status
 from copper_pilot_cli.agents.claude_driver import sdk_available as claude_sdk_available
 from copper_pilot_cli.agents.codex_driver import codex_status, list_codex_models
+from copper_pilot_cli.agents.runtime import set_plan_status
+from copper_pilot_cli.agents.session import PLAN_READY_KIND
 from copper_pilot_cli.chat_context import (
     COMPACT_CONFIRM_SECONDS,
     COMPACTION_EVENT,
@@ -293,6 +295,10 @@ class CopperPilotApp(App[None]):
         self.agent_selection = agent_selection or AgentSelection()
         # ``--provider`` wins over the provider stored in a resumed thread, once.
         self._provider_override = agent_selection is not None
+        # A Plan-mode plan from the user's agent awaiting accept/reject, and
+        # the plan an accepted build turn is building.
+        self._pending_plan: tuple[str, str] | None = None
+        self._building_plan: str | None = None
         self.runtime = runtime
         self.broker = broker
         self.workspace = workspace
@@ -1046,6 +1052,9 @@ class CopperPilotApp(App[None]):
                 await self._finalize_turn(TurnPhase.FAILED)
             else:
                 await self._finalize_turn(TurnPhase.COMPLETED)
+                if self._building_plan is not None:
+                    set_plan_status(self.workspace, self._building_plan, "done")
+                    self.notify("Plan built.", markup=False)
         except asyncio.CancelledError:
             self.notify("Turn cancelled.", severity="warning", markup=False)
             await self._finalize_turn(TurnPhase.CANCELLED)
@@ -1061,6 +1070,41 @@ class CopperPilotApp(App[None]):
             self.runtime.agent.runtime_context = None
             self._selected_skill = None
             self._turn_task = None
+            self._building_plan = None
+            if self._pending_plan is not None:
+                self.run_worker(self._offer_plan(), group="agent-plan", exclusive=True)
+
+    async def _offer_plan(self) -> None:
+        """Accept or reject the plan the user's agent wrote in Plan mode.
+
+        Accept starts an Agent-mode turn on the same agent carrying the plan
+        (the ``/build`` path); the plan file goes open → running → done.
+        """
+        pending, self._pending_plan = self._pending_plan, None
+        if pending is None:
+            return
+        relative, name = pending
+        choice = await self._wait_for_modal(
+            ChoiceScreen(
+                f"Plan ready: {name} ({relative})",
+                [("accept", "Accept and build it (Agent mode)"), ("reject", "Reject")],
+            )
+        )
+        if choice != "accept":
+            await self._mount(AssistantMessage(f"*Plan rejected: `{relative}`.*"))
+            return
+        try:
+            plan = parse_plan(self.workspace / relative, self.workspace)
+        except (OSError, ValueError) as exc:
+            await self._mount(ErrorMessage(str(exc)))
+            return
+        set_plan_status(self.workspace, relative, "running")
+        self.runtime.agent.plan_context = plan
+        self.runtime.agent.mode = CopperMode.AGENT
+        self.copper_mode = CopperMode.AGENT
+        self._update_status()
+        await self._submit(f"Build the attached plan: {plan.name}")
+        self._building_plan = relative
 
     async def _custom_event(self, event: dict[str, Any]) -> None:
         kind = str(event.get("type") or "")
@@ -1334,6 +1378,12 @@ class CopperPilotApp(App[None]):
                 tool.set_error(status.error or "Subagent failed.")
                 work_run.mark_failed()
             return
+        if data.get("kind") == PLAN_READY_KIND:
+            relative = str(data.get("file_path") or "")
+            await self._mount(AssistantMessage(f"*Plan saved: `{relative}`*"))
+            if self._turn_task is not None and relative:
+                self._pending_plan = (relative, str(data.get("name") or relative))
+            return
         if data.get("kind") == "plan_mode_switch":
             self.copper_mode = CopperMode.PLAN
             self.runtime.agent.mode = CopperMode.PLAN
@@ -1572,6 +1622,16 @@ class CopperPilotApp(App[None]):
         """``/compact [focus]``: summarize older messages; the transcript is unchanged."""
         if self._turn_task and not self._turn_task.done():
             self.notify("A turn is already running.", severity="warning", markup=False)
+            return
+        if self.agent_selection.is_byo:
+            # The user's own agent compacts its own context (no CopperPilot compaction).
+            sessions = getattr(self.runtime.agent, "agent_sessions", None)
+            if sessions is None:
+                return
+            self._update_status("Compacting the agent's context")
+            outcome = await sessions.compact(self.thread_id)
+            self._update_status()
+            await self._mount(AssistantMessage(f"*{outcome}*"))
             return
         if await self._unfinished_turn() is not None:
             await self._mount(
