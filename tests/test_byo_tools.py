@@ -150,6 +150,7 @@ async def test_cas_reads_return_sha_and_writes_honour_if_match(tmp_path: Path) -
     )
     assert "error" not in ok
     assert (workspace / "notes.txt").read_text() == "edited by the user\n"
+    assert ok["content_sha256"] == hashlib.sha256(b"edited by the user\n").hexdigest()
 
 
 async def test_cas_is_off_by_default(tmp_path: Path) -> None:
@@ -218,7 +219,8 @@ async def test_tool_session_handshake_call_and_bridge(tmp_path: Path) -> None:
         bridge = fake.bridge_results[0]
         assert bridge["conversation_id"] == "conv-1"
         assert "hello" in bridge["result"]["result"]
-        assert bridge["result"]["content_sha256"] == hashlib.sha256(b"hello\n").hexdigest()
+        assert bridge["content_sha256"] == hashlib.sha256(b"hello\n").hexdigest()
+        assert "content_sha256" not in bridge["result"]
         assert progress == ["50%"]
         usage = fake.of_type("agent_usage")[0]
         assert usage["provider"] == "claude" and usage["input_tokens"] == 10

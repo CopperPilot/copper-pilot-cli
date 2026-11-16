@@ -13,7 +13,8 @@ from websockets.asyncio.server import serve
 from copper_pilot_cli.copper_auth import DeviceCredential
 
 CANARY = f"CP-CANARY-{uuid.uuid4().hex}"
-GUIDE = f"Use copperpilot_subagent for edits. Read before you write. {CANARY}"
+# The server ends the guide with a per-session canary comment.
+GUIDE = f"Use copperpilot_subagent for edits. Read before you write.\n<!-- cp-session:{CANARY} -->"
 TOOLS = [
     {
         "name": "query_design",
@@ -66,6 +67,7 @@ class FakeToolsServer:
             json.dumps(
                 {
                     "type": "tool_session_ready",
+                    "protocol_version": 1,
                     "session_id": start["session_id"],
                     "tools": TOOLS,
                     "guide": {"title": "CopperPilot guide", "text": GUIDE},

@@ -436,6 +436,10 @@ class ToolSessionClient:
             if isinstance(frame.get("parent_call_id"), str)
             else None,
             if_match=frame.get("if_match") if isinstance(frame.get("if_match"), str) else None,
+            timeout_ms=frame.get("timeout_ms")
+            if isinstance(frame.get("timeout_ms"), int)
+            else None,
+            agent_id=frame.get("agent_id") if isinstance(frame.get("agent_id"), str) else None,
         )
         try:
             result = await self.executor(request)
@@ -443,7 +447,11 @@ class ToolSessionClient:
             raise
         except Exception as exc:  # noqa: BLE001 - reported to the server per tool
             result = tool_error_result(exc)
+        # cas_writes_v1: the hash of the whole file travels next to ``result``.
+        digest = result.pop("content_sha256", None) if isinstance(result, dict) else None
         reply = tool_result_frame(self.conversation_id, request.tool_call_id, result)
+        if isinstance(digest, str):
+            reply["content_sha256"] = digest
         try:
             await self._send(reply)
         except (ConnectionClosed, ToolSessionError):
@@ -483,7 +491,7 @@ def _frame_error(frame: dict[str, Any]) -> ToolSessionError:
     message = frame.get("public_message") or frame.get("message") or "Tool session failed."
     status = frame.get("status") if isinstance(frame.get("status"), int) else None
     code = str(frame["code"]) if frame.get("code") is not None else None
-    retryable = frame.get("retryable") is True or code == "server_restarting"
+    retryable = frame.get("retryable") is True or code in {"server_restarting", "socket_rotation"}
     return ToolSessionError(
         sanitize_status(str(message)),
         code=code,

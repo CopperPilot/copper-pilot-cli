@@ -659,10 +659,11 @@ class LocalToolBroker:
         result = await self._dispatch(request, canonical_name, arguments, external)
         if (
             self.cas_writes
-            and canonical_name in _CAS_READ_TOOLS
+            and canonical_name in _CAS_READ_TOOLS | _CAS_WRITE_TOOLS
             and isinstance(result, dict)
             and not result.get("error")
         ):
+            # Reads: the bytes read; writes: the bytes written (the next if_match).
             digest = file_sha256(self._disk_path(arguments["file_path"], external))
             if digest is not None:
                 result = {**result, "content_sha256": digest}
