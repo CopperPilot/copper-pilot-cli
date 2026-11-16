@@ -380,6 +380,10 @@ class ToolRequest(BaseModel):
     # "main" or a subagent id (Intelligence subagents); None from older servers.
     agent_id: str | None = None
     agent_title: str | None = None
+    # Tool session socket (bring your own agent): the hosted tool call this
+    # bridge request serves, and the sha256 a CAS write must still match.
+    parent_call_id: str | None = None
+    if_match: str | None = None
 
 
 class ChatResponse(BaseModel):

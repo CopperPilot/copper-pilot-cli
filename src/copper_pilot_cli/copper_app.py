@@ -30,6 +30,17 @@ from textual.widgets.option_list import Option
 from copper_pilot_cli import copper_theme
 from copper_pilot_cli import textual_patches as _textual_patches  # noqa: F401
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.agents import (
+    PROVIDER_HELP,
+    PROVIDER_LABELS,
+    AgentSelection,
+    Provider,
+    selection_from_state,
+)
+from copper_pilot_cli.agents.catalog import CLAUDE_MODELS, AgentModel, effort_label
+from copper_pilot_cli.agents.claude_driver import CLAUDE_INSTALL_HINT, claude_status
+from copper_pilot_cli.agents.claude_driver import sdk_available as claude_sdk_available
+from copper_pilot_cli.agents.codex_driver import codex_status, list_codex_models
 from copper_pilot_cli.chat_context import (
     COMPACT_CONFIRM_SECONDS,
     COMPACTION_EVENT,
@@ -97,9 +108,11 @@ from copper_pilot_cli.copper_preferences import (
     acknowledge_auto_notice,
     acknowledge_yolo,
     auto_notice_acknowledged,
+    save_agent_selection,
     save_approval_mode,
     save_shell_auto_allow_settings,
     save_theme,
+    saved_agent_options,
     saved_theme,
     shell_auto_allow_settings,
     yolo_acknowledged,
@@ -273,8 +286,13 @@ class CopperPilotApp(App[None]):
         model: str | None = None,
         catalog: ChatModelCatalog | None = None,
         initial_message: str | None = None,
+        agent_selection: AgentSelection | None = None,
     ) -> None:
         super().__init__()
+        # Who runs this chat's agent (``/provider``); new chats: CopperPilot.
+        self.agent_selection = agent_selection or AgentSelection()
+        # ``--provider`` wins over the provider stored in a resumed thread, once.
+        self._provider_override = agent_selection is not None
         self.runtime = runtime
         self.broker = broker
         self.workspace = workspace
@@ -497,6 +515,12 @@ class CopperPilotApp(App[None]):
             self.copper_mode = CopperMode.AGENT
         self.copper_effort = normalize_effort(values.get("copper_effort", CopperEffort.BALANCED))
         self.copper_model = normalize_model_id(values.get("copper_model")) or None
+        if self._provider_override:
+            self._provider_override = False
+        else:
+            self.agent_selection = selection_from_state(
+                values.get("copper_provider"), values.get("copper_agent")
+            )
         self.runtime.agent.mode = self.copper_mode
         self.runtime.agent.effort = self.copper_effort
         self.runtime.agent.model = self.copper_model
@@ -640,7 +664,11 @@ class CopperPilotApp(App[None]):
     def _update_status(self, detail: str = "") -> None:
         bar = self.query_one(StatusBar)
         bar.set_approval_mode(self.broker.mode.value)
-        bar.set_session(mode=self.copper_mode.value, effort=self.copper_effort.value)
+        bar.set_session(
+            mode=self.copper_mode.value,
+            effort=self.copper_effort.value,
+            agent=self.agent_selection.label() if self.agent_selection.is_byo else None,
+        )
         usage = self._context_usage or {}
         tokens = usage.get("context_tokens")
         limit = usage.get("context_limit") or self.catalog.context_window(
@@ -703,6 +731,138 @@ class CopperPilotApp(App[None]):
                 markup=False,
             )
         self._update_status()
+
+    async def _choose_provider(self, argument: str = "") -> None:
+        """``/provider [copperpilot|claude|codex]``: who runs this chat's agent.
+
+        Claude Agent and Codex are the user's own installed agents with their
+        own login; CopperPilot never handles their credentials or bills their
+        tokens. Switching mid-chat hands the chat over with a capped summary.
+        """
+        if self._turn_task and not self._turn_task.done():
+            self.notify("Wait for the turn to finish before switching.", markup=False)
+            return
+        if argument and argument not in {item.value for item in Provider}:
+            await self._mount(ErrorMessage("Usage: /provider [copperpilot|claude|codex]"))
+            return
+        self._update_status("Checking your agents")
+        claude, codex = await asyncio.gather(claude_status(), codex_status())
+        self._update_status()
+        choice = argument or await self._wait_for_modal(
+            ChoiceScreen(
+                f"Who runs the agent? (now: {self.agent_selection.label()})",
+                [
+                    (Provider.COPPERPILOT.value, "CopperPilot — hosted, Balanced or Intelligence"),
+                    (Provider.CLAUDE.value, f"Claude Agent — {claude.label}"),
+                    (Provider.CODEX.value, f"Codex — {codex.label}"),
+                ],
+            )
+        )
+        if not choice:
+            return
+        provider = Provider(choice)
+        if provider is Provider.COPPERPILOT:
+            effort = await self._wait_for_modal(
+                ChoiceScreen(
+                    "CopperPilot effort",
+                    [(item.value, item.value.title()) for item in CopperEffort],
+                )
+            )
+            if not effort:
+                return
+            self.copper_effort = CopperEffort(effort)
+            self.runtime.agent.effort = self.copper_effort
+            self.agent_selection = AgentSelection()
+            self._update_status()
+            self.notify(f"CopperPilot · {self.copper_effort.value.title()}", markup=False)
+            return
+        status = claude if provider is Provider.CLAUDE else codex
+        if provider is Provider.CLAUDE and not claude_sdk_available():
+            await self._mount(ErrorMessage(CLAUDE_INSTALL_HINT))
+            return
+        if not status.installed:
+            await self._mount(ErrorMessage(f"{PROVIDER_LABELS[provider]} is {status.label}."))
+            return
+        if status.logged_in is False:
+            await self._mount(
+                ErrorMessage(f"{PROVIDER_LABELS[provider]} is {status.label}, then /provider.")
+            )
+            return
+        selection = await self._choose_agent_options(provider)
+        if selection is None:
+            return
+        self.agent_selection = selection
+        save_agent_selection(provider.value, selection.options())
+        self._update_status()
+        await self._mount(
+            AssistantMessage(
+                f"*This chat now runs on {selection.label()} ({PROVIDER_HELP[provider]}). "
+                "CopperPilot adds its design tools and `copperpilot_subagent` for edits. "
+                "Your agent's tokens are your own and are never billed by CopperPilot; "
+                "CopperPilot tool use is billed as usual.*"
+            )
+        )
+
+    async def _choose_agent_options(self, provider: Provider) -> AgentSelection | None:
+        stored = saved_agent_options(provider.value)
+        if provider is Provider.CLAUDE:
+            models = list(CLAUDE_MODELS)
+        else:
+            self._update_status("Asking Codex for its models")
+            models = await list_codex_models()
+            self._update_status()
+        model: AgentModel | None = None
+        if models:
+            current = stored.get("model")
+            picked = await self._wait_for_modal(
+                ChoiceScreen(
+                    f"{PROVIDER_LABELS[provider]} model",
+                    [
+                        (
+                            item.id,
+                            f"{item.label}"
+                            + (" (legacy)" if item.legacy else "")
+                            + (" (default)" if item.is_default else "")
+                            + (" (last used)" if item.id == current else ""),
+                        )
+                        for item in sorted(models, key=lambda entry: entry.legacy)
+                    ],
+                )
+            )
+            if not picked:
+                return None
+            model = next((item for item in models if item.id == picked), None)
+        effort: str | None = None
+        if model is not None and model.efforts:
+            effort = await self._wait_for_modal(
+                ChoiceScreen(
+                    "Reasoning effort",
+                    [
+                        (
+                            value,
+                            effort_label(value)
+                            + (" (default)" if value == model.default_effort else ""),
+                        )
+                        for value in model.efforts
+                    ],
+                )
+            )
+            if not effort:
+                return None
+        fast = False
+        if model is not None and model.fast_mode:
+            fast = (
+                await self._wait_for_modal(
+                    ChoiceScreen("Fast mode", [("off", "Off (default)"), ("on", "On")])
+                )
+                == "on"
+            )
+        return AgentSelection(
+            provider=provider,
+            model=model.id if model is not None else None,
+            effort=effort,
+            fast_mode=fast,
+        )
 
     async def _start_loading(self) -> None:
         await self._stop_loading()
@@ -869,6 +1029,8 @@ class CopperPilotApp(App[None]):
                     "copper_mode": self.copper_mode.value,
                     "copper_effort": self.copper_effort.value,
                     "copper_model": self.copper_model or "",
+                    "copper_provider": self.agent_selection.provider.value,
+                    "copper_agent": self.agent_selection.options(),
                 }
             )
             async for item in self.runtime.astream(values, self._config()):
@@ -1224,6 +1386,7 @@ class CopperPilotApp(App[None]):
                             f"- Workspace: `{self.workspace}`",
                             f"- Thread: `{self.thread_id}`",
                             f"- CopperPilot mode: `{self.copper_mode.value}`",
+                            f"- Agent: `{self.agent_selection.label()}`",
                             f"- Effort: `{self.copper_effort.value}`",
                             *(
                                 [f"- Model: `{self._effective_model()}`"]
@@ -1256,6 +1419,7 @@ class CopperPilotApp(App[None]):
                 self._compaction = None
                 self.copper_effort = CopperEffort.BALANCED
                 self.copper_model = None
+                self.agent_selection = AgentSelection()
                 self.broker.set_workspace(workspace)
                 self.hooks = HookRunner(workspace, self.broker)
                 self.runtime.agent.workspace = workspace
@@ -1293,6 +1457,8 @@ class CopperPilotApp(App[None]):
                 self.runtime.agent.effort = self.copper_effort
                 self.query_one(StatusBar).flash("effort")
                 self._update_status()
+        elif command == "/provider":
+            await self._choose_provider(argument.strip().lower())
         elif command == "/model" and model_selector_enabled():
             await self._choose_model(argument.strip())
         elif command == "/build":

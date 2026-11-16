@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.prompt import Confirm
 
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.agents import AgentSelection, Provider
 from copper_pilot_cli.chat_context import (
     COMPACTION_EVENT,
     CONTEXT_COMPACTED_KIND,
@@ -49,7 +50,12 @@ from copper_pilot_cli.copper_models import (
     model_selector_enabled,
     normalize_model_id,
 )
-from copper_pilot_cli.copper_preferences import saved_approval_mode, shell_auto_allow_settings
+from copper_pilot_cli.copper_preferences import (
+    save_agent_selection,
+    saved_agent_options,
+    saved_approval_mode,
+    shell_auto_allow_settings,
+)
 from copper_pilot_cli.copper_protocol import PROVIDER_BUSY_CODE, CopperEffort, CopperMode, EventKind
 from copper_pilot_cli.copper_status_events import (
     SubagentStatus,
@@ -163,6 +169,32 @@ def parser() -> argparse.ArgumentParser:
             ),
         )
     result.add_argument(
+        "--provider",
+        choices=[item.value for item in Provider],
+        default=None,
+        help=(
+            "Who runs the agent: copperpilot (default), claude (your installed Claude Code, "
+            'needs pip install "copper-pilot-cli[claude]") or codex (your installed Codex)'
+        ),
+    )
+    result.add_argument(
+        "--agent-model",
+        default=None,
+        metavar="MODEL",
+        help="Model of the claude/codex agent (default: the provider's default)",
+    )
+    result.add_argument(
+        "--agent-effort",
+        default=None,
+        metavar="LEVEL",
+        help="Reasoning effort of the claude/codex agent (low, medium, high, xhigh, max)",
+    )
+    result.add_argument(
+        "--fast-mode",
+        action="store_true",
+        help="Claude Fast mode, for models that support it",
+    )
+    result.add_argument(
         "-y",
         "--auto-approve",
         action="store_true",
@@ -202,7 +234,41 @@ def command_parser(command: str) -> argparse.ArgumentParser:
         epilog=epilogs.get(command),
     )
     result.set_defaults(workspace=".", message=None, command=command)
-    if command in {"mcp", "acp"}:
+    if command == "mcp":
+        result.add_argument(
+            "--tools-session",
+            action="store_true",
+            help=(
+                "Serve CopperPilot's tools (read-only design tools plus copperpilot_subagent) "
+                "for your own agent instead of the delegating conductor"
+            ),
+        )
+        result.add_argument(
+            "--workspace",
+            dest="workspace",
+            default=".",
+            help="Workspace directory for --tools-session (default: current directory)",
+        )
+        result.add_argument(
+            "--conversation-id",
+            default=None,
+            help="Conversation id for --tools-session (default: a new one)",
+        )
+        result.add_argument(
+            "--approval",
+            choices=["auto", "yolo"],
+            default="auto",
+            help="Approval for local writes and shell in --tools-session (default: auto)",
+        )
+        result.add_argument(
+            "--provider",
+            default="",
+            help="The agent using the tools, for usage analytics (claude, codex, ...)",
+        )
+        result.add_argument("--model", default="", help=argparse.SUPPRESS)
+        result.add_argument("--relay", default=None, help=argparse.SUPPRESS)
+        return result
+    if command == "acp":
         return result
     if command == "update":
         result.add_argument(
@@ -483,6 +549,25 @@ def resolve_effort_and_model(args: argparse.Namespace) -> tuple[CopperEffort | N
     return CopperEffort.INTELLIGENCE, model
 
 
+def resolve_agent_selection(args: argparse.Namespace) -> AgentSelection | None:
+    """``--provider`` and its options; None keeps the thread's stored provider."""
+    raw = getattr(args, "provider", None)
+    if raw is None:
+        if getattr(args, "agent_model", None) or getattr(args, "agent_effort", None):
+            raise ValueError("--agent-model and --agent-effort need --provider claude|codex.")
+        return None
+    selection = AgentSelection(provider=Provider(raw))
+    if not selection.is_byo:
+        return selection
+    stored = saved_agent_options(selection.provider.value)
+    options = {
+        "model": args.agent_model or stored.get("model"),
+        "effort": (args.agent_effort or stored.get("effort") or None),
+        "fast_mode": bool(args.fast_mode or stored.get("fast_mode")),
+    }
+    return selection.with_options(options)
+
+
 def json_event(data: dict[str, Any]) -> dict[str, Any]:
     """One headless ``--json`` line.
 
@@ -557,6 +642,10 @@ async def _headless(
             values["copper_effort"] = effort.value
         if model is not None:
             values["copper_model"] = model
+        selection = resolve_agent_selection(args)
+        if selection is not None:
+            values["copper_provider"] = selection.provider.value
+            values["copper_agent"] = selection.options()
     async for item in runtime.astream(values, config):
         _namespace, stream_mode, data = item
         if stream_mode != "custom" or not isinstance(data, dict):
@@ -691,6 +780,9 @@ async def async_main(args: argparse.Namespace) -> int:
         always_allow_dangerous_shell_commands=dangerous_shell,
     )
     thread_id = await _resolve_thread(args.resume, workspace)
+    selection = resolve_agent_selection(args)
+    if selection is not None and selection.is_byo:
+        save_agent_selection(selection.provider.value, selection.options())
     chosen_effort, model = resolve_effort_and_model(args)
     effort = chosen_effort or CopperEffort.BALANCED
     agent = CopperPilotAgent(
@@ -732,6 +824,7 @@ async def async_main(args: argparse.Namespace) -> int:
             model=model,
             catalog=await load_chat_model_catalog(credential if model_selector_enabled() else None),
             initial_message=args.message,
+            agent_selection=selection,
         )
         await app.run_async()
     return 0
@@ -777,6 +870,13 @@ def cli_main() -> None:
             raise SystemExit(130) from None
         return
     if args.command == "mcp":
+        if getattr(args, "tools_session", False):
+            from copper_pilot_cli.agents.cli import run_tools_session
+
+            try:
+                raise SystemExit(run_tools_session(args))
+            except KeyboardInterrupt:
+                raise SystemExit(130) from None
         from copper_pilot_cli.copper_mcp import run_mcp
 
         try:

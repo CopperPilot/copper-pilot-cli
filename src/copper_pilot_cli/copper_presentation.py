@@ -367,6 +367,8 @@ class StatusBar(Static):
         self.approval_mode = approval_mode or "manual"
         self.session_mode = mode or "agent"
         self.session_effort = effort or "balanced"
+        # "Claude Agent · claude-sonnet-5-5 · low" while the user's own agent runs the chat.
+        self.session_agent: str | None = None
         self._flash: str | None = None
         self._flash_until = 0.0
         self._flash_timer = None
@@ -387,9 +389,10 @@ class StatusBar(Static):
         """Approval is changed with ``/approval``, not this line."""
         self.approval_mode = mode or "manual"
 
-    def set_session(self, *, mode: str, effort: str) -> None:
+    def set_session(self, *, mode: str, effort: str, agent: str | None = None) -> None:
         self.session_mode = mode or "agent"
         self.session_effort = effort or "balanced"
+        self.session_agent = agent
         self._redraw()
 
     def set_context(self, text: str | None, level: str = "normal") -> None:
@@ -431,6 +434,7 @@ class StatusBar(Static):
                 content_width,
                 chat_mode=self.session_mode,
                 effort=self.session_effort,
+                agent=self.session_agent,
                 flash=flash,
                 mode=mode,
                 ascii=ascii_mode(),

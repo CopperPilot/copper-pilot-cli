@@ -40,6 +40,7 @@ SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/help", "List commands"),
     ("/hooks", "Show hook status"),
     ("/mode", "Switch agent, plan, or ask"),
+    ("/provider", "Run the chat on CopperPilot, Claude Agent or Codex"),
     ("/quit", "Quit CopperPilot"),
     ("/resume", "Resume the unfinished turn, or pick a thread"),
     ("/theme", "Switch theme: black, warm, light, high-contrast"),
@@ -425,8 +426,11 @@ def status_content(
     ascii: bool | None = None,
     context: str | None = None,
     context_level: str = "normal",
+    agent: str | None = None,
 ) -> Content:
     """One status line. Under 40 columns, only the two icons remain.
+
+    ``agent`` replaces the effort with the user's own agent (``/provider``).
 
     ``context`` is the context meter (``ctx 45% · 470K/1M``), shown before
     ``/help`` when it fits; ``context_level`` colours it (warn, high, critical).
@@ -448,6 +452,9 @@ def status_content(
     effort_hint = (
         EFFORT_COPY.get(effort, EFFORT_COPY["balanced"]) if flash == "effort" else "ctrl+e"
     )
+    if agent:
+        effort_name = agent
+        effort_hint = "/provider"
     mode_hint = soften(mode_hint, ascii=use_ascii)
     effort_hint = soften(effort_hint, ascii=use_ascii)
     segments: list[Segment] = [

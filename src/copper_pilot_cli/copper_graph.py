@@ -54,6 +54,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
+from copper_pilot_cli.agents import AgentSelection, Provider, selection_from_state
+from copper_pilot_cli.agents.errors import AgentError
+from copper_pilot_cli.agents.runtime import AgentSessions
 from copper_pilot_cli.chat_context import (
     COMPACTION_KEY,
     CONTEXT_COMPACTED_KIND,
@@ -248,6 +251,10 @@ class CopperState(TypedDict, total=False):
     copper_context_usage: dict[str, Any] | None
     # Facts of interrupted turns, which never reach ``messages``/``copper_events``.
     copper_interrupted_facts: dict[str, Any] | None
+    # Who runs the chat's agent (``agents.Provider``: copperpilot, claude,
+    # codex) and that provider's own model options (``AgentSelection.options``).
+    copper_provider: str
+    copper_agent: dict[str, Any] | None
 
 
 class CopperGraphRuntime:
@@ -311,6 +318,9 @@ class CopperGraphRuntime:
         return result
 
     async def acancel(self) -> None:
+        sessions = getattr(self.agent, "agent_sessions", None)
+        if sessions is not None:
+            await sessions.interrupt()
         await self.agent.acancel()
 
     async def unfinished_turn(self, config: dict[str, Any]) -> TurnJournal | None:
@@ -1617,6 +1627,9 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
             agent.model = str(state.get("copper_model") or "").strip().lower() or None
         agent.cancel_requested = False
         messages = list(state.get("messages") or [])
+        selection = selection_from_state(state.get("copper_provider"), state.get("copper_agent"))
+        if selection.is_byo:
+            return await _byo_turn(agent, state, writer, thread_id, selection, messages)
         requested = state.get("copper_resume")
         last = messages[-1] if messages else None
         journal: TurnJournal | None = None
@@ -1749,6 +1762,7 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
                 if manager is not None:
                     await manager.kill_all()
         result = run.result()
+        result["copper_provider"] = Provider.COPPERPILOT.value
         result["copper_events"] = events_update(state.get("copper_events"), result["copper_events"])
         result.update(_context_result(run, original, context_values, compacted))
         if has_facts(journal.carried):
@@ -1761,10 +1775,95 @@ async def create_copper_graph(agent: CopperPilotAgent) -> Any:
     graph.add_edge("copper_pilot", END)
     compiled = graph.compile(checkpointer=checkpointer)
     runtime = CopperGraphRuntime(compiled, checkpointer_context, agent)
+    sessions = getattr(agent, "agent_sessions", None)
+    owns_sessions = sessions is None
+    if owns_sessions:
+        sessions = AgentSessions(
+            credential=lambda: getattr(agent, "credential", None),
+            broker=lambda: agent.tool_broker,
+        )
+        agent.agent_sessions = sessions  # ty: ignore[missing-attribute]
     try:
         yield runtime
     finally:
         try:
+            if owns_sessions:
+                await sessions.aclose()
             await runtime.aclose()
         finally:
             open_marker.__exit__(None, None, None)
+
+
+async def _byo_turn(
+    agent: Any,
+    state: CopperState,
+    writer: Callable[[dict[str, Any]], None],
+    thread_id: str | None,
+    selection: AgentSelection,
+    messages: list[Any],
+) -> dict[str, Any]:
+    """One turn of the user's own agent (Claude, Codex) recorded like a hosted turn.
+
+    The agent keeps nothing on disk; this checkpoint is the transcript. The
+    guide and tool schemas never pass through here.
+    """
+    journal = TurnJournal(
+        query=_message_text(messages[-1]) if messages else "",
+        original_len=len(messages),
+        conversation_id=getattr(agent, "conversation_id", None),
+        thread_id=thread_id,
+        mode=agent.mode.value,
+        effort=agent.effort.value,
+        model=getattr(agent, "model", None),
+    )
+    run = _TurnRun(agent, writer, messages, journal=journal, store=None)
+    sessions = agent.agent_sessions
+    try:
+        async for event in sessions.stream_turn(
+            thread_id=thread_id or str(getattr(agent, "conversation_id", "") or uuid.uuid4()),
+            selection=selection,
+            workspace=Path(agent.workspace),
+            messages=messages,
+            mode=agent.mode,
+            turn_id=journal.turn_id,
+            plan=getattr(agent, "plan_context", None),
+        ):
+            data = (
+                event.data.model_dump(mode="json")
+                if hasattr(event.data, "model_dump")
+                else (event.data)
+            )
+            projected = {
+                "type": f"copper.{event.kind.value}",
+                "data": data,
+                "title": event.title,
+                "turn_id": journal.turn_id,
+            }
+            run.emit(projected)
+            usage_only = (
+                event.kind is EventKind.STATUS_EVENT
+                and isinstance(data, dict)
+                and data.get("kind") == CONTEXT_USAGE_KIND
+            )
+            # The agent's own context size is shown, not stored: CopperPilot's
+            # auto-compaction measures the chat by its own model's window.
+            if not usage_only and event.kind is not EventKind.FINAL:
+                run._track(event)
+    except AgentError as exc:
+        run.failure = ErrorInfo(type=exc.kind, message=str(exc), retryable=exc.retryable)
+        logger.info(
+            "Agent turn failed (provider=%s, class=%s, retryable=%s)",
+            selection.provider.value,
+            exc.kind,
+            exc.retryable,
+        )
+        run.emit({"type": "copper.error", "data": exc.as_event_data(), "title": None})
+    except asyncio.CancelledError:
+        run.cancelled = True
+        run.mark_interrupted()
+        raise
+    result = run.result()
+    result["copper_provider"] = selection.provider.value
+    result["copper_agent"] = selection.options()
+    result["copper_events"] = events_update(state.get("copper_events"), result["copper_events"])
+    return result
