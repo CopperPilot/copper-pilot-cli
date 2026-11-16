@@ -42,6 +42,23 @@ For sign-off, run `copper-pilot validate --json`, read
 `.copperpilot/validate/latest/next_actions.json`, fix with `--mode agent -y`
 citing the finding IDs, and re-run. See [validate.md](validate.md).
 
+## Option 1b: run the chat on your own agent
+
+The reverse direction: CopperPilot's TUI or headless CLI drives *your* Claude
+Code or Codex, which gets CopperPilot's tools.
+
+```console
+pip install "copper-pilot-cli[claude]"
+copper-pilot --provider claude     # or /provider in the TUI
+copper-pilot --provider codex
+```
+
+Your agent uses its own login and settings; CopperPilot never handles its
+credentials or bills its tokens. To give another MCP host the same tools
+without the CopperPilot UI, point it at `copper-pilot mcp --tools-session`
+(read-only design tools, `copperpilot_subagent` for edits, and the
+`copperpilot://guide` resource). See [cli.md](cli.md#bring-your-own-agent).
+
 ## Option 2: MCP conductor (`copper-pilot mcp`)
 
 The same process as the CLI, same stored credential. Stdio JSON-RPC; do not
