@@ -443,7 +443,7 @@ async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monk
 async def test_kicad_purpose_read_returns_whole_file_raw(tmp_path) -> None:
     body = "(kicad_sch\n" + "".join(f"\t(wire {i})\n" for i in range(500)) + ")\n"
     (tmp_path / "board.kicad_sch").write_bytes(body.encode())
-    broker = LocalToolBroker(tmp_path)
+    broker = LocalToolBroker(tmp_path, cas_writes=False)
     result = await broker.execute(
         tool("1", "read_file", file_path="board.kicad_sch", purpose="kicad_workspace_schematic")
     )
@@ -514,7 +514,7 @@ async def test_unmarked_large_read_puts_a_notice_above_the_header(tmp_path) -> N
 async def test_server_internal_read_returns_the_netlist_whole_and_raw(tmp_path) -> None:
     body = _big_netlist()
     (tmp_path / "review.net").write_bytes(body.encode())
-    broker = LocalToolBroker(tmp_path)
+    broker = LocalToolBroker(tmp_path, cas_writes=False)
     result = await broker.execute(
         tool("1", "read_file", file_path="review.net", purpose="server_internal_text")
     )
@@ -555,7 +555,7 @@ async def test_big_external_library_is_paged_not_lost(tmp_path, monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_internal_read_honours_offset_and_limit(tmp_path) -> None:
     (tmp_path / "a.kicad_sch").write_bytes(b"l1\nl2\nl3\nl4")
-    broker = LocalToolBroker(tmp_path)
+    broker = LocalToolBroker(tmp_path, cas_writes=False)
     result = await broker.execute(
         tool(
             "1",
@@ -604,7 +604,7 @@ async def test_external_kicad_library_reads_are_allowed(tmp_path) -> None:
     lib = tmp_path / "stock" / "Device.kicad_sym"
     lib.parent.mkdir()
     lib.write_bytes(("(kicad_symbol_lib\n" + "\t(symbol x)\n" * 300 + ")\n").encode())
-    broker = LocalToolBroker(workspace)
+    broker = LocalToolBroker(workspace, cas_writes=False)
     text = await broker.execute(
         tool("1", "read_file", file_path=str(lib), external=True, platform="linux")
     )
@@ -648,7 +648,7 @@ async def test_internal_reads_return_the_file_bytes_exactly(tmp_path) -> None:
     on every OS (the server parser handles both)."""
     body = b"(kicad_sch\r\n\t(version 20260306)\r\n)\r\n"
     (tmp_path / "crlf.kicad_sch").write_bytes(body)
-    broker = LocalToolBroker(tmp_path)
+    broker = LocalToolBroker(tmp_path, cas_writes=False)
     result = await broker.execute(
         tool("1", "read_file", file_path="crlf.kicad_sch", purpose="kicad_workspace_schematic")
     )

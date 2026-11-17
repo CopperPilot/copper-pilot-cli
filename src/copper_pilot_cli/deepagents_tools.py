@@ -353,7 +353,7 @@ class LocalToolBroker:
         always_allow_shell_commands: bool = True,
         always_allow_dangerous_shell_commands: bool = False,
         routine_kicad_writes: bool = False,
-        cas_writes: bool = False,
+        cas_writes: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
         # See ``routine_action``: KiCad design writes from a delegated subagent turn.

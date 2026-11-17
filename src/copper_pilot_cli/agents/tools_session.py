@@ -447,11 +447,8 @@ class ToolSessionClient:
             raise
         except Exception as exc:  # noqa: BLE001 - reported to the server per tool
             result = tool_error_result(exc)
-        # cas_writes_v1: the hash of the whole file travels next to ``result``.
-        digest = result.pop("content_sha256", None) if isinstance(result, dict) else None
+        # cas_writes_v1: tool_result_frame moves the file hash next to ``result``.
         reply = tool_result_frame(self.conversation_id, request.tool_call_id, result)
-        if isinstance(digest, str):
-            reply["content_sha256"] = digest
         try:
             await self._send(reply)
         except (ConnectionClosed, ToolSessionError):

@@ -153,9 +153,9 @@ async def test_cas_reads_return_sha_and_writes_honour_if_match(tmp_path: Path) -
     assert ok["content_sha256"] == hashlib.sha256(b"edited by the user\n").hexdigest()
 
 
-async def test_cas_is_off_by_default(tmp_path: Path) -> None:
+async def test_cas_can_be_turned_off(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
-    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO, cas_writes=False)
     read = await broker.execute(
         ToolRequest(
             tool_call_id="r1",
@@ -446,3 +446,11 @@ async def test_proxy_lists_server_tools_plus_subagent(tmp_path: Path) -> None:
     assert tools[0]["inputSchema"]["properties"]["query"]["type"] == "string"
     assert outcome.plain() == "result of run_erc"
     assert guide == GUIDE
+
+
+def test_chat_socket_advertises_cas_and_lifts_the_hash() -> None:
+    from copper_pilot_cli.copper_protocol import client_capabilities, tool_result_frame
+
+    assert "cas_writes_v1" in client_capabilities()
+    frame = tool_result_frame("c", "t", {"result": "x", "content_sha256": "ab"})
+    assert frame["content_sha256"] == "ab" and frame["result"] == {"result": "x"}

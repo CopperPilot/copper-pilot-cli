@@ -74,6 +74,9 @@ HEARTBEAT_PATH = "/api/heartbeat"
 COMPACT_PATH = "/api/copperpilot/analyze/compact"
 CONTEXT_COUNT_PATH = "/api/copperpilot/analyze/context/count"
 CHAT_HISTORY_SEARCH_CAPABILITY = "chat_history_search"
+# Reads return the file's sha256; writes carrying ``if_match`` are refused with
+# ``FILE_CHANGED`` when the file changed since (chat and tool sockets).
+CAS_WRITES_CAPABILITY = "cas_writes_v1"
 COMPACT_TIMEOUT_SECONDS = 300.0
 CONTEXT_COUNT_TIMEOUT_SECONDS = 15.0
 # Provider capacity (LLM rate limits). While the hosted model waits for
@@ -510,7 +513,7 @@ def client_capabilities(*, history_search: bool = False) -> list[str]:
     ``chat_history_search`` is advertised for checkpointed chats, which can
     answer ``search_chat_history`` from the local transcript.
     """
-    capabilities = []
+    capabilities = [CAS_WRITES_CAPABILITY]
     if parallel_tools_enabled():
         capabilities.append(PARALLEL_TOOL_REQUESTS_CAPABILITY)
     if turn_resume_enabled():
@@ -640,8 +643,16 @@ def tool_error_result(exc: BaseException) -> dict[str, Any]:
 
 
 def tool_result_frame(conversation_id: str, tool_call_id: str, result: Any) -> dict[str, Any]:
-    """Build one tool_result frame, replacing results over the frame limit."""
-    frame = {
+    """Build one tool_result frame, replacing results over the frame limit.
+
+    ``cas_writes_v1``: a ``content_sha256`` the broker put on a read or write
+    result (the whole file's hash) travels at the top of the frame.
+    """
+    digest = None
+    if isinstance(result, dict) and isinstance(result.get("content_sha256"), str):
+        digest = result["content_sha256"]
+        result = {key: value for key, value in result.items() if key != "content_sha256"}
+    frame: dict[str, Any] = {
         "type": "tool_result",
         "conversation_id": conversation_id,
         "tool_call_id": tool_call_id,
@@ -650,6 +661,8 @@ def tool_result_frame(conversation_id: str, tool_call_id: str, result: Any) -> d
     encoded = json.dumps(frame, separators=(",", ":")).encode()
     if len(encoded) > MAX_TOOL_RESULT_BYTES:
         frame["result"] = {"error": "Tool result exceeded the client frame limit."}
+    elif digest is not None:
+        frame["content_sha256"] = digest
     return frame
 
 
