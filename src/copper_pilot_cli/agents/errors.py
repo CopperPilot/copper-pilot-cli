@@ -122,16 +122,25 @@ def epoch_to_iso(value: Any) -> str | None:
     return datetime.fromtimestamp(seconds, UTC).isoformat().replace("+00:00", "Z")
 
 
-def usage_limit(provider: Provider, resets_at: str | None = None) -> AgentError:
+def usage_limit(
+    provider: Provider, resets_at: str | None = None, detail: str | None = None
+) -> AgentError:
     owner = "Claude plan" if provider is Provider.CLAUDE else "Codex plan"
+    said = f" ({_clip(detail)})" if detail else ""
     return AgentError(
         USAGE_LIMIT,
-        f"Your {owner}'s usage limit is reached.{reset_phrase(resets_at)} "
+        f"Your {owner}'s usage limit is reached{said}.{reset_phrase(resets_at)} "
         "CopperPilot does not meter or bill your agent; switch with /provider to keep working.",
         provider=provider,
         resets_at=resets_at,
         retryable=False,
+        detail=detail,
     )
+
+
+def _clip(text: str, limit: int = 200) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def overloaded(provider: Provider, status: int | None = None) -> AgentError:

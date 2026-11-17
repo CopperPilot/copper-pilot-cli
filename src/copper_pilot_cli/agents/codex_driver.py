@@ -815,11 +815,12 @@ class _Translator:
         error = error or {}
         message = str(error.get("message") or "Codex turn failed.")
         kind = _error_info_kind(error.get("codexErrorInfo"))
+        logger.info("Codex turn failed (class=%s): %s", kind, message[:300])
         if kind == "unauthorized":
             self.failure = agent_errors.auth_required(Provider.CODEX, message)
         elif kind in {"usageLimitExceeded", "rateLimitExceeded", "sessionBudgetExceeded"}:
             self.failure = agent_errors.usage_limit(
-                Provider.CODEX, self.session.usage_limit_reset()
+                Provider.CODEX, self.session.usage_limit_reset(), detail=message
             )
         elif kind == "serverOverloaded":
             self.failure = agent_errors.overloaded(Provider.CODEX)
