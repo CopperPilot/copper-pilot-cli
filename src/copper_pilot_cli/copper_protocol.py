@@ -61,9 +61,11 @@ IDLE_FRAME_TIMEOUT_ENV = "COPPER_PILOT_IDLE_TIMEOUT_SECONDS"
 # always reports a stalled turn before the client gives up on it.
 DEFAULT_IDLE_FRAME_TIMEOUT = 330.0
 # WebSocket keepalive (protocol v1 liveness): a ping every 15 s; no pong within
-# 20 s closes the socket and the turn is resumed.
+# 60 s closes the socket and the turn is resumed. The server answers pings on
+# its event loop, so a pod busy with one long tool call can miss a 20 s
+# window; dropping then only re-runs the same turn on the same busy pod.
 PING_INTERVAL_SECONDS = 15.0
-PING_TIMEOUT_SECONDS = 20.0
+PING_TIMEOUT_SECONDS = 60.0
 # Close code the client sends when the server goes quiet for the idle window.
 CLIENT_LIVENESS_CLOSE_CODE = 4000
 HEARTBEAT_PATH = "/api/heartbeat"
