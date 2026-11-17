@@ -131,7 +131,7 @@ async def test_socket_uses_protocol_keepalive(monkeypatch) -> None:
     calls = install(monkeypatch, socket)
     _ = [event async for event in client().stream(request(), lambda _r: None)]
     assert calls[0]["ping_interval"] == PING_INTERVAL_SECONDS == 15
-    assert calls[0]["ping_timeout"] == PING_TIMEOUT_SECONDS == 20
+    assert calls[0]["ping_timeout"] == PING_TIMEOUT_SECONDS == 60
 
 
 def test_idle_timeout_outlasts_the_server_quiet_timeout(monkeypatch) -> None:
