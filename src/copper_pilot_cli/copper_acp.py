@@ -279,6 +279,8 @@ class AcpSession:
     subagents: dict[str, SubagentStatus] = field(default_factory=dict)
     tool_paths: dict[str, str] = field(default_factory=dict)
     last_usage: dict[str, Any] | None = None
+    # CopperPilot tokens billed for this prompt (its hosted final usage reports, summed)
+    billed: dict[str, int] | None = None
     commands_sent: bool = False
     failure: Any = None
     # Automatic resumes ran out; the journal is kept for a later "continue".
@@ -596,6 +598,44 @@ def available_commands() -> list[AvailableCommand]:
 
 
 UNFINISHED_META_KEY = "copperpilot"
+
+
+def billed_usage(payload: Any) -> tuple[int, int] | None:
+    """The CopperPilot tokens one hosted usage report charged: ``(input, output)``, else ``None``.
+
+    The hosted final frame's ``tokens_input`` / ``tokens_output`` are already normalized
+    CopperPilot tokens (real model spend, cache-aware, divided by CopperPilot's fixed input and
+    output prices per million), and their sum is what the usage ledger settles for that turn.
+    Reports without both counts (detail-only frames) charge nothing.
+    """
+    if not isinstance(payload, dict):
+        return None
+    tin, tout = payload.get("tokens_input"), payload.get("tokens_output")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (tin, tout)):
+        return None
+    return tin, tout
+
+
+def with_billed_usage(meta: dict[str, Any] | None, session: Any) -> dict[str, Any] | None:
+    """Add this prompt's billed CopperPilot tokens to its response ``_meta.copperpilot.usage``.
+
+    Headless callers (rea-hardware) meter what a task cost from this: ``inputTokens`` and
+    ``outputTokens`` are CopperPilot tokens, the units the usage ledger charges, so a dollar cost
+    is model-independent.
+    """
+    billed = getattr(session, "billed", None)
+    if not billed:
+        return meta
+    out = dict(meta or {})
+    mark = dict(out.get(UNFINISHED_META_KEY) or {})
+    mark["usage"] = {
+        "unit": "copperpilot_tokens",
+        "inputTokens": billed["input"],
+        "outputTokens": billed["output"],
+        "reports": billed["reports"],
+    }
+    out[UNFINISHED_META_KEY] = mark
+    return out
 
 
 def unfinished_turn_meta(session: Any, error: str) -> dict[str, Any]:
@@ -1100,6 +1140,7 @@ class CopperAcpAgent:
         session.unfinished = False
         session.unfinished_info = None
         session.provider_busy = False
+        session.billed = None
         query = with_attachment_paths(message or IMAGE_ONLY_QUERY, attachments)
         session.turn = asyncio.create_task(
             self._run_turn(
@@ -1136,13 +1177,18 @@ class CopperAcpAgent:
                     )
                     return PromptResponse(
                         stop_reason="max_turn_requests",
-                        field_meta=unfinished_turn_meta(session, str(exc)),
+                        field_meta=with_billed_usage(
+                            unfinished_turn_meta(session, str(exc)), session
+                        ),
                     )
                 raise (limited or self._map_turn_failure(exc)) from exc
         finally:
             session.turn = None
             session.runtime = None
-        return PromptResponse(stop_reason="cancelled" if session.cancelled else "end_turn")
+        return PromptResponse(
+            stop_reason="cancelled" if session.cancelled else "end_turn",
+            field_meta=with_billed_usage(None, session),
+        )
 
     @staticmethod
     async def _usage_limit_failure(
@@ -1581,6 +1627,14 @@ class CopperAcpAgent:
                     session_id=session_id, update=update_agent_message_text(f"\n\n*{notice}*\n\n")
                 )
         elif kind == EventKind.USAGE.value and isinstance(payload, dict):
+            charged = billed_usage(payload)
+            if charged is not None:
+                b = session.billed or {"input": 0, "output": 0, "reports": 0}
+                session.billed = {
+                    "input": b["input"] + charged[0],
+                    "output": b["output"] + charged[1],
+                    "reports": b["reports"] + 1,
+                }
             # Once the server reports context usage, billing counts are not a meter.
             update = (
                 None

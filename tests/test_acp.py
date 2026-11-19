@@ -1621,6 +1621,62 @@ async def test_prompt_emits_usage_updates_once_per_distinct_payload(tmp_path, mo
     assert agent.sessions[session_id].last_usage == {"tokens_input": 30, "tokens_output": 9}
 
 
+async def test_prompt_response_reports_the_copperpilot_tokens_it_was_billed(
+    tmp_path, monkeypatch
+) -> None:
+    # every hosted final frame is one ledger charge: two equal reports are two charges,
+    # detail-only frames none, and the sum is reported even after context usage took the meter
+    runtime = FakeRuntime(
+        [
+            {"type": "copper.usage", "data": {"tokens_input": 10, "tokens_output": 2}},
+            {"type": "copper.usage", "data": {"tokens_input": 10, "tokens_output": 2}},
+            {
+                "type": "copper.usage",
+                "data": {"tokens_input": 30, "tokens_output": 9, "by_model": {}},
+            },
+            {"type": "copper.usage", "data": {"by_model": {"x": 1}}},
+            {"type": "copper.usage", "data": {"tokens_input": True, "tokens_output": 1}},
+        ]
+    )
+    agent, conn, _runtime, session_id = await _connected_agent(tmp_path, monkeypatch, runtime)
+    agent.sessions[session_id].context_usage = {"context_tokens": 5000, "context_limit": 200000}
+    resp = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="x")]
+    )
+    assert "usage_update" not in kinds(conn)  # the context meter is untouched
+    assert resp.stop_reason == "end_turn"
+    assert resp.field_meta == {
+        "copperpilot": {
+            "usage": {
+                "unit": "copperpilot_tokens",
+                "inputTokens": 50,
+                "outputTokens": 13,
+                "reports": 3,
+            }
+        }
+    }
+    # the next prompt starts from zero; a prompt that was billed nothing carries no usage
+    runtime.events = []
+    resp = await agent.prompt(
+        session_id=session_id, prompt=[TextContentBlock(type="text", text="y")]
+    )
+    assert not resp.field_meta
+
+
+def test_billed_usage_merges_with_the_unfinished_turn_marker() -> None:
+    from copper_pilot_cli.copper_acp import billed_usage, with_billed_usage
+
+    assert billed_usage({"tokens_input": 3, "tokens_output": 1}) == (3, 1)
+    assert billed_usage({"tokens_input": -1, "tokens_output": 1}) is None
+    session = type("S", (), {"billed": {"input": 3, "output": 1, "reports": 1}})()
+    meta = with_billed_usage(
+        {"copperpilot": {"unfinishedTurn": True, "resumeWith": "/resume"}}, session
+    )
+    assert (
+        meta["copperpilot"]["unfinishedTurn"] and meta["copperpilot"]["usage"]["inputTokens"] == 3
+    )
+
+
 async def test_prompt_turns_todo_list_events_into_plans(tmp_path, monkeypatch) -> None:
     runtime = FakeRuntime(
         [
