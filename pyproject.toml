@@ -45,6 +45,12 @@ dependencies = [
 acp = [
   "agent-client-protocol>=0.12,<1",
 ]
+# Claude Agent provider (`--provider claude`): the Claude Agent SDK (MIT). Its
+# wheel also bundles a Claude Code binary under Anthropic's own terms; the CLI
+# never runs it and always points the SDK at the user's installed `claude`.
+claude = [
+  "claude-agent-sdk>=0.2.182,<0.3",
+]
 # LCSC/EasyEDA -> KiCad symbol, footprint and 3D model importer the agent runs as a
 # command (`easyeda2kicad --full --lcsc_id=C2040`). Optional because it is
 # AGPL-3.0, which the license gate in CI does not allow in the default install.
@@ -53,6 +59,7 @@ easyeda = [
 ]
 dev = [
   "agent-client-protocol>=0.12,<1",
+  "claude-agent-sdk>=0.2.182,<0.3",
   "build>=1.4,<2",
   "gitchangelog==3.0.4",
   "pip-audit>=2.10,<3",

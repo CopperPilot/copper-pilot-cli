@@ -14,6 +14,7 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage
 from mcp.server.fastmcp import Context, FastMCP
 
+from copper_pilot_cli.agents.tool_proxy import changed_files
 from copper_pilot_cli.copper_auth import AuthenticationError, DeviceCredential, load_credential
 from copper_pilot_cli.copper_graph import RETRY_EVENT, create_copper_graph, headless_resume_policy
 from copper_pilot_cli.copper_models import (
@@ -192,12 +193,19 @@ async def collect_turn(
     effort: CopperEffort | None = CopperEffort.BALANCED,
     model: str | None = None,
     progress: ProgressFn | None = None,
+    broker: LocalToolBroker | None = None,
+    subagent: bool = False,
 ) -> dict[str, Any]:
     """Run one hosted turn and return a compact conductor payload.
 
     ``model`` is an Intelligence model id; passing one selects Intelligence,
     the same rule the desktop picker applies. ``effort=None`` and
     ``model=None`` keep whatever the thread last used.
+
+    ``broker`` replaces the default headless broker (``copperpilot_subagent``
+    passes one wired to the caller's approval prompts). ``subagent`` marks a
+    turn the user's own agent delegated: its thread is kept out of the
+    workspace's thread list.
     """
     credential = current_credential()
     if credential is None:
@@ -206,14 +214,16 @@ async def collect_turn(
     if model is not None:
         effort = CopperEffort.INTELLIGENCE
     context = discover_workspace(workspace)
-    remember_workspace(context)
-    normal_shell, dangerous_shell = shell_auto_allow_settings()
-    broker = LocalToolBroker(
-        workspace,
-        mode=approval,
-        always_allow_shell_commands=normal_shell,
-        always_allow_dangerous_shell_commands=dangerous_shell,
-    )
+    if not subagent:
+        remember_workspace(context)
+    if broker is None:
+        normal_shell, dangerous_shell = shell_auto_allow_settings()
+        broker = LocalToolBroker(
+            workspace,
+            mode=approval,
+            always_allow_shell_commands=normal_shell,
+            always_allow_dangerous_shell_commands=dangerous_shell,
+        )
     initial_effort = effort or CopperEffort.BALANCED
     agent = CopperPilotAgent(
         workspace,
@@ -232,6 +242,9 @@ async def collect_turn(
         await progress(f"Starting CopperPilot {mode.value} turn")
     async with create_copper_graph(agent) as runtime:
         config = runtime.config(thread_id, workspace)
+        if subagent:
+            # Not a chat of this workspace: `threads list` filters on cwd.
+            config["metadata"] = {"agent_name": "copperpilot-subagent"}
         values = {
             "messages": [HumanMessage(content=message)],
             "copper_mode": mode.value,
@@ -295,6 +308,7 @@ async def collect_turn(
         result["model"] = requested_model
         result["answered_model"] = answered_model or requested_model
     result.update({"success": not failed, "error": error, "events": _digest(events)})
+    result["changed_files"] = changed_files(events)
     return result
 
 

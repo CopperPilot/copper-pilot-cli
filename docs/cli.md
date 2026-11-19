@@ -35,6 +35,10 @@ valid.
 | `--mode {agent,plan,ask}` | Hosted chat mode. Default: `agent`. |
 | `--effort {balanced,intelligence}` | Hosted effort. Default: `balanced`; Intelligence requires a paid plan. |
 | `--model MODEL` | Intelligence model id (see below). Implies `--effort intelligence`; rejected with `--effort balanced`. |
+| `--provider {copperpilot,claude,codex}` | Who runs the agent (default: the thread's provider; new chats CopperPilot). See [Bring your own agent](#bring-your-own-agent). |
+| `--agent-model MODEL` | Claude/Codex model id (default: last used, else the agent's default). |
+| `--agent-effort LEVEL` | Claude/Codex reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). |
+| `--fast-mode` | Claude Fast mode, on models that support it. |
 | `-y`, `--auto-approve` | Auto approval: routine writes and known-safe shell still run; unknown actions prompt. |
 | `--yolo` | Permit local side effects without prompting, except commands that reach outside the workspace. Must be set explicitly. |
 | `--version` | Print the package version. |
@@ -128,6 +132,107 @@ With the prompt focused, the first `Esc` closes an open panel. Only an `Esc`
 with no panel open stops the running turn. `/btw` is available in the
 interactive app only; headless, MCP, and ACP runs do not offer it.
 
+## Bring your own agent
+
+```console
+pip install "copper-pilot-cli[claude]"
+copper-pilot ./my-board --provider claude --agent-model claude-haiku-5-5 --agent-effort low
+copper-pilot ./my-board --provider codex
+copper-pilot -n --provider claude -m "Check U1's decoupling"
+```
+
+`--provider` (or `/provider` in the TUI) runs the chat on your own agent:
+
+| Provider | Runs | Login | Models |
+|----------|------|-------|--------|
+| `copperpilot` | CopperPilot's hosted agent (default) | `copper-pilot auth login` | Balanced / Intelligence |
+| `claude` ("Claude Agent") | your installed `claude` (Claude Code), unmodified, through the Claude Agent SDK (`[claude]` extra) | `claude auth login` | bundled catalog: Opus/Sonnet/Fable/Haiku, effort Low–Max, Fast mode |
+| `codex` | your installed `codex app-server` (JSON-RPC, no extra dependency) | `codex login` or `OPENAI_API_KEY` | `model/list` from your Codex |
+
+`/provider` shows each agent's install and login state (`claude auth status`,
+Codex `account/read`), then the model, effort and Fast mode pickers. The
+choice is stored with the thread and the last one per provider in
+`config.json`. You still need a CopperPilot login: the agent uses CopperPilot's
+tools.
+
+**What the agent gets.** The agent keeps its own system prompt, built-in tools,
+settings (Claude loads your user, project and local settings: CLAUDE.md,
+permission rules, hooks, skills and your MCP servers) and native subagents.
+CopperPilot adds, over MCP (in-process for Claude; `copper-pilot mcp
+--tools-session` for Codex):
+
+- the read-only design, check and search tools the server curates for your
+  EDA tool (ERC/DRC, `query_design`, library and reference search,
+  `load_server_skill`, ...), proxied over `WS /api/copperpilot/tools/ws`;
+- `copperpilot_subagent {task, mode, effort}`: one hosted CopperPilot turn (a
+  fresh conversation per call) that makes schematic, PCB and library edits and
+  reports what changed. It shows as a subagent row; its own approvals and
+  questions appear as in a normal turn. `effort: intelligence` needs a paid
+  plan;
+- a short guide, appended to the agent's prompt and readable as
+  `copperpilot://guide`. It and the tool schemas are kept in memory only.
+
+**Approvals** follow `/approval` (Manual / Auto / YOLO) and the dangerous-shell
+setting; there is no separate picker. Claude runs in its `default` permission
+mode (`plan` in Plan mode), so every action your own Claude rules do not allow
+reaches CopperPilot:
+
+| Action | Manual | Auto | YOLO |
+|--------|--------|------|------|
+| Reads, search, web, todos, Claude's own subagents, CopperPilot tools | allowed | allowed | allowed |
+| Edits inside the workspace | ask | allowed | allowed |
+| Shell inside the workspace | ask | allowed (dangerous ones ask unless auto-allowed) | allowed |
+| Anything outside the workspace | ask | ask, unless dangerous shell is auto-allowed | allowed |
+| `AskUserQuestion` | question prompt | question prompt | question prompt |
+
+Codex turns use T3 Code's mapping: Manual → `untrusted` approvals with a
+read-only sandbox, Auto → `on-request` with a workspace-write sandbox, YOLO →
+full access; its approval, permission and user-input requests open the same
+prompts. Under Auto, KiCad design files (`.kicad_sch`, `.kicad_pcb`,
+`.kicad_sym`, `.kicad_pro`) count as routine writes only inside a
+`copperpilot_subagent` turn. Ask mode refuses edits and shell.
+
+**Plan mode.** When the agent finishes a plan (Claude `ExitPlanMode`, a Codex
+plan), it is saved as `.copperpilot/plans/<name>.plan.md` and the TUI asks
+Accept or Reject. Accept starts an Agent-mode turn on the same agent carrying
+the plan (`overall_status` open → running → done), like `/build`.
+
+**Transcript and switching.** The agent writes nothing to disk for these
+sessions (Claude `--no-session-persistence`, Codex `thread/start {ephemeral:
+true}`); the CLI's `sessions.db` is the transcript. One agent session stays
+live per chat while the CLI runs. After a restart, a crash, a model change or a
+provider switch, the next turn starts a fresh session whose first prompt
+carries a handoff rendered from `sessions.db`: at most 16K tokens, keeping the
+last user and assistant messages and the first user message first, then the
+newest items, as `[Historical <role>; <kind>; ...]` blocks.
+
+**Context.** The status line shows the agent's own reported context against
+its model window. `/compact` runs the agent's own compaction (Claude
+`/compact`, Codex `thread/compact/start`); CopperPilot does not auto-compact
+these chats.
+
+**Usage and terms.** Your agent's tokens are your own: CopperPilot reports
+them at zero cost for analytics and never counts them against your plan.
+CopperPilot tool calls and `copperpilot_subagent` turns are billed as usual
+("CopperPilot harness and tool usage"); the free tier works. CopperPilot never
+reads, stores or proxies your Claude or Codex credentials and never injects an
+API key; log in with `claude auth login` / `codex login` in your own terminal.
+The `claude-agent-sdk` wheel bundles a Claude Code binary of its own; the CLI
+never runs it and always points the SDK at the `claude` on your `PATH`.
+
+**Errors** are shown as one message each, with no automatic fallback to
+CopperPilot:
+
+| Class | Example |
+|-------|---------|
+| `not_installed` | `claude` / `codex` not on `PATH`, or the `[claude]` extra missing |
+| `auth_required` | not logged in: run `claude auth login` / `codex login` |
+| `usage_limit` | your Claude/ChatGPT plan's limit, with the reset time |
+| `overloaded` | the provider's API is overloaded (retry) |
+| `process_exited` | the agent process died (the next message restarts it with a handoff) |
+| `context_full` | the agent's context window is full |
+| `tool_socket` | CopperPilot's tool socket refused or dropped (it reconnects for up to 60 s) |
+
 ## Update
 
 ```console
@@ -200,6 +305,23 @@ Workspace is the tool argument, else `CLAUDE_PROJECT_DIR`, else the process
 current directory. Manual approval is TUI-only. Passing `model` selects
 Intelligence on that model; the result carries `model` (requested) and
 `answered_model` (after any server fallback). See [harness.md](harness.md).
+
+### Tools session (`copper-pilot mcp --tools-session`)
+
+```console
+copper-pilot mcp --tools-session [--workspace DIR] [--approval auto|yolo] [--provider NAME]
+```
+
+Serves CopperPilot's tools for your own agent instead of the delegating
+conductor: the server's curated tools, `copperpilot_subagent` and the
+`copperpilot://guide` resource. It opens `WS /api/copperpilot/tools/ws` with
+the stored login, answers the server's file and shell requests with the local
+tool broker (reads return `content_sha256`; writes carrying `if_match` are
+refused with `FILE_CHANGED` when the file changed since it was read), and
+reconnects for up to 60 s when the socket drops. Nobody can answer a prompt
+here, so what Auto would ask about is refused. When the TUI starts Codex it
+passes a private `--relay` instead, so the TUI keeps the chat's one tool
+socket, the prompts and the subagent rows.
 
 ## ACP
 

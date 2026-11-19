@@ -11,3 +11,14 @@ Pinned source revision:
 1d3232c0852c47af09119edea10eeec887e4f0da
 
 The LangChain name and trademarks are not used to endorse CopperPilot.
+
+CopperPilot CLI also includes portions ported from T3 Code (the Claude model
+catalog in src/copper_pilot_cli/agents/catalog.py and the handoff selection
+in src/copper_pilot_cli/agents/handoff.py).
+
+T3 Code
+Copyright (c) 2026 T3 Tools Inc.
+Licensed under the MIT License.
+
+Pinned source revision:
+c1b23e903c8fb273d48a263185d0df6003f59d6b

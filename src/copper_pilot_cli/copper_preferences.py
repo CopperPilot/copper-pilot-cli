@@ -114,3 +114,31 @@ def acknowledge_yolo() -> None:
     value = load_preferences()
     value["yolo_ack_version"] = YOLO_ACK_VERSION
     save_preferences(value)
+
+
+def saved_agent_selection() -> dict[str, Any]:
+    """The last used provider and its options, e.g. ``{"provider": "claude", "model": ...}``.
+
+    New chats start on CopperPilot (Balanced) unless ``--provider`` or
+    ``/provider`` picks another; this only pre-selects the picker's choices
+    and remembers each provider's last model options.
+    """
+    value = load_preferences().get("agent")
+    return value if isinstance(value, dict) else {}
+
+
+def save_agent_selection(provider: str, options: dict[str, Any]) -> None:
+    value = load_preferences()
+    stored = value.get("agent")
+    stored = stored if isinstance(stored, dict) else {}
+    per_provider = stored.get("options")
+    per_provider = per_provider if isinstance(per_provider, dict) else {}
+    per_provider[provider] = dict(options)
+    value["agent"] = {"provider": provider, "options": per_provider}
+    save_preferences(value)
+
+
+def saved_agent_options(provider: str) -> dict[str, Any]:
+    options = saved_agent_selection().get("options")
+    chosen = options.get(provider) if isinstance(options, dict) else None
+    return dict(chosen) if isinstance(chosen, dict) else {}

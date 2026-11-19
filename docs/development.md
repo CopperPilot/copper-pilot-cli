@@ -59,6 +59,17 @@ unreleased Python.
 
 Do not commit credentials, `.venv/`, or `dist/`.
 
+## Bring your own agent
+
+`src/copper_pilot_cli/agents/` holds the Claude Agent and Codex drivers. Tests
+use fakes only: `tests/fakes/fake_codex_app_server.py` (a scripted
+`codex app-server`), a scripted Claude Agent SDK transport in
+`tests/test_byo_claude.py` (the dev extra installs `claude-agent-sdk`; the
+tests skip without it), and a fake tools socket in `tests/byo_fakes.py`. A
+canary test asserts the server guide never reaches `sessions.db` or the log.
+The `[claude]` extra's metadata is MIT, so the license gate passes; its wheel
+also bundles a proprietary Claude Code binary that the CLI never executes.
+
 ## Hosted protocol
 
 The client speaks protocol v1. Agent turns, and plan turns that carry plan

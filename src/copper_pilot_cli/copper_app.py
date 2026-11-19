@@ -30,6 +30,19 @@ from textual.widgets.option_list import Option
 from copper_pilot_cli import copper_theme
 from copper_pilot_cli import textual_patches as _textual_patches  # noqa: F401
 from copper_pilot_cli._version import __version__
+from copper_pilot_cli.agents import (
+    PROVIDER_HELP,
+    PROVIDER_LABELS,
+    AgentSelection,
+    Provider,
+    selection_from_state,
+)
+from copper_pilot_cli.agents.catalog import CLAUDE_MODELS, AgentModel, effort_label
+from copper_pilot_cli.agents.claude_driver import CLAUDE_INSTALL_HINT, claude_status
+from copper_pilot_cli.agents.claude_driver import sdk_available as claude_sdk_available
+from copper_pilot_cli.agents.codex_driver import codex_status, list_codex_models
+from copper_pilot_cli.agents.runtime import set_plan_status
+from copper_pilot_cli.agents.session import PLAN_READY_KIND
 from copper_pilot_cli.chat_context import (
     COMPACT_CONFIRM_SECONDS,
     COMPACTION_EVENT,
@@ -97,9 +110,11 @@ from copper_pilot_cli.copper_preferences import (
     acknowledge_auto_notice,
     acknowledge_yolo,
     auto_notice_acknowledged,
+    save_agent_selection,
     save_approval_mode,
     save_shell_auto_allow_settings,
     save_theme,
+    saved_agent_options,
     saved_theme,
     shell_auto_allow_settings,
     yolo_acknowledged,
@@ -273,8 +288,17 @@ class CopperPilotApp(App[None]):
         model: str | None = None,
         catalog: ChatModelCatalog | None = None,
         initial_message: str | None = None,
+        agent_selection: AgentSelection | None = None,
     ) -> None:
         super().__init__()
+        # Who runs this chat's agent (``/provider``); new chats: CopperPilot.
+        self.agent_selection = agent_selection or AgentSelection()
+        # ``--provider`` wins over the provider stored in a resumed thread, once.
+        self._provider_override = agent_selection is not None
+        # A Plan-mode plan from the user's agent awaiting accept/reject, and
+        # the plan an accepted build turn is building.
+        self._pending_plan: tuple[str, str] | None = None
+        self._building_plan: str | None = None
         self.runtime = runtime
         self.broker = broker
         self.workspace = workspace
@@ -497,6 +521,12 @@ class CopperPilotApp(App[None]):
             self.copper_mode = CopperMode.AGENT
         self.copper_effort = normalize_effort(values.get("copper_effort", CopperEffort.BALANCED))
         self.copper_model = normalize_model_id(values.get("copper_model")) or None
+        if self._provider_override:
+            self._provider_override = False
+        else:
+            self.agent_selection = selection_from_state(
+                values.get("copper_provider"), values.get("copper_agent")
+            )
         self.runtime.agent.mode = self.copper_mode
         self.runtime.agent.effort = self.copper_effort
         self.runtime.agent.model = self.copper_model
@@ -640,7 +670,11 @@ class CopperPilotApp(App[None]):
     def _update_status(self, detail: str = "") -> None:
         bar = self.query_one(StatusBar)
         bar.set_approval_mode(self.broker.mode.value)
-        bar.set_session(mode=self.copper_mode.value, effort=self.copper_effort.value)
+        bar.set_session(
+            mode=self.copper_mode.value,
+            effort=self.copper_effort.value,
+            agent=self.agent_selection.label() if self.agent_selection.is_byo else None,
+        )
         usage = self._context_usage or {}
         tokens = usage.get("context_tokens")
         limit = usage.get("context_limit") or self.catalog.context_window(
@@ -703,6 +737,138 @@ class CopperPilotApp(App[None]):
                 markup=False,
             )
         self._update_status()
+
+    async def _choose_provider(self, argument: str = "") -> None:
+        """``/provider [copperpilot|claude|codex]``: who runs this chat's agent.
+
+        Claude Agent and Codex are the user's own installed agents with their
+        own login; CopperPilot never handles their credentials or bills their
+        tokens. Switching mid-chat hands the chat over with a capped summary.
+        """
+        if self._turn_task and not self._turn_task.done():
+            self.notify("Wait for the turn to finish before switching.", markup=False)
+            return
+        if argument and argument not in {item.value for item in Provider}:
+            await self._mount(ErrorMessage("Usage: /provider [copperpilot|claude|codex]"))
+            return
+        self._update_status("Checking your agents")
+        claude, codex = await asyncio.gather(claude_status(), codex_status())
+        self._update_status()
+        choice = argument or await self._wait_for_modal(
+            ChoiceScreen(
+                f"Who runs the agent? (now: {self.agent_selection.label()})",
+                [
+                    (Provider.COPPERPILOT.value, "CopperPilot — hosted, Balanced or Intelligence"),
+                    (Provider.CLAUDE.value, f"Claude Agent — {claude.label}"),
+                    (Provider.CODEX.value, f"Codex — {codex.label}"),
+                ],
+            )
+        )
+        if not choice:
+            return
+        provider = Provider(choice)
+        if provider is Provider.COPPERPILOT:
+            effort = await self._wait_for_modal(
+                ChoiceScreen(
+                    "CopperPilot effort",
+                    [(item.value, item.value.title()) for item in CopperEffort],
+                )
+            )
+            if not effort:
+                return
+            self.copper_effort = CopperEffort(effort)
+            self.runtime.agent.effort = self.copper_effort
+            self.agent_selection = AgentSelection()
+            self._update_status()
+            self.notify(f"CopperPilot · {self.copper_effort.value.title()}", markup=False)
+            return
+        status = claude if provider is Provider.CLAUDE else codex
+        if provider is Provider.CLAUDE and not claude_sdk_available():
+            await self._mount(ErrorMessage(CLAUDE_INSTALL_HINT))
+            return
+        if not status.installed:
+            await self._mount(ErrorMessage(f"{PROVIDER_LABELS[provider]} is {status.label}."))
+            return
+        if status.logged_in is False:
+            await self._mount(
+                ErrorMessage(f"{PROVIDER_LABELS[provider]} is {status.label}, then /provider.")
+            )
+            return
+        selection = await self._choose_agent_options(provider)
+        if selection is None:
+            return
+        self.agent_selection = selection
+        save_agent_selection(provider.value, selection.options())
+        self._update_status()
+        await self._mount(
+            AssistantMessage(
+                f"*This chat now runs on {selection.label()} ({PROVIDER_HELP[provider]}). "
+                "CopperPilot adds its design tools and `copperpilot_subagent` for edits. "
+                "Your agent's tokens are your own and are never billed by CopperPilot; "
+                "CopperPilot tool use is billed as usual.*"
+            )
+        )
+
+    async def _choose_agent_options(self, provider: Provider) -> AgentSelection | None:
+        stored = saved_agent_options(provider.value)
+        if provider is Provider.CLAUDE:
+            models = list(CLAUDE_MODELS)
+        else:
+            self._update_status("Asking Codex for its models")
+            models = await list_codex_models()
+            self._update_status()
+        model: AgentModel | None = None
+        if models:
+            current = stored.get("model")
+            picked = await self._wait_for_modal(
+                ChoiceScreen(
+                    f"{PROVIDER_LABELS[provider]} model",
+                    [
+                        (
+                            item.id,
+                            f"{item.label}"
+                            + (" (legacy)" if item.legacy else "")
+                            + (" (default)" if item.is_default else "")
+                            + (" (last used)" if item.id == current else ""),
+                        )
+                        for item in sorted(models, key=lambda entry: entry.legacy)
+                    ],
+                )
+            )
+            if not picked:
+                return None
+            model = next((item for item in models if item.id == picked), None)
+        effort: str | None = None
+        if model is not None and model.efforts:
+            effort = await self._wait_for_modal(
+                ChoiceScreen(
+                    "Reasoning effort",
+                    [
+                        (
+                            value,
+                            effort_label(value)
+                            + (" (default)" if value == model.default_effort else ""),
+                        )
+                        for value in model.efforts
+                    ],
+                )
+            )
+            if not effort:
+                return None
+        fast = False
+        if model is not None and model.fast_mode:
+            fast = (
+                await self._wait_for_modal(
+                    ChoiceScreen("Fast mode", [("off", "Off (default)"), ("on", "On")])
+                )
+                == "on"
+            )
+        return AgentSelection(
+            provider=provider,
+            model=model.id if model is not None else None,
+            effort=effort,
+            fast_mode=fast,
+        )
 
     async def _start_loading(self) -> None:
         await self._stop_loading()
@@ -869,6 +1035,8 @@ class CopperPilotApp(App[None]):
                     "copper_mode": self.copper_mode.value,
                     "copper_effort": self.copper_effort.value,
                     "copper_model": self.copper_model or "",
+                    "copper_provider": self.agent_selection.provider.value,
+                    "copper_agent": self.agent_selection.options(),
                 }
             )
             async for item in self.runtime.astream(values, self._config()):
@@ -884,6 +1052,9 @@ class CopperPilotApp(App[None]):
                 await self._finalize_turn(TurnPhase.FAILED)
             else:
                 await self._finalize_turn(TurnPhase.COMPLETED)
+                if self._building_plan is not None:
+                    set_plan_status(self.workspace, self._building_plan, "done")
+                    self.notify("Plan built.", markup=False)
         except asyncio.CancelledError:
             self.notify("Turn cancelled.", severity="warning", markup=False)
             await self._finalize_turn(TurnPhase.CANCELLED)
@@ -899,6 +1070,41 @@ class CopperPilotApp(App[None]):
             self.runtime.agent.runtime_context = None
             self._selected_skill = None
             self._turn_task = None
+            self._building_plan = None
+            if self._pending_plan is not None:
+                self.run_worker(self._offer_plan(), group="agent-plan", exclusive=True)
+
+    async def _offer_plan(self) -> None:
+        """Accept or reject the plan the user's agent wrote in Plan mode.
+
+        Accept starts an Agent-mode turn on the same agent carrying the plan
+        (the ``/build`` path); the plan file goes open → running → done.
+        """
+        pending, self._pending_plan = self._pending_plan, None
+        if pending is None:
+            return
+        relative, name = pending
+        choice = await self._wait_for_modal(
+            ChoiceScreen(
+                f"Plan ready: {name} ({relative})",
+                [("accept", "Accept and build it (Agent mode)"), ("reject", "Reject")],
+            )
+        )
+        if choice != "accept":
+            await self._mount(AssistantMessage(f"*Plan rejected: `{relative}`.*"))
+            return
+        try:
+            plan = parse_plan(self.workspace / relative, self.workspace)
+        except (OSError, ValueError) as exc:
+            await self._mount(ErrorMessage(str(exc)))
+            return
+        set_plan_status(self.workspace, relative, "running")
+        self.runtime.agent.plan_context = plan
+        self.runtime.agent.mode = CopperMode.AGENT
+        self.copper_mode = CopperMode.AGENT
+        self._update_status()
+        await self._submit(f"Build the attached plan: {plan.name}")
+        self._building_plan = relative
 
     async def _custom_event(self, event: dict[str, Any]) -> None:
         kind = str(event.get("type") or "")
@@ -1172,6 +1378,12 @@ class CopperPilotApp(App[None]):
                 tool.set_error(status.error or "Subagent failed.")
                 work_run.mark_failed()
             return
+        if data.get("kind") == PLAN_READY_KIND:
+            relative = str(data.get("file_path") or "")
+            await self._mount(AssistantMessage(f"*Plan saved: `{relative}`*"))
+            if self._turn_task is not None and relative:
+                self._pending_plan = (relative, str(data.get("name") or relative))
+            return
         if data.get("kind") == "plan_mode_switch":
             self.copper_mode = CopperMode.PLAN
             self.runtime.agent.mode = CopperMode.PLAN
@@ -1224,6 +1436,7 @@ class CopperPilotApp(App[None]):
                             f"- Workspace: `{self.workspace}`",
                             f"- Thread: `{self.thread_id}`",
                             f"- CopperPilot mode: `{self.copper_mode.value}`",
+                            f"- Agent: `{self.agent_selection.label()}`",
                             f"- Effort: `{self.copper_effort.value}`",
                             *(
                                 [f"- Model: `{self._effective_model()}`"]
@@ -1256,6 +1469,7 @@ class CopperPilotApp(App[None]):
                 self._compaction = None
                 self.copper_effort = CopperEffort.BALANCED
                 self.copper_model = None
+                self.agent_selection = AgentSelection()
                 self.broker.set_workspace(workspace)
                 self.hooks = HookRunner(workspace, self.broker)
                 self.runtime.agent.workspace = workspace
@@ -1293,6 +1507,8 @@ class CopperPilotApp(App[None]):
                 self.runtime.agent.effort = self.copper_effort
                 self.query_one(StatusBar).flash("effort")
                 self._update_status()
+        elif command == "/provider":
+            await self._choose_provider(argument.strip().lower())
         elif command == "/model" and model_selector_enabled():
             await self._choose_model(argument.strip())
         elif command == "/build":
@@ -1406,6 +1622,16 @@ class CopperPilotApp(App[None]):
         """``/compact [focus]``: summarize older messages; the transcript is unchanged."""
         if self._turn_task and not self._turn_task.done():
             self.notify("A turn is already running.", severity="warning", markup=False)
+            return
+        if self.agent_selection.is_byo:
+            # The user's own agent compacts its own context (no CopperPilot compaction).
+            sessions = getattr(self.runtime.agent, "agent_sessions", None)
+            if sessions is None:
+                return
+            self._update_status("Compacting the agent's context")
+            outcome = await sessions.compact(self.thread_id)
+            self._update_status()
+            await self._mount(AssistantMessage(f"*{outcome}*"))
             return
         if await self._unfinished_turn() is not None:
             await self._mount(

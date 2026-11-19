@@ -74,15 +74,15 @@ def test_chat_start_advertises_parallel_tool_requests(monkeypatch) -> None:
     monkeypatch.delenv("COPPER_PILOT_PARALLEL_TOOLS", raising=False)
     monkeypatch.delenv("COPPER_PILOT_TURN_RESUME", raising=False)
     frame = make_chat_start(request())
-    assert frame["capabilities"] == ["parallel_tool_requests", "turn_resume_v1"]
+    assert frame["capabilities"] == ["cas_writes_v1", "parallel_tool_requests", "turn_resume_v1"]
     assert frame["protocol_version"] == 1
 
 
 def test_capability_can_be_disabled(monkeypatch) -> None:
     monkeypatch.setenv("COPPER_PILOT_PARALLEL_TOOLS", "0")
-    assert make_chat_start(request())["capabilities"] == ["turn_resume_v1"]
+    assert make_chat_start(request())["capabilities"] == ["cas_writes_v1", "turn_resume_v1"]
     monkeypatch.setenv("COPPER_PILOT_TURN_RESUME", "0")
-    assert "capabilities" not in make_chat_start(request())
+    assert make_chat_start(request())["capabilities"] == ["cas_writes_v1"]
 
 
 @pytest.mark.asyncio

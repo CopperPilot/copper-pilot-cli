@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import mimetypes
 import re
@@ -136,6 +137,16 @@ _ROUTINE_WRITE_SUFFIXES = frozenset(
         ".yml",
     }
 )
+# KiCad design files. Auto treats them as routine writes only for writes that
+# come from a ``copperpilot_subagent`` turn (a hosted CopperPilot turn the
+# user's own agent delegated the design edit to); a plain hosted turn under
+# Auto still asks.
+KICAD_DESIGN_SUFFIXES = frozenset({".kicad_sch", ".kicad_pcb", ".kicad_sym", ".kicad_pro"})
+# Compare-and-swap writes (``cas_writes_v1``): the refusal code a write gets
+# when the file changed since the read whose hash it carries.
+FILE_CHANGED_CODE = "FILE_CHANGED"
+_CAS_READ_TOOLS = frozenset({"read_file", "read_binary_file"})
+_CAS_WRITE_TOOLS = frozenset({"write_file", "edit_file", "write_binary_file"})
 _DEPENDENCY_FILES = frozenset(
     {
         "cargo.lock",
@@ -234,7 +245,9 @@ def _is_within(root: Path, path: Path) -> bool:
     return True
 
 
-def _routine_write_allowed(root: Path, arguments: dict[str, Any]) -> bool:
+def _routine_write_allowed(
+    root: Path, arguments: dict[str, Any], *, kicad_writes: bool = False
+) -> bool:
     path = _resolve_path(root, arguments.get("file_path"))
     if path is None or not _is_within(root, path):
         return False
@@ -243,6 +256,8 @@ def _routine_write_allowed(root: Path, arguments: dict[str, Any]) -> bool:
         return False
     if path.name.lower() in _SENSITIVE_NAMES | _DEPENDENCY_FILES:
         return False
+    if kicad_writes and path.suffix.lower() in KICAD_DESIGN_SUFFIXES:
+        return True
     return path.suffix.lower() in _ROUTINE_WRITE_SUFFIXES - _SCRIPT_SUFFIXES
 
 
@@ -305,15 +320,21 @@ def routine_action(
     tool_name: str,
     arguments: dict[str, Any],
     workspace: Path | None = None,
+    *,
+    kicad_writes: bool = False,
 ) -> bool:
-    """Pinned dcode deterministic Auto policy for locally supported tools."""
+    """Pinned dcode deterministic Auto policy for locally supported tools.
+
+    ``kicad_writes`` also counts KiCad design files as routine writes; only a
+    ``copperpilot_subagent`` turn's broker sets it.
+    """
 
     root = (workspace or Path.cwd()).resolve()
     canonical = canonical_tool_name(tool_name)
     if canonical in _READ_TOOLS:
         return True
     if canonical in {"write_file", "edit_file"}:
-        return _routine_write_allowed(root, arguments)
+        return _routine_write_allowed(root, arguments, kicad_writes=kicad_writes)
     if canonical == "execute":
         return _read_only_git_allowed(arguments.get("command"), root)
     return False
@@ -331,8 +352,14 @@ class LocalToolBroker:
         ask_user: QuestionHandler | None = None,
         always_allow_shell_commands: bool = True,
         always_allow_dangerous_shell_commands: bool = False,
+        routine_kicad_writes: bool = False,
+        cas_writes: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
+        # See ``routine_action``: KiCad design writes from a delegated subagent turn.
+        self.routine_kicad_writes = routine_kicad_writes
+        # ``cas_writes_v1``: reads return ``content_sha256``; writes honour ``if_match``.
+        self.cas_writes = cas_writes
         self.mode = mode
         self.approve = approve or self._reject
         self.ask_user = ask_user or self._no_question_handler
@@ -472,7 +499,12 @@ class LocalToolBroker:
                     return
                 if not danger and self.always_allow_shell_commands:
                     return
-            elif routine_action(canonical_name, request.arguments, self.workspace):
+            elif routine_action(
+                canonical_name,
+                request.arguments,
+                self.workspace,
+                kicad_writes=self.routine_kicad_writes,
+            ):
                 return
         async with self._prompt_lock:
             approved = await self.approve(
@@ -619,8 +651,48 @@ class LocalToolBroker:
 
         canonical_name = canonical_tool_name(request.tool_name)
         arguments, external = self._normalize_arguments(request, canonical_name)
+        if self.cas_writes and canonical_name in _CAS_WRITE_TOOLS:
+            refused = self._cas_refusal(request, arguments, external)
+            if refused is not None:
+                return refused
         await self._authorized(request, canonical_name, external=external)
+        result = await self._dispatch(request, canonical_name, arguments, external)
+        if (
+            self.cas_writes
+            and canonical_name in _CAS_READ_TOOLS | _CAS_WRITE_TOOLS
+            and isinstance(result, dict)
+            and not result.get("error")
+        ):
+            # Reads: the bytes read; writes: the bytes written (the next if_match).
+            digest = file_sha256(self._disk_path(arguments["file_path"], external))
+            if digest is not None:
+                result = {**result, "content_sha256": digest}
+        return result
 
+    def _cas_refusal(
+        self, request: ToolRequest, arguments: dict[str, Any], external: bool
+    ) -> dict[str, Any] | None:
+        """Refuse a write whose ``if_match`` no longer matches the file on disk."""
+        expected = request.if_match or arguments.pop("if_match", None)
+        arguments.pop("if_match", None)
+        if not isinstance(expected, str) or not expected:
+            return None
+        current = file_sha256(self._disk_path(arguments["file_path"], external))
+        if current == expected.strip().lower():
+            return None
+        shown = str(request.arguments.get("file_path") or arguments["file_path"])
+        return {
+            "error": f"{shown} changed since it was read; re-read and retry",
+            "code": FILE_CHANGED_CODE,
+        }
+
+    async def _dispatch(
+        self,
+        request: ToolRequest,
+        canonical_name: str,
+        arguments: dict[str, Any],
+        external: bool,
+    ) -> Any:
         if canonical_name == "read_binary_file":
             return await self._read_binary(arguments["file_path"], external=external)
         if canonical_name == "read_file" and (
@@ -772,6 +844,18 @@ class LocalToolBroker:
         }
 
 
+def file_sha256(path: Path) -> str | None:
+    """Hex sha256 of a file's bytes, or None when it cannot be read."""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def normalized_tool_names(names: Sequence[str]) -> list[str]:
     """Return canonical names while preserving request order."""
 
@@ -779,6 +863,8 @@ def normalized_tool_names(names: Sequence[str]) -> list[str]:
 
 
 __all__ = [
+    "FILE_CHANGED_CODE",
+    "KICAD_DESIGN_SUFFIXES",
     "ApprovalMode",
     "ApprovalRequest",
     "LocalToolBroker",
@@ -786,6 +872,7 @@ __all__ = [
     "canonical_tool_name",
     "classify_outside_workspace",
     "dangerous_shell_command",
+    "file_sha256",
     "normalized_tool_names",
     "outside_workspace_blocked",
     "outside_workspace_reason",

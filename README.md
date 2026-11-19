@@ -92,6 +92,26 @@ Argon. Picking another model (`--model <id>`, `/model`) is turned off for now
 server-owned survey subagents and shows their lifecycle through the existing
 Deep Agents task rows; Intelligence Plan turns survey before writing a plan.
 
+## Bring your own agent (Claude Agent, Codex)
+
+The chat can also run on your own installed agent, with CopperPilot adding
+its electronics tools:
+
+```console
+pip install "copper-pilot-cli[claude]"      # Claude Agent: uses your installed Claude Code
+copper-pilot --provider claude --agent-model claude-sonnet-5-5 --agent-effort low
+copper-pilot --provider codex                # Codex: uses your installed Codex
+```
+
+Or type `/provider` in the TUI to switch between CopperPilot, Claude Agent and
+Codex between turns; the new agent gets a capped summary of the chat so far.
+Your agent runs as itself (its own prompt, tools, settings and subagents) with
+your own login (`claude auth login`, `codex login`); CopperPilot never reads
+those credentials and never charges for your agent's tokens. CopperPilot adds
+read-only design tools, a short guide, and `copperpilot_subagent`, which runs a
+hosted CopperPilot turn to make schematic/PCB edits; that tool use is billed as
+usual. Details: [docs/cli.md](docs/cli.md#bring-your-own-agent).
+
 ## Validate
 
 ```console
@@ -191,7 +211,7 @@ Filesystem, search, edit, and shell execution use Deep Agents' native
 `FilesystemMiddleware` tools and `LocalShellBackend`; CopperPilot's adapter only
 normalizes hosted tool names, approval decisions, and result envelopes.
 
-Computer use, model/provider selection, local model execution, LangSmith
+Computer use, local model execution, LangSmith
 tracing, content telemetry, MCP **host**/plugin-runtime controls, and server
 implementation code are not part of this package. A thin MCP **server**
 (`copper-pilot mcp`) and an ACP **server** (`copper-pilot acp`) that delegate
