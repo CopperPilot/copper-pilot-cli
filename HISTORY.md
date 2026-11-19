@@ -4,6 +4,78 @@ Changelog
 
 (unreleased)
 ------------
+- Merge pull request #62 from
+  CopperPilot/feat/billed_usage_in_prompt_meta_19_nov_2026. [Aditya]
+- ACP: report the CopperPilot tokens each prompt was billed
+  (_meta.copperpilot.usage) [AdityaNG, Claude Opus 5.5]
+
+  The hosted final frame's tokens_input / tokens_output are normalized CopperPilot tokens and their sum is what the
+  usage ledger settles for the turn. The ACP agent dropped them once context usage drove the usage_update meter, so a
+  headless caller had no way to know what a task cost. Each prompt now adds them up (every report counts: each final
+  frame is one ledger charge, a resumed turn bills each attempt) and returns them in the prompt response's
+  _meta.copperpilot.usage {unit: copperpilot_tokens, inputTokens, outputTokens, reports}, next to the unfinished-turn
+  marker when there is one. The usage_update meter is unchanged. rea-hardware uses it to meter Builder's builds.
+- Merge pull request #61 from CopperPilot/feat/byo_agent_16_nov_2026.
+  [Aditya]
+
+  Bring your own agent: --provider claude / codex with CopperPilot tools
+- Tests: write CAS fixtures as bytes so Windows doesn't turn \n into
+  \r\n. [AdityaNG]
+- MCP relay: unix socket path is POSIX-only (ty check on Windows)
+  [AdityaNG]
+- Codex usage-limit errors carry the provider's own reason; log the
+  failure class. [AdityaNG]
+- Advertise cas_writes_v1 on the chat socket too; content_sha256 rides
+  at the top of every tool_result frame. [AdityaNG]
+- Tool socket: match the server's CAS frame (content_sha256 next to
+  result, also after writes), pass timeout_ms/agent_id, socket_rotation
+  is retryable. [AdityaNG]
+- Docs: bring your own agent (providers, approvals, plans, handoff,
+  terms), tools-session MCP, T3 attribution. [AdityaNG]
+- BYO agents: CLI approval policy for Claude, user's Claude setup, plan
+  accept/build, agent compaction. [AdityaNG]
+
+  Per the 16 Nov afternoon decisions: Claude runs in permission mode default/plan
+  and every tool goes through can_use_tool under the CLI's Manual/Auto/YOLO and
+  dangerous-shell settings; setting_sources user/project/local; ExitPlanMode
+  (Codex plan items) become .copperpilot/plans artifacts the user accepts or
+  rejects, accept builds in Agent mode on the same agent; /compact runs the
+  agent's own compaction. Adds the [claude] extra, runtime/canary tests.
+- Bring your own agent: Claude Agent and Codex drivers, tool session
+  socket, copperpilot_subagent. [AdityaNG]
+
+  Adds src/copper_pilot_cli/agents: provider selection, the ported Claude model
+  catalog, the tools socket client (WS /api/copperpilot/tools/ws, CAS writes),
+  the CopperPilot MCP server (in-process for Claude, stdio relay for Codex),
+  copperpilot_subagent, the Claude Agent SDK and codex app-server drivers, the
+  capped handoff and error classes. The chat graph runs BYO turns and records
+  them in sessions.db; the TUI gets /provider and the CLI --provider.
+- Merge pull request #59 from
+  CopperPilot/fix/pong_timeout_60s_16_nov_2026. [Aditya]
+
+  Raise WebSocket pong timeout to 60 s
+- Raise the WebSocket pong timeout from 20 s to 60 s. [AdityaNG]
+
+  The hosted server answers pings on its event loop. A pod busy with one
+  long tool call (a schematic audit can hold the loop for 20-140 s) misses
+  a 20 s window, so every connected client closes with 1011 and resumes the
+  same turn onto the same busy pod, which often re-runs the blocking call.
+  Production logs show 99-100 % of sockets dropping on stalls over 35 s.
+  60 s rides out most stalls; the server-side fixes remove the cause.
+- Merge pull request #58 from
+  CopperPilot/fix/acp_raw_payload_cap_15_nov_2026. [Aditya]
+- ACP: shorten long strings in tool raw input/output sent to the client.
+  [AdityaNG]
+
+  Whole-file KiCad reads (3-8 MB each) went to ACP clients verbatim as raw_output, and file
+  writes as raw_input. T3 Code stores each twice; a few hundred reads made one thread 3.7 GB
+  and ran its backend out of memory (15 Nov). The client now gets the first 2,000 characters
+  of any long string plus a count of what was cut. The tool, the agent and the server still
+  see the full value.
+
+
+1.0.2 (2026-11-13)
+------------------
 
 Fix
 ~~~
@@ -36,6 +108,10 @@ Fix
 
 Other
 ~~~~~
+- Merge pull request #57 from CopperPilot/release/1.0.2. [Aditya]
+
+  release: version 1.0.2
+- Release: version 1.0.2 🚀 [AdityaNG]
 - Merge pull request #56 from
   CopperPilot/feat/auto_intelligence_model_13_nov_2026. [Aditya]
 
