@@ -47,9 +47,9 @@ from copper_pilot_cli.deepagents_tools import FILE_CHANGED_CODE, file_sha256
 
 
 def _workspace(tmp_path: Path) -> Path:
-    (tmp_path / "board.kicad_sch").write_text("(kicad_sch (version 20250114))\n")
-    (tmp_path / "board.kicad_pcb").write_text("(kicad_pcb)\n")
-    (tmp_path / "notes.txt").write_text("hello\n")
+    (tmp_path / "board.kicad_sch").write_bytes(b"(kicad_sch (version 20250114))\n")
+    (tmp_path / "board.kicad_pcb").write_bytes(b"(kicad_pcb)\n")
+    (tmp_path / "notes.txt").write_bytes(b"hello\n")
     return tmp_path
 
 
@@ -127,7 +127,7 @@ async def test_cas_reads_return_sha_and_writes_honour_if_match(tmp_path: Path) -
     )
     digest = hashlib.sha256(b"hello\n").hexdigest()
     assert read["content_sha256"] == digest
-    (workspace / "notes.txt").write_text("changed by the user\n")
+    (workspace / "notes.txt").write_bytes(b"changed by the user\n")
     refused = await broker.execute(
         ToolRequest(
             tool_call_id="w1",
