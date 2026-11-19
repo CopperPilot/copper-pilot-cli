@@ -181,6 +181,17 @@ Further session updates:
   of the latest turn and `size` is `0`, because the hosted service does not
   report the model's context window; the raw hosted counts are in `_meta`.
   T3 Code shows the count alone when the size is unknown.
+- The prompt response carries what the prompt was billed in
+  `_meta.copperpilot.usage`: `{"unit": "copperpilot_tokens", "inputTokens",
+  "outputTokens", "reports"}`, the hosted final frames' `tokens_input` and
+  `tokens_output` added up (`reports` is how many there were; an
+  automatically resumed turn bills each attempt). These are CopperPilot
+  tokens, the units the usage ledger charges: each turn's model spend,
+  cache-aware, at CopperPilot's fixed input and output price per million, so
+  a cost is the same for every model. Absent when nothing was billed. It is
+  sent even once context usage drives the `usage_update` meter, and sits
+  next to `unfinishedTurn` when the turn did not finish. Headless callers
+  (rea-hardware) meter builds from it.
 - `plan` whenever the hosted agent updates its todo list (`todo_list` status
   events) or writes a `.copperpilot/plans/<name>.plan.md` artifact. Plan todos
   map `open`, `running`, and `done` onto `pending`, `in_progress`, and
