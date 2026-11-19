@@ -299,6 +299,8 @@ class RelayBackend:
                 return
             kind, _, rest = self.address.partition(":")
             if kind == "unix":
+                if sys.platform == "win32":
+                    raise ValueError("Unix socket relays are not available on Windows; use tcp:")
                 reader, writer = await asyncio.open_unix_connection(rest, limit=_MAX_LINE)
             elif kind == "tcp":
                 host, _, port = rest.rpartition(":")
