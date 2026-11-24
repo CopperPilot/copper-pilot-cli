@@ -273,6 +273,10 @@ def _tokens(command: str) -> list[str]:
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
+    if os.name == "nt":
+        # Agent commands run in cmd.exe here, where "\" separates path parts and
+        # escapes nothing. Keep it, or C:\Users\me\x would read as C:Usersmex.
+        lexer.escape = ""
     try:
         return list(lexer)
     except ValueError:

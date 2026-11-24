@@ -516,6 +516,9 @@ desktop app's "Always Allow Dangerous Shell Commands"):
 - `docker`, `podman`, `kubectl`, `sudo`, `ssh`, `scp`, and similar
 - killing processes by name: `killall`, `pkill`, `kill $(pgrep ...)`
 
+On Windows, paths written with `\` (`type C:\Users\me\other\x.kicad_sch`,
+`..\other`) count the same as their `/` forms.
+
 The CLI follows `&&`/`;`/`|` chains, `cd`, `$(...)` and `sh -c`. The TUI
 prompt shows the reason and offers only yes or no. ACP clients get a
 permission request titled "Outside the workspace: ..." with the reason and no
