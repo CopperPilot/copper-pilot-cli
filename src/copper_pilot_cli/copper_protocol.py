@@ -52,6 +52,12 @@ ECHOED_REQUEST_FIELDS = (
     "schematic_data",
     "schematic_info",
 )
+# Tool requests are work for the client to carry out, not output to show. A
+# file edit comes back as a whole-file ``write_file``, so 21 edits of a 2.7 MB
+# board are ~60 MB in one turn; counting them ended long design turns in the
+# middle of their work. Each request is still bounded by the socket's frame
+# size limit, and the frame budget bounds how many there are.
+TOOL_REQUEST_FIELDS = ("tool_request", "tool_requests")
 MAX_STATUS_BYTES = 16 * 1024
 # The answer itself can be long (a validate review's findings JSON easily
 # passes 16 KB) and the hosted side may send it as one frame.
@@ -621,16 +627,19 @@ ToolHandler = Callable[[ToolRequest], Awaitable[Any]]
 
 
 def _counted_frame_bytes(raw: str | bytes, frame: dict[str, Any]) -> int:
-    """Bytes of one frame that count toward the stream budget, minus echoed request fields."""
+    """Bytes of one frame that count toward the stream budget.
+
+    Echoed request fields and tool requests do not count.
+    """
     size = len(raw.encode() if isinstance(raw, str) else raw)
     response = frame.get("chat_response")
     if isinstance(response, dict):
-        echoed = sum(
+        uncounted = sum(
             len(json.dumps(response[key]).encode())
-            for key in ECHOED_REQUEST_FIELDS
+            for key in ECHOED_REQUEST_FIELDS + TOOL_REQUEST_FIELDS
             if key in response
         )
-        size -= echoed
+        size -= uncounted
     return max(size, 0)
 
 

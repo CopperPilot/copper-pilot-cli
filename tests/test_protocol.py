@@ -294,6 +294,65 @@ async def test_hosted_stream_enforces_aggregate_byte_budget(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_whole_file_writes_do_not_count_toward_the_stream_byte_budget(monkeypatch) -> None:
+    """A design turn that edits a 2.7 MB board: every edit is a whole-file write_file.
+
+    25 of them are ~68 MB of tool requests in one turn, more than the 64 MiB budget,
+    and the turn used to die with "Chat exceeded the client stream byte budget".
+    """
+    board = "(kicad_pcb " + "x" * (2_700_000 - 12) + ")"
+
+    class Socket:
+        def __init__(self) -> None:
+            self.frames = [
+                json.dumps(
+                    {
+                        "type": "event",
+                        "chat_response": {
+                            "tool_request": {
+                                "tool_call_id": f"call-{n}",
+                                "tool_name": "write_file",
+                                "arguments": {
+                                    "file_path": "candidate/hardware/board.kicad_pcb",
+                                    "content": board,
+                                },
+                            }
+                        },
+                    }
+                )
+                for n in range(25)
+            ] + [
+                json.dumps(
+                    {"type": "final", "chat_response": {"response": "done", "is_final": True}}
+                )
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, _value):
+            return None
+
+        async def recv(self):
+            return self.frames.pop(0)
+
+    monkeypatch.setattr("copper_pilot_cli.copper_protocol.connect", lambda *a, **k: Socket())
+    written = []
+
+    async def execute(tool_request):
+        written.append(len(tool_request.arguments["content"]))
+        return {"result": "ok"}
+
+    client = HostedChatClient("https://example.test", "cf_live_key", "fingerprint")
+    events = [event async for event in client.stream(request(), execute)]
+    assert len(written) == 25 and sum(written) > 64 * 1024 * 1024
+    assert events[-1].kind is EventKind.FINAL
+
+
+@pytest.mark.asyncio
 async def test_hosted_stream_preserves_subagent_status_event(monkeypatch) -> None:
     class Socket:
         def __init__(self) -> None:
