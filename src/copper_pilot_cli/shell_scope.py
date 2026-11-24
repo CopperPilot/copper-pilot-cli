@@ -46,6 +46,7 @@ _INDEX_SEARCHES = frozenset({"locate", "mdfind", "mlocate", "plocate"})
 _PATTERN_SEARCHES = frozenset({"ack", "ag", "rg"})
 _PATH_SEARCHES = frozenset({"fd", "fdfind", "find", "tree", "du"})
 _GREPS = frozenset({"egrep", "fgrep", "grep", "zgrep"})
+_FINDSTRS = frozenset({"findstr"})
 _SHELLS = frozenset({"bash", "dash", "fish", "ksh", "sh", "zsh"})
 # Prefix commands that run the rest of the line; value-taking options listed.
 _WRAPPERS: dict[str, frozenset[str]] = {
@@ -381,6 +382,8 @@ def _find_roots(args: Sequence[str]) -> list[str]:
 
 def _search_roots(name: str, args: list[str]) -> list[str] | None:
     """Root paths a recursive search walks, or None when it does not recurse."""
+    if name in _FINDSTRS:
+        return _findstr_roots(args)
     if name == "find":
         return _find_roots(args) or ["."]
     if name in {"fd", "fdfind"}:
@@ -410,6 +413,36 @@ def _search_roots(name: str, args: list[str]) -> list[str] | None:
         )
         return (_positionals(args) or ["."]) if recursive else None
     return None
+
+
+def _findstr_roots(args: list[str]) -> list[str] | None:
+    """Directory roots searched by Windows ``findstr /S`` commands."""
+    recursive = any(arg.casefold() in {"/s", "-s"} for arg in args)
+    if not recursive:
+        return None
+
+    # FINDSTR options precede the search string. Its switches use ``/`` rather
+    # than the dash syntax understood by the POSIX search helpers above.
+    pattern_seen = False
+    files: list[str] = []
+    roots: list[str] = []
+    for arg in args:
+        if not pattern_seen and arg[:3].casefold() in {"/d:", "-d:"}:
+            roots.extend(directory for directory in arg[3:].split(";") if directory)
+            continue
+        if not pattern_seen and arg.startswith("/"):
+            continue
+        if not pattern_seen and arg.startswith("-"):
+            continue
+        if not pattern_seen:
+            pattern_seen = True
+            continue
+        files.append(arg)
+
+    # FINDSTR accepts file masks such as C:\\*.*. Check their parent because
+    # that is the tree /S will recurse through.
+    roots.extend(str(Path(filename).parent) for filename in files)
+    return roots or ["."]
 
 
 def _path_candidates(name: str, args: list[str]) -> list[str]:
@@ -625,7 +658,11 @@ def _classify(command: str, scope: _Scope, depth: int) -> str | None:
         for root in roots or ():
             path = scope.resolve(root, cwd)
             if path is not None and scope.broad_root(path):
-                label = f"{name} -r" if name in _GREPS else name
+                label = (
+                    f"{name} /S"
+                    if name in _FINDSTRS
+                    else (f"{name} -r" if name in _GREPS else name)
+                )
                 return f"`{label}` searches {_display(path, scope.home)}"
         for candidate in _path_candidates(name, args):
             path = scope.resolve(candidate, cwd)

@@ -508,7 +508,9 @@ desktop app's "Always Allow Dangerous Shell Commands"):
 
 - recursive searches rooted at `/`, a system top-level directory (`/usr`,
   `/etc`, `/home`, ...), or your home directory: `find /`, `grep -r ... ~`,
-  `rg`, `fd`, `du`, `tree`, `ls -R`, and `locate`/`mdfind`
+  `rg`, `fd`, `du`, `tree`, `ls -R`, and `locate`/`mdfind`. On Windows,
+  recursive `findstr /S` searches rooted at a drive or home directory are also
+  treated as outside the workspace (for example, `findstr /S /I VCC C:\*.*`).
 - paths under your home directory outside the workspace, such as
   `cat ~/other-project/x.kicad_sch` or `cp ~/Downloads/lib.kicad_sym .`.
   KiCad's library and settings folders, `~/.copper-pilot` and `TMPDIR` are

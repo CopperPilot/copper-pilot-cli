@@ -146,6 +146,19 @@ def test_workspace_outside_home_still_guards_home() -> None:
     assert classify("cat /srv/work/board/x.kicad_sch", workspace=workspace) is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="findstr is a Windows command")
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("findstr /S /I VCC C:/*.*", "`findstr /S` searches C:\\"),
+        ("findstr /S /D:C:/ VCC *.kicad_sch", "`findstr /S` searches C:\\"),
+        ("findstr /S /I VCC *.kicad_sch", None),
+    ],
+)
+def test_findstr_recursive_search_scope(command: str, reason: str | None) -> None:
+    assert classify(command) == reason
+
+
 def test_non_string_and_unbalanced_quotes() -> None:
     assert classify_outside_workspace(None, WORKSPACE, HOME) is None
     assert classify("grep -rn 'unterminated /") is not None
