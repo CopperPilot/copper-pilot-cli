@@ -20,7 +20,8 @@ def shown(reason: str) -> str:
     return re.sub(r"(?<=\s)/[^\s)]*", lambda m: str(_native(m.group(0))), reason)
 
 
-HOME = _native("/home/maker")
+# Not /home: macOS automounts it, so every path lookup there is slow (about 15 ms).
+HOME = _native("/fake-home/maker")
 WORKSPACE = HOME / "projects" / "board"
 APP_HOME = HOME / ".copper-pilot"
 
@@ -43,14 +44,14 @@ def _classify_native(command: str) -> str | None:
     [
         ("which kicad-cli || find / -name kicad-cli", "`find` searches /"),
         ('grep -rn "VCC_3V3" / 2>/dev/null', "`grep -r` searches /"),
-        ('grep -rn "VCC_3V3" /home/maker', "`grep -r` searches ~"),
+        ('grep -rn "VCC_3V3" /fake-home/maker', "`grep -r` searches ~"),
         ('grep -Rni "usb" ~', "`grep -r` searches ~"),
         ('grep --recursive "usb" $HOME', "`grep -r` searches ~"),
         ('find / -name "*.kicad_sch"', "`find` searches /"),
         ("find -L / -name kicad-cli", "`find` searches /"),
         ("find /usr -name kicad-cli", "`find` searches /usr"),
         ("find /home -name '*.kicad_pro'", "`find` searches /home"),
-        ("cat /home/maker/other/power.kicad_sch", "touches ~/other/power.kicad_sch"),
+        ("cat /fake-home/maker/other/power.kicad_sch", "touches ~/other/power.kicad_sch"),
         ("cp ~/other/lib.kicad_sym .", "touches ~/other/lib.kicad_sym"),
         ("head -50 ${HOME}/Downloads/notes.txt", "touches ~/Downloads/notes.txt"),
         ("ls ~", "touches ~"),
@@ -91,7 +92,7 @@ def test_outside_workspace_commands_are_flagged(command: str, reason: str) -> No
         "git status",
         "grep -rn VCC .",
         "grep -rn VCC",
-        "grep -rn /home/maker/old .",
+        "grep -rn /fake-home/maker/old .",
         "grep VCC board.kicad_sch",
         "grep -c x / 2>/dev/null",
         "rg VCC",
@@ -111,7 +112,7 @@ def test_outside_workspace_commands_are_flagged(command: str, reason: str) -> No
         "python3 script.py",
         "python3 .copperpilot/scripts/place.py --board board.kicad_pcb",
         "cat .copperpilot/plans/a.plan.md",
-        "cat /home/maker/projects/board/README.md",
+        "cat /fake-home/maker/projects/board/README.md",
         "cat ~/projects/board/README.md",
         "ls /usr/share/kicad/symbols",
         "find /usr/share/kicad/footprints -name '*.kicad_mod'",
