@@ -75,6 +75,48 @@ def test_context_strips_inline_attachments_and_keeps_newest() -> None:
     assert "inline attachment omitted" in bounded[-2].content
 
 
+def _scrubbed(content: str) -> str:
+    messages = [ChatMessage(role="user", content=content), ChatMessage(role="user", content="next")]
+    return bound_context(messages)[0].content
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pin metadata:net1,GND here",
+        "data:net1,GND",
+        "the data: we have, apples and pears",
+        "see update:image/png;base64,AAAA",
+        "Netlist (metadata:U1,VCC_3V3,GND)",
+    ],
+)
+def test_context_keeps_ordinary_text_that_mentions_data(text: str) -> None:
+    assert _scrubbed(text) == text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "iVBORw0KGgo=",
+        "AAAA\nBBBB\nCCCC==",
+        "AAAA\r\nBBBB\r\nCCCC",
+        "AAAA\\nBBBB\\nCCCC",
+    ],
+)
+def test_context_strips_the_whole_attachment_body(body: str) -> None:
+    scrubbed = _scrubbed(f"before data:image/png;base64,{body} after")
+    assert scrubbed.startswith("before [inline attachment omitted:")
+    assert scrubbed.endswith("] after")
+    assert "BBBB" not in scrubbed
+    assert "AAAA" not in scrubbed
+
+
+def test_context_strips_attachment_without_a_type() -> None:
+    scrubbed = _scrubbed("x data:;base64,QUJD y")
+    assert scrubbed.startswith("x [inline attachment omitted:")
+    assert scrubbed.endswith("] y")
+
+
 @pytest.mark.parametrize("filler", ["x", "é", "🔧"])
 def test_clipped_context_message_fits_the_server_limit(filler: str) -> None:
     # The server rejects any context message over MAX_CONTEXT_MESSAGE_BYTES

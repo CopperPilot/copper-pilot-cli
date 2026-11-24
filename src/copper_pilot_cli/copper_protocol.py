@@ -433,7 +433,13 @@ class CopperEvent:
     resume_attempt: int | None = None
 
 
-_DATA_URI = re.compile(r"data:([^;,]+)?(?:;[^,]*)?,([A-Za-z0-9+/=\\s]+)")
+# An inline attachment: `data:` at the start of a token, an optional
+# type/subtype, optional `;params`, then a base64 body that may wrap over
+# real or escaped line breaks.
+_DATA_URI = re.compile(
+    r"(?<![\w.+-])data:([\w.+-]+/[\w.+-]+)?((?:;[^,;\s]+)*),"
+    r"([A-Za-z0-9+/=]+(?:(?:\r?\n|\\r\\n|\\n)[A-Za-z0-9+/=]+)*)"
+)
 _TERMINAL_ESCAPE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
