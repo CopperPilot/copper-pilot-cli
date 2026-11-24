@@ -27,6 +27,10 @@ IGNORED_NAMES = {
     ".copperpilot",
 }
 
+DESIGN_EXTENSIONS = frozenset(
+    {".kicad_pro", ".prjpcb", ".kicad_sch", ".schdoc", ".kicad_pcb", ".pcbdoc"}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceContext:
@@ -46,7 +50,12 @@ def canonical_workspace(value: str | Path | None = None) -> Path:
     return candidate
 
 
-def _walk(root: Path, max_depth: int = 8, max_files: int = 2_000) -> list[Path]:
+def _walk(
+    root: Path,
+    max_depth: int = 8,
+    max_files: int | None = 2_000,
+    extensions: frozenset[str] | None = None,
+) -> list[Path]:
     found: list[Path] = []
     for current, dirs, files in os.walk(root):
         relative = Path(current).relative_to(root)
@@ -54,8 +63,11 @@ def _walk(root: Path, max_depth: int = 8, max_files: int = 2_000) -> list[Path]:
             dirs[:] = []
         dirs[:] = sorted(name for name in dirs if name not in IGNORED_NAMES)
         for name in sorted(files):
-            found.append(Path(current) / name)
-            if len(found) >= max_files:
+            path = Path(current) / name
+            if extensions is not None and path.suffix.lower() not in extensions:
+                continue
+            found.append(path)
+            if max_files is not None and len(found) >= max_files:
                 return found
     return found
 
@@ -66,7 +78,10 @@ def _relative(root: Path, value: Path | None) -> str | None:
 
 def discover_workspace(root: Path) -> WorkspaceContext:
     """Discover KiCad/Altium artifacts without requiring them."""
-    files = _walk(root)
+    # Project detection must not be hidden by unrelated files earlier in the
+    # tree walk. The bounded general-purpose walk is still used for the agent's
+    # initial file listing below.
+    files = _walk(root, max_files=None, extensions=DESIGN_EXTENSIONS)
     projects = sorted(
         (path for path in files if path.suffix.lower() in {".kicad_pro", ".prjpcb"}),
         key=lambda item: (len(item.relative_to(root).parts), item.as_posix().lower()),
