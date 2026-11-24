@@ -41,7 +41,21 @@ from copper_pilot_cli.validate.pcb import (
 MAX_REFS_PER_FINDING = 50
 _IGNORED_SEVERITIES = {"excluded", "ignore", "ignored", "exclusion"}
 _REF_RE = re.compile(r"\b([A-Z]{1,4}\d+)\b")
-_NET_RE = re.compile(r"\[([^\]]+)\]")
+# KiCad item descriptions in ERC/DRC JSON (GetItemDescription). The bracket after
+# a pad, track, via or zone is its net; after a symbol it is the library name and
+# after a pin it is "name, type, shape", so brackets only mean a net on copper.
+_PAD_ITEM_RE = re.compile(
+    r"^(?:N?PTH )?pad\b(?: [^\s\[]+)?(?: \[(?P<net>[^\]]*)\])? of (?P<ref>\S+)",
+    re.IGNORECASE,
+)
+_COPPER_ITEM_RE = re.compile(
+    r"^(?:track(?: \(arc\))?|(?:blind |buried |micro )?via|zone|pad)\b[^\[]*\[(?P<net>[^\]]*)\]",
+    re.IGNORECASE,
+)
+_PART_ITEM_RE = re.compile(r"^(?:footprint|symbol) (?P<ref>\S+)", re.IGNORECASE)
+_LABEL_ITEM_RE = re.compile(r"^(?:global |hierarchical )?label '(?P<net>[^']+)'", re.IGNORECASE)
+_BRACKETED_RE = re.compile(r"\[[^\]]*\]|'[^']*'")
+_NO_NET = "<no net>"
 _ABSOLUTE_USER_PATH_RE = re.compile(
     r"(?:/home/[^/\s\"']+|/Users/[^/\s\"']+|[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s\"']+)"
 )
@@ -298,6 +312,34 @@ def check_bom_fields(
 # ---------------------------------------------------------------- ERC/DRC
 
 
+def _describe_item(description: str) -> tuple[list[str], list[str]]:
+    """Refs and nets one KiCad report item names, read the way KiCad writes it.
+
+    ``Pad A6 [GND] of Type_C1 on F.Cu`` names ``Type_C1`` and ``GND``, not the pad
+    number ``A6``; ``Symbol U3 [ESP32-S3-WROOM-1]`` names ``U3`` only. Unknown
+    item kinds fall back to reference-shaped words outside brackets and quotes.
+    """
+    text = description.strip()
+    refs: list[str] = []
+    nets: list[str] = []
+    pad = _PAD_ITEM_RE.match(text)
+    part = _PART_ITEM_RE.match(text)
+    copper = _COPPER_ITEM_RE.match(text)
+    label = _LABEL_ITEM_RE.match(text)
+    if pad is not None:
+        refs.append(pad.group("ref"))
+    elif part is not None:
+        refs.append(part.group("ref"))
+    elif copper is None and label is None:
+        refs.extend(_REF_RE.findall(_BRACKETED_RE.sub(" ", text)))
+    net = (pad and pad.group("net")) or (copper and copper.group("net"))
+    if net and net != _NO_NET:
+        nets.append(net)
+    elif label is not None:
+        nets.append(label.group("net"))
+    return [ref for ref in refs if not ref.startswith("<")], nets
+
+
 def _items_locator(
     items: list[dict[str, Any]],
 ) -> tuple[list[str], list[str], float | None, float | None]:
@@ -305,13 +347,9 @@ def _items_locator(
     nets: list[str] = []
     x = y = None
     for item in items:
-        description = str(item.get("description") or "")
-        for ref in _REF_RE.findall(description):
-            if ref not in refs:
-                refs.append(ref)
-        for net in _NET_RE.findall(description):
-            if net not in nets:
-                nets.append(net)
+        item_refs, item_nets = _describe_item(str(item.get("description") or ""))
+        refs.extend(ref for ref in item_refs if ref not in refs)
+        nets.extend(net for net in item_nets if net not in nets)
         pos = item.get("pos")
         if x is None and isinstance(pos, dict):
             x, y = pos.get("x"), pos.get("y")
