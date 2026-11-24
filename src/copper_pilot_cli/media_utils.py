@@ -300,7 +300,7 @@ def _detect_video_format(data: bytes) -> str | None:
         MIME subtype (e.g. "mp4", "webm") or `None` if unrecognized.
     """
     min_avi_len = 12
-    if data[4:8] == b"ftyp":
+    if len(data) >= 12 and data[4:8] == b"ftyp":
         # ftyp box: major brand at bytes 8-12 distinguishes MOV vs MP4
         brand = data[8:12]
         if brand == b"qt  ":
