@@ -47,6 +47,7 @@ _PATTERN_SEARCHES = frozenset({"ack", "ag", "rg"})
 _PATH_SEARCHES = frozenset({"fd", "fdfind", "find", "tree", "du"})
 _GREPS = frozenset({"egrep", "fgrep", "grep", "zgrep"})
 _FINDSTRS = frozenset({"findstr"})
+_CMD_SHELLS = frozenset({"cmd", "cmd.exe", "command.com"})
 _SHELLS = frozenset({"bash", "dash", "fish", "ksh", "sh", "zsh"})
 # Prefix commands that run the rest of the line; value-taking options listed.
 _WRAPPERS: dict[str, frozenset[str]] = {
@@ -341,6 +342,15 @@ def _shell_script(args: Sequence[str]) -> str | None:
     return None
 
 
+def _cmd_script(args: Sequence[str]) -> str | None:
+    """Return the command passed to Windows ``cmd /c`` or ``cmd /k``."""
+    for position, arg in enumerate(args):
+        if arg.casefold() in {"/c", "-c", "/k", "-k"}:
+            script = " ".join(args[position + 1 :])
+            return script or None
+    return None
+
+
 def _recursive_grep(args: Sequence[str]) -> bool:
     for position, arg in enumerate(args):
         if arg in {"--recursive", "--dereference-recursive", "--directories=recurse"}:
@@ -631,6 +641,13 @@ def _classify(command: str, scope: _Scope, depth: int) -> str | None:
         reason = _kill_by_name_reason(argv)
         if reason:
             return reason
+        if name in _CMD_SHELLS:
+            script = _cmd_script(args)
+            if script:
+                reason = _classify(script, scope, depth + 1)
+                if reason:
+                    return reason
+                continue
         if name in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
             script = _powershell_script(args)
             if script:

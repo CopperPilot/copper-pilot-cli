@@ -366,6 +366,26 @@ async def test_headless_rejects_outside_workspace_with_reason(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe and findstr are Windows commands")
+async def test_auto_rejects_cmd_wrapped_drive_search_without_approver(tmp_path) -> None:
+    broker = LocalToolBroker(
+        tmp_path,
+        mode=ApprovalMode.AUTO,
+        always_allow_shell_commands=True,
+        always_allow_dangerous_shell_commands=False,
+    )
+
+    with pytest.raises(ToolRejected, match="outside the workspace"):
+        await broker.execute(
+            tool(
+                "cmd-findstr",
+                "bash",
+                command="cmd /c findstr /S /I password C:/*.*",
+            )
+        )
+
+
 _KILLALL_REASON = (
     "`killall python3` kills every process named python3 for this user, not just the "
     "agent's; kill the PID of the process you started instead"

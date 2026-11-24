@@ -146,16 +146,28 @@ def test_workspace_outside_home_still_guards_home() -> None:
     assert classify("cat /srv/work/board/x.kicad_sch", workspace=workspace) is None
 
 
-@pytest.mark.skipif(os.name != "nt", reason="findstr is a Windows command")
+@pytest.mark.skipif(os.name != "nt", reason="findstr and cmd are Windows commands")
 @pytest.mark.parametrize(
     ("command", "reason"),
     [
         ("findstr /S /I VCC C:/*.*", "`findstr /S` searches C:\\"),
         ("findstr /S /D:C:/ VCC *.kicad_sch", "`findstr /S` searches C:\\"),
         ("findstr /S /I VCC *.kicad_sch", None),
+        (
+            "cmd /c findstr /S /I password C:/*.*",
+            "`findstr /S` searches C:\\",
+        ),
+        (
+            "cmd.exe /d /c findstr /S /I password C:/*.*",
+            "`findstr /S` searches C:\\",
+        ),
+        (
+            "cmd /c findstr /S /I VCC *.kicad_sch",
+            None,
+        ),
     ],
 )
-def test_findstr_recursive_search_scope(command: str, reason: str | None) -> None:
+def test_findstr_recursive_search_scope_through_cmd(command: str, reason: str | None) -> None:
     assert classify(command) == reason
 
 
