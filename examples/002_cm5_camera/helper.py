@@ -50,6 +50,15 @@ NET_NAME_FIELD_RE = re.compile(r'\(net_name\s+"([^"]+)"')
 THICKNESS_RE = re.compile(r"\(thickness\s+([+-]?\d+(?:\.\d+)?)")
 LOCKED_RE = re.compile(r"\(locked\s+yes\)")
 SHIELD_TAB_REFS = ("HDMI1", "J2")
+# "PTH pad SH3 [<no net>] of HDMI1", "Pad SH of J2 on F.Cu": a shield tab, not a signal pad.
+SHIELD_PAD_RE = re.compile(
+    r"\bpad SH\d*\b(?: \[[^\]]*\])? of (" + "|".join(SHIELD_TAB_REFS) + r")\b", re.IGNORECASE
+)
+# Schematic parity findings that change copper connectivity. Field and filter
+# mismatches only touch metadata, so they stay out of the gate.
+PARITY_GATED_TYPES = frozenset(
+    {"net_conflict", "missing_footprint", "extra_footprint", "duplicate_footprints"}
+)
 EDGE_CUTS_RE = re.compile(r"Edge\.Cuts")
 COORD_RE = re.compile(r"\((?:start|end|mid|center)\s+([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)")
 MODEL_RE = re.compile(r"\(model\b")
@@ -1623,7 +1632,17 @@ def summarize_erc(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize_drc(report: dict[str, Any]) -> dict[str, Any]:
+    """Blocking DRC findings: errors, connectivity parity, and unconnected items.
+
+    Net-to-net shorts and unconnected items are never waived. A short is a short
+    whichever reference layout it came from, and KiCad already keeps quiet about
+    pads a footprint connects internally (overlapping pads or jumper pad groups),
+    so any unconnected item it reports is a missing route. USB-C A6/B6 and A7/B7
+    are separate contacts: the board must bridge them or data only works with the
+    plug one way up.
+    """
     violations = [item for item in (report.get("violations") or []) if isinstance(item, dict)]
+    parity = [item for item in (report.get("schematic_parity") or []) if isinstance(item, dict)]
     unconnected = [
         item for item in (report.get("unconnected_items") or []) if isinstance(item, dict)
     ]
@@ -1633,46 +1652,35 @@ def summarize_drc(report: dict[str, Any]) -> dict[str, Any]:
         if str(item.get("severity") or "").lower() == "error"
         and str(item.get("type") or "") != "track_dangling"
         and not _allowed_shield_tab_clearance(item)
-        and not _allowed_j2_module_short(item)
+    ]
+    # KiCad reports parity at warning severity, so gate on the type instead.
+    active += [
+        item
+        for item in _active_violations(parity)
+        if str(item.get("type") or "") in PARITY_GATED_TYPES
     ]
     return {
         "violations": active,
-        "unconnected_items": [
-            item for item in unconnected if not _same_footprint_unconnected(item)
-        ],
+        "unconnected_items": _active_violations(unconnected),
         "kicad_version": report.get("kicad_version", ""),
     }
 
 
 def _allowed_shield_tab_clearance(item: dict[str, Any]) -> bool:
-    """Mini-HDMI and USB-A shield tabs sit on Edge.Cuts by design."""
+    """Mini-HDMI and USB-A shield tabs sit on Edge.Cuts by design.
+
+    Only waives an edge-clearance error whose copper items are all shield tab
+    pads of those connectors; their signal pads and any track keep the rule.
+    """
 
     if str(item.get("type") or "") != "copper_edge_clearance":
         return False
-    blob = json.dumps(item, default=str)
-    return any(ref in blob for ref in SHIELD_TAB_REFS)
-
-
-def _allowed_j2_module_short(item: dict[str, Any]) -> bool:
-    """USB-A west shield overlaps DF40 pad 199 on the NANO-C outline."""
-
-    if str(item.get("type") or "") != "shorting_items":
-        return False
-    blob = json.dumps(item, default=str)
-    return "J2" in blob and "Module1" in blob and "SH" in blob
-
-
-def _same_footprint_unconnected(item: dict[str, Any]) -> bool:
-    """USB-C mirrored pads on one footprint are not a missing route."""
-
-    pieces = item.get("items") or []
-    refs: list[str] = []
-    for piece in pieces:
-        description = str(piece.get("description") or "")
-        match = re.search(r" of ([A-Za-z][A-Za-z0-9_]*)", description)
-        if match:
-            refs.append(match.group(1))
-    return len(refs) >= 2 and len(set(refs)) == 1
+    copper = [
+        str(piece.get("description") or "")
+        for piece in item.get("items") or []
+        if isinstance(piece, dict) and "Edge.Cuts" not in str(piece.get("description") or "")
+    ]
+    return bool(copper) and all(SHIELD_PAD_RE.search(text) for text in copper)
 
 
 def run_erc_report(cli: Path, *, workspace: Path | None = None) -> dict[str, Any]:
@@ -1709,6 +1717,7 @@ def run_drc_report(cli: Path, *, workspace: Path | None = None) -> dict[str, Any
         [
             "pcb",
             "drc",
+            "--schematic-parity",
             "--format",
             "json",
             "--output",
@@ -1811,7 +1820,9 @@ def drc_repair_prompt(drc: dict[str, Any]) -> str:
         "Keep the existing CM5 camera PCB; do not start over. "
         "Do not run a long FreeRouting job. Connect leftover pads on Default_IO "
         "without ripping locked HDMI, CSI, DSI, or USB tracks. "
-        "Pull copper 0.2 mm inside Edge.Cuts except Mini-HDMI and USB-A shield tabs.\n"
+        "Pull copper 0.2 mm inside Edge.Cuts except Mini-HDMI and USB-A shield tabs. "
+        "A net_conflict means the PCB disagrees with the schematic: fix the schematic "
+        "or update the PCB from it; never rename a pad's net on the PCB alone.\n"
         f"{json.dumps(payload, default=str)}"
     )
 

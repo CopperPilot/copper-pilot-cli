@@ -619,55 +619,133 @@ def test_run_retries_socket_closed(tmp_path: Path, monkeypatch, capsys) -> None:
     _reset_helper()
 
 
-def test_drc_allows_hdmi_shield_tabs_only() -> None:
+def _edge_clearance(description: str) -> dict[str, Any]:
+    return {
+        "severity": "error",
+        "type": "copper_edge_clearance",
+        "items": [
+            {"description": "Segment on Edge.Cuts"},
+            {"description": description},
+        ],
+    }
+
+
+def test_drc_waives_shield_tab_edge_clearance_only() -> None:
     summary = helper.summarize_drc(
         {
             "violations": [
-                {
-                    "severity": "error",
-                    "type": "copper_edge_clearance",
-                    "items": [{"description": "Pad SH of HDMI1 on F.Cu"}],
-                },
-                {
-                    "severity": "error",
-                    "type": "copper_edge_clearance",
-                    "items": [{"description": "Track on F.Cu"}],
-                },
+                _edge_clearance("PTH pad SH1 [<no net>] of HDMI1"),
+                _edge_clearance("PTH pad SH [/GND] of J2"),
+                _edge_clearance("Pad SH of HDMI1 on F.Cu"),
+                _edge_clearance("Pad 3 [/HDMI0_D2_P] of HDMI1 on F.Cu"),
+                _edge_clearance("Track [/HDMI0_SDA] on F.Cu"),
+                _edge_clearance("Pad 4 [/GND] of J2 on F.Cu"),
                 {"severity": "error", "type": "hole_clearance"},
                 {"severity": "error", "type": "clearance"},
-                {
-                    "severity": "error",
-                    "type": "shorting_items",
-                    "items": [
-                        {"description": "PTH pad SH of J2 on F.Cu"},
-                        {"description": "Pad 199 of Module1 on B.Cu"},
-                    ],
-                },
-            ],
-            "unconnected_items": [
-                {
-                    "description": "Missing connection between items",
-                    "items": [
-                        {"description": "Pad A6 of Type_C1 on F.Cu"},
-                        {"description": "Pad B6 of Type_C1 on F.Cu"},
-                    ],
-                },
-                {
-                    "description": "Missing connection between items",
-                    "items": [
-                        {"description": "Pad 10 of TF1 on F.Cu"},
-                        {"description": "Track [/GND] on F.Cu"},
-                    ],
-                },
             ],
         }
     )
+    kept = [
+        item["items"][1]["description"]
+        for item in summary["violations"]
+        if item["type"] == "copper_edge_clearance"
+    ]
+    assert kept == [
+        "Pad 3 [/HDMI0_D2_P] of HDMI1 on F.Cu",
+        "Track [/HDMI0_SDA] on F.Cu",
+        "Pad 4 [/GND] of J2 on F.Cu",
+    ]
     types = [item["type"] for item in summary["violations"]]
-    assert types.count("copper_edge_clearance") == 1
     assert "hole_clearance" in types
     assert "clearance" in types
-    assert "shorting_items" not in types
-    assert len(summary["unconnected_items"]) == 1
+
+
+def test_drc_never_waives_a_net_to_net_short() -> None:
+    # The shipped board's J2 shield tab overlaps DF40 pad 199 (HDMI0_SDA).
+    short = {
+        "severity": "error",
+        "type": "shorting_items",
+        "description": "Items shorting two nets (nets /HDMI0_SDA and /GND)",
+        "items": [
+            {"description": "Pad 199 [/HDMI0_SDA] of Module1 on B.Cu"},
+            {"description": "PTH pad SH [/GND] of J2"},
+        ],
+    }
+    summary = helper.summarize_drc({"violations": [short]})
+    assert summary["violations"] == [short]
+
+
+def test_drc_gates_connectivity_parity_findings() -> None:
+    def parity(kind: str, description: str, severity: str = "warning") -> dict[str, Any]:
+        return {"severity": severity, "type": kind, "description": description, "items": []}
+
+    summary = helper.summarize_drc(
+        {
+            "schematic_parity": [
+                parity("net_conflict", "Pad net (GND) doesn't match net given by schematic (/GND)"),
+                parity("missing_footprint", "Missing footprint R99"),
+                parity("extra_footprint", "Extra footprint R98"),
+                parity("duplicate_footprints", "Duplicate footprints C1"),
+                parity("footprint_symbol_field_mismatch", "Value field differs"),
+                parity("footprint_filters_mismatch", "Footprint filter mismatch"),
+                parity("net_conflict", "Excluded on purpose", severity="excluded"),
+                parity("net_conflict", "Ignored on purpose", severity="ignore"),
+            ]
+        }
+    )
+    assert [item["type"] for item in summary["violations"]] == [
+        "net_conflict",
+        "missing_footprint",
+        "extra_footprint",
+        "duplicate_footprints",
+    ]
+
+
+def test_drc_keeps_unconnected_pads_on_one_footprint() -> None:
+    # USB-C A6/B6 are separate contacts; an unbridged pair breaks one plug orientation.
+    summary = helper.summarize_drc(
+        {
+            "unconnected_items": [
+                {
+                    "severity": "error",
+                    "description": "Missing connection between items",
+                    "items": [
+                        {"description": "Pad A6 [/USB_DP] of Type_C1 on F.Cu"},
+                        {"description": "Pad B6 [/USB_DP] of Type_C1 on F.Cu"},
+                    ],
+                },
+                {
+                    "severity": "error",
+                    "description": "Missing connection between items",
+                    "items": [
+                        {"description": "Pad 22 [/GND] of Module1 on B.Cu"},
+                        {"description": "Pad 23 [/GND] of Module1 on B.Cu"},
+                    ],
+                },
+            ]
+        }
+    )
+    assert len(summary["unconnected_items"]) == 2
+
+
+def test_run_drc_report_checks_schematic_parity(tmp_path: Path, monkeypatch) -> None:
+    _blank_project(tmp_path)
+    seen: list[list[str]] = []
+
+    def fake_kicad(cli: Path, args: list[str], *, cwd: Path) -> Any:
+        seen.append(args)
+        output = Path(cwd) / args[args.index("--output") + 1]
+        output.write_text(
+            '{"violations": [], "unconnected_items": [], "schematic_parity": '
+            '[{"severity": "warning", "type": "net_conflict", "items": []}]}',
+            encoding="utf-8",
+        )
+        return None
+
+    monkeypatch.setattr(helper, "_run_kicad", fake_kicad)
+    drc = helper.run_drc_report(Path("kicad-cli"), workspace=tmp_path)
+    assert "--schematic-parity" in seen[0]
+    assert [item["type"] for item in drc["violations"]] == ["net_conflict"]
 
 
 def test_route_headless_requires_skill(tmp_path: Path) -> None:
