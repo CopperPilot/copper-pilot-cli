@@ -4,6 +4,21 @@ Changelog
 
 (unreleased)
 ------------
+- Merge pull request #71 from
+  CopperPilot/fix/stream_budget_skips_tool_requests_24_nov_2026.
+  [Aditya]
+
+  Tool requests do not count toward the client stream byte budget
+- Tool requests do not count toward the client stream byte budget.
+  [AdityaNG]
+
+
+1.0.3 (2026-11-19)
+------------------
+- Merge pull request #63 from CopperPilot/release/1.0.3. [Aditya]
+
+  release: version 1.0.3
+- Release: version 1.0.3 🚀 [AdityaNG]
 - Merge pull request #62 from
   CopperPilot/feat/billed_usage_in_prompt_meta_19_nov_2026. [Aditya]
 - ACP: report the CopperPilot tokens each prompt was billed
