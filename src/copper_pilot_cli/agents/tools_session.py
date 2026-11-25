@@ -84,6 +84,31 @@ class ToolSessionInfo:
     guide_title: str = "CopperPilot guide"
     guide_text: str = ""
     limits: dict[str, Any] = field(default_factory=dict)
+    # Optional frames the server understands (``tool_session_ready.capabilities``).
+    capabilities: list[str] = field(default_factory=list)
+
+
+def _read_only_names(tools: list[dict[str, Any]]) -> set[str]:
+    """Tools a spec list marks read-only (no flag = an older server, read-only)."""
+    return {str(t.get("name")) for t in tools if t.get("read_only") is not False}
+
+
+def _connection_lost_frame(call_id: str, name: str) -> dict[str, Any]:
+    return {
+        "type": "tool_call_result",
+        "call_id": call_id,
+        "ok": False,
+        "content": [],
+        "error": {
+            "code": "connection_lost",
+            "message": (
+                f"The connection to CopperPilot dropped while {name} was running, so it may "
+                "or may not have been applied. Re-read the design (query_design / "
+                "get_component_info) before retrying it."
+            ),
+            "retryable": True,
+        },
+    }
 
 
 def tools_ws_url(base_url: str) -> str:
@@ -154,6 +179,8 @@ class ToolSessionClient:
         # MCP server cannot see turns, so it must not advertise ``turn_end_v1``.
         self.turn_end = turn_end
         self._turn_ends: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Calls actually sent on a socket (only those can need a replay).
+        self._sent: set[str] = set()
         self.info: ToolSessionInfo | None = None
         self._socket: Any = None
         self._reader: asyncio.Task[None] | None = None
@@ -259,12 +286,15 @@ class ToolSessionClient:
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         ]
         limits = frame.get("limits") if isinstance(frame.get("limits"), dict) else {}
+        previous = self.info
+        caps = frame.get("capabilities")
         self.info = ToolSessionInfo(
             session_id=str(frame.get("session_id") or session_id),
             tools=tools,
             guide_title=str(guide.get("title") or "CopperPilot guide"),
             guide_text=str(guide.get("text") or ""),
             limits=limits,
+            capabilities=[str(c) for c in caps] if isinstance(caps, list) else [],
         )
         concurrency = limits.get("max_concurrent_calls")
         if self._semaphore is None:
@@ -281,12 +311,21 @@ class ToolSessionClient:
             len(self.info.guide_text),
         )
         self._reader = asyncio.create_task(self._read(socket))
-        # Calls that were in flight when the previous socket dropped run again
-        # (the tools are read-only; the server kept nothing).
+        # Calls that were in flight when the previous socket dropped (the
+        # server kept nothing): reads run again; an edit may already have been
+        # applied, so it is never replayed and fails with a retryable error
+        # telling the agent to re-read the design. Calls not sent yet are sent
+        # by ``call_tool`` itself.
+        read_only = _read_only_names(previous.tools if previous else tools)
         for call_id, (frame_out, future) in list(self._pending.items()):
-            if not future.done():
+            if future.done() or call_id not in self._sent:
+                continue
+            name = str(frame_out.get("name") or "")
+            if name in read_only:
                 await self._send(frame_out)
                 logger.info("Re-sent tool call %s after reconnect", call_id)
+            else:
+                future.set_result(_connection_lost_frame(call_id, name))
 
     async def aclose(self) -> None:
         self._closing = True
@@ -319,6 +358,7 @@ class ToolSessionClient:
             try:
                 await self._wait_ready()
                 await self._send(frame)
+                self._sent.add(call_id)
                 return await future
             except asyncio.CancelledError:
                 with contextlib.suppress(Exception):
@@ -326,6 +366,7 @@ class ToolSessionClient:
                 raise
             finally:
                 self._pending.pop(call_id, None)
+                self._sent.discard(call_id)
 
     async def cancel_all(self) -> None:
         if self._socket is not None and self._pending:
@@ -365,6 +406,9 @@ class ToolSessionClient:
         Waits at most ``TURN_END_TIMEOUT_SECONDS`` and never raises.
         """
         if self._socket is None or not self._ready.is_set():
+            return None
+        # A server that predates turn_end ignores it silently; never wait on one.
+        if self.info is None or TURN_END_CAPABILITY not in self.info.capabilities:
             return None
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._turn_ends[turn_id] = future

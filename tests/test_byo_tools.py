@@ -277,6 +277,35 @@ async def test_tool_session_reconnects_and_resends_after_drain(tmp_path: Path) -
     assert len(fake.starts) == 2
 
 
+async def test_edit_in_flight_at_a_drop_is_not_replayed(tmp_path: Path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    async with tools_server() as fake:
+        fake.restart_once = True
+        client = _client(fake, tmp_path, broker)
+        try:
+            result = await asyncio.wait_for(client.call_tool("place_symbol", {}), 15)
+        finally:
+            await client.aclose()
+    assert result["ok"] is False
+    assert result["error"]["code"] == "connection_lost"
+    assert result["error"]["retryable"] is True
+    assert "Re-read the design" in result["error"]["message"]
+    assert [f["name"] for f in fake.of_type("tool_call")] == ["place_symbol"]
+
+
+async def test_turn_end_not_sent_to_a_server_without_the_capability(tmp_path: Path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    async with tools_server() as fake:
+        fake.capabilities = None
+        client = _client(fake, tmp_path, broker)
+        try:
+            await client.start()
+            assert await client.send_turn_end("t1") is None
+        finally:
+            await client.aclose()
+    assert fake.of_type("turn_end") == []
+
+
 # ------------------------------------------------------------- MCP server
 
 

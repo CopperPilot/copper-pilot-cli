@@ -56,6 +56,8 @@ class FakeToolsServer:
         # What the server answers a ``turn_end`` with; ``turn_end_silent`` never answers.
         self.turn_end_note: str | None = None
         self.turn_end_silent = False
+        # ``tool_session_ready.capabilities`` (None: an older server, no field).
+        self.capabilities: list[str] | None = ["turn_end_v1"]
 
     @property
     def credential(self) -> DeviceCredential:
@@ -80,6 +82,9 @@ class FakeToolsServer:
                     "type": "tool_session_ready",
                     "protocol_version": 1,
                     "session_id": start["session_id"],
+                    **(
+                        {"capabilities": self.capabilities} if self.capabilities is not None else {}
+                    ),
                     "tools": TOOLS,
                     "guide": {"title": "CopperPilot guide", "text": GUIDE},
                     "limits": {"max_concurrent_calls": 4, "calls_per_minute": 60},
