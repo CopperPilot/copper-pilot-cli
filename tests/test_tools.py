@@ -18,6 +18,28 @@ from copper_pilot_cli.copper_tools import (
     routine_action,
 )
 
+# Cross-platform replacements for POSIX-only `cat` and `grep`.
+# Using sys.executable avoids a dependency on external tools that are absent on
+# Windows. "~/other/secret.kicad_sch" is kept as a literal token in _CAT_SECRET
+# so that shell_scope.py's text-based heuristic still classifies the command as
+# outside-workspace and triggers the approval prompt exactly as before.
+_PY = sys.executable
+
+_CAT_SECRET = (
+    f'"{_PY}" -c '
+    '"import pathlib,sys;'
+    "print(pathlib.Path(sys.argv[1]).expanduser().read_text(),end='')"
+    '" ~/other/secret.kicad_sch'
+)
+
+_GREP_VCC = (
+    f'"{_PY}" -c '
+    '"import pathlib;'
+    "[print(p) for p in pathlib.Path().rglob('*')"
+    " if p.is_file() and 'VCC' in p.read_text(errors='replace')]"
+    '"'
+)
+
 
 def tool(identifier: str, name: str, **arguments) -> ToolRequest:
     return ToolRequest(tool_call_id=identifier, tool_name=name, arguments=arguments)
@@ -264,6 +286,9 @@ def _home_workspace(tmp_path, monkeypatch):
     (home / "other" / "secret.kicad_sch").write_text("other project")
     workspace.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    if sys.platform == "win32":
+        # Windows Path.expanduser() uses USERPROFILE, not HOME.
+        monkeypatch.setenv("USERPROFILE", str(home))
     return workspace
 
 
@@ -287,14 +312,14 @@ async def test_outside_workspace_shell_prompts_unless_dangerous_auto_allowed(
         always_allow_shell_commands=True,
         always_allow_dangerous_shell_commands=False,
     )
-    result = await broker.execute(tool("1", "bash", command="cat ~/other/secret.kicad_sch"))
+    result = await broker.execute(tool("1", "bash", command=_CAT_SECRET))
 
     assert "other project" in result["result"]
     assert len(requests) == 1
     assert requests[0].outside_workspace == "touches ~/other/secret.kicad_sch"
     assert requests[0].reason == "Outside the workspace: touches ~/other/secret.kicad_sch"
     # Approval is per call: the next one asks again and the mode is unchanged.
-    await broker.execute(tool("2", "bash", command="cat ~/other/secret.kicad_sch"))
+    await broker.execute(tool("2", "bash", command=_CAT_SECRET))
     assert len(requests) == 2
     assert broker.mode is mode
 
@@ -324,7 +349,7 @@ async def test_outside_workspace_shell_runs_when_dangerous_auto_allowed(
     )
     # Headless and MCP runs too: nobody is asked, the command just runs.
     assert broker.has_approver is interactive
-    result = await broker.execute(tool("1", "bash", command="cat ~/other/secret.kicad_sch"))
+    result = await broker.execute(tool("1", "bash", command=_CAT_SECRET))
 
     assert "other project" in result["result"]
     assert requests == []
@@ -435,7 +460,7 @@ async def test_in_project_shell_still_runs_without_prompt_in_yolo(tmp_path, monk
     workspace = _home_workspace(tmp_path, monkeypatch)
     (workspace / "board.kicad_sch").write_text("VCC")
     broker = LocalToolBroker(workspace, mode=ApprovalMode.YOLO)
-    result = await broker.execute(tool("1", "bash", command="grep -rn VCC ."))
+    result = await broker.execute(tool("1", "bash", command=_GREP_VCC))
     assert "board.kicad_sch" in result["result"]
 
 
