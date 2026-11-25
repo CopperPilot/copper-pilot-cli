@@ -137,11 +137,24 @@ _ROUTINE_WRITE_SUFFIXES = frozenset(
         ".yml",
     }
 )
-# KiCad design files. Auto treats them as routine writes only for writes that
-# come from a ``copperpilot_subagent`` turn (a hosted CopperPilot turn the
-# user's own agent delegated the design edit to); a plain hosted turn under
-# Auto still asks.
-KICAD_DESIGN_SUFFIXES = frozenset({".kicad_sch", ".kicad_pcb", ".kicad_sym", ".kicad_pro"})
+# Design files (KiCad and Altium). Auto treats them as routine writes only for
+# writes that come from the user's own agent: a ``copperpilot_subagent`` turn
+# or a CopperPilot edit tool on the tool socket (the bridge). A plain hosted
+# turn under Auto still asks.
+KICAD_DESIGN_SUFFIXES = frozenset(
+    {
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".kicad_sym",
+        ".kicad_mod",
+        ".kicad_pro",
+        ".schdoc",
+        ".pcbdoc",
+        ".schlib",
+        ".pcblib",
+        ".prjpcb",
+    }
+)
 # Compare-and-swap writes (``cas_writes_v1``): the refusal code a write gets
 # when the file changed since the read whose hash it carries.
 FILE_CHANGED_CODE = "FILE_CHANGED"

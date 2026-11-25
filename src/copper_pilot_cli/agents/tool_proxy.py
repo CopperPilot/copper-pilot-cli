@@ -2,12 +2,13 @@
 
 ``ToolProxy`` is what every front end exposes over MCP:
 
-* the curated, read-only CopperPilot tools from ``tool_session_ready``,
-  proxied to the tool socket;
-* ``copperpilot_subagent``, which runs one ordinary hosted CopperPilot turn
-  (a fresh conversation per call) through the same graph as the TUI. It is
-  the main way the user's agent *writes* design files; under Auto its KiCad
-  writes count as routine;
+* every CopperPilot tool from ``tool_session_ready`` (design edits included,
+  except memory), proxied to the tool socket. Each spec carries ``read_only``;
+  Ask mode only runs the read-only ones and Plan mode no edit tool;
+* ``copperpilot_subagent``, an optional hosted CopperPilot turn (a fresh
+  conversation per call) through the same graph as the TUI, for when the user
+  asks for CopperPilot itself or a second opinion. The agent edits designs with
+  the MCP edit tools and its own subagents by default;
 * the guide as the resource ``copperpilot://guide``.
 
 Claude uses it in-process; Codex reaches it through ``copper-pilot mcp
@@ -34,12 +35,29 @@ logger = logging.getLogger(__name__)
 SUBAGENT_TOOL = "copperpilot_subagent"
 GUIDE_URI = "copperpilot://guide"
 SUBAGENT_DESCRIPTION = (
-    "Run a CopperPilot electronics design agent turn (hosted). Use it for schematic, PCB "
-    "and library edits: describe the change precisely (references, nets, values, files). "
-    "It reads and edits the KiCad files itself and reports what it did and which files "
-    "changed. mode: agent (edits, default), plan (proposes a plan) or ask (read-only "
-    "answer). effort: balanced (default) or intelligence (paid plans). Each call is a "
-    "fresh conversation, so include the context it needs."
+    "Optional: run a hosted CopperPilot design agent turn, billed to the user's CopperPilot "
+    "plan. Use it only when the user asks for CopperPilot itself or you want a second "
+    "opinion. For normal work, edit the design yourself with the CopperPilot edit tools and "
+    "delegate to your own subagents. Describe the task precisely (references, nets, values, "
+    "files); it reports what it did and which files changed. mode: agent (edits, default), "
+    "plan (proposes a plan) or ask (read-only answer). effort: balanced (default) or "
+    "intelligence (paid plans). Each call is a fresh conversation, so include the context "
+    "it needs."
+)
+# Tools Claude Code keeps in context from the start; the rest (about 150 tools,
+# 50K tokens of schemas) are left to its MCP tool search to defer.
+CORE_TOOLS = frozenset(
+    {
+        "read_copperpilot_playbook",
+        "query_design",
+        "get_component_info",
+        "run_erc",
+        "run_drc",
+        "validate_schematic_layout",
+        "apply_kicad_schematic_batch",
+        "load_server_skill",
+        SUBAGENT_TOOL,
+    }
 )
 SUBAGENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -107,6 +125,8 @@ class ToolProxy:
         emit: EventSink | None = None,
         subagent_runner: SubagentRunner = default_subagent_runner,
     ) -> None:
+        # The chat's mode for the running turn (set by the session owner).
+        self.mode = CopperMode.AGENT
         self.session = session
         self.workspace = workspace
         # The chat's broker: its live approval mode, prompts and shell settings
@@ -133,6 +153,8 @@ class ToolProxy:
                 "inputSchema": item.get("input_schema")
                 if isinstance(item.get("input_schema"), dict)
                 else {"type": "object", "properties": {}},
+                "readOnly": _read_only(item),
+                "alwaysLoad": str(item["name"]) in CORE_TOOLS,
             }
             for item in self.session.tools
             if item.get("name") != SUBAGENT_TOOL
@@ -142,9 +164,33 @@ class ToolProxy:
                 "name": SUBAGENT_TOOL,
                 "description": SUBAGENT_DESCRIPTION,
                 "inputSchema": SUBAGENT_SCHEMA,
+                "readOnly": False,
+                "alwaysLoad": True,
             }
         )
         return tools
+
+    def read_only(self, name: str) -> bool:
+        """Whether a hosted tool only reads (an old server sends no flag: read-only)."""
+        return all(_read_only(item) for item in self.session.tools if item.get("name") == name)
+
+    def _refusal(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Why the chat's mode forbids this call, or None (Ask: reads only; Plan: no edits)."""
+        if self.mode is CopperMode.AGENT:
+            return None
+        if name == SUBAGENT_TOOL:
+            # A hosted turn in a read-only mode cannot edit either.
+            allowed = {CopperMode.ASK.value}
+            if self.mode is CopperMode.PLAN:
+                allowed.add(CopperMode.PLAN.value)
+            if str(arguments.get("mode") or CopperMode.AGENT.value) in allowed:
+                return None
+        elif self.read_only(name):
+            return None
+        return (
+            f"This chat is in {self.mode.value.title()} mode: {name} can change the design. "
+            "Use read-only CopperPilot tools, or ask the user to switch to Agent mode."
+        )
 
     def tool_names(self) -> list[str]:
         return [str(item["name"]) for item in self.session.tools] + [SUBAGENT_TOOL]
@@ -157,6 +203,9 @@ class ToolProxy:
         progress: ProgressFn | None = None,
         call_id: str | None = None,
     ) -> ToolOutcome:
+        refusal = self._refusal(name, arguments)
+        if refusal is not None:
+            return ToolOutcome.text(refusal, is_error=True)
         if name == SUBAGENT_TOOL:
             return await self.run_subagent(arguments, progress=progress, call_id=call_id)
         try:
@@ -291,6 +340,10 @@ class ToolProxy:
         return ToolOutcome.text(text, is_error=not ok)
 
 
+def _read_only(item: dict[str, Any]) -> bool:
+    return item.get("read_only") is not False
+
+
 def subagent_text(result: dict[str, Any]) -> str:
     """What the user's agent reads back from a ``copperpilot_subagent`` call."""
     if result.get("error") == "login_required":
@@ -361,6 +414,7 @@ def outcome_from_result(frame: dict[str, Any]) -> ToolOutcome:
 
 
 __all__ = [
+    "CORE_TOOLS",
     "GUIDE_URI",
     "SUBAGENT_SCHEMA",
     "SUBAGENT_TOOL",

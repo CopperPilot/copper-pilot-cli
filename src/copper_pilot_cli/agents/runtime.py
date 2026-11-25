@@ -87,6 +87,9 @@ class BridgeBroker:
                 always_allow_shell_commands=parent.always_allow_shell_commands,
                 always_allow_dangerous_shell_commands=parent.always_allow_dangerous_shell_commands,
                 cas_writes=True,
+                # Design files written by the agent's CopperPilot edit tools
+                # (inside the workspace) are routine under Auto, like a subagent's.
+                routine_kicad_writes=True,
             )
             self._key = key
         return self._broker
@@ -111,6 +114,7 @@ class AgentSessions:
         self._factories = factories
         self._tool_session_factory = tool_session_factory
         self._sessions: dict[str, AgentSession] = {}
+        self._tools: dict[str, tuple[ToolSessionClient, ToolProxy]] = {}
         self._active: AgentSession | None = None
 
     def factories(self) -> dict[Provider, SessionFactory]:
@@ -154,6 +158,7 @@ class AgentSessions:
             conversation_id=thread_id,
             executor=bridge.execute,
             agent={"provider": selection.provider.value, "model": selection.model or ""},
+            turn_end=True,
         )
         proxy = ToolProxy(tools, workspace=workspace, broker=self._broker())
         session = factory(selection, workspace=workspace, proxy=proxy, broker=self._broker)
@@ -174,10 +179,12 @@ class AgentSessions:
             try:
                 await original_close()
             finally:
+                self._tools.pop(thread_id, None)
                 await tools.aclose()
 
         session.aclose = close
         self._sessions[thread_id] = session
+        self._tools[thread_id] = (tools, proxy)
         return session, True
 
     async def compact(self, thread_id: str) -> str:
@@ -259,6 +266,9 @@ class AgentSessions:
             turn_id=turn_id,
         )
         self._active = session
+        tools, proxy = self._tools[thread_id]
+        proxy.mode = mode
+        final: list[CopperEvent] = []
         try:
             async for event in session.run_turn(seeded_prompt(handoff, prompt), context):
                 data = event.data if isinstance(event.data, dict) else {}
@@ -271,10 +281,21 @@ class AgentSessions:
                         {"kind": PLAN_READY_KIND, "file_path": relative, "name": name},
                     )
                     continue
+                if event.kind is EventKind.FINAL:
+                    # The turn's end marker comes after the server's turn_end note.
+                    final.append(event)
+                    continue
+                yield event
+            note = await tools.send_turn_end(turn_id)
+            if note:
+                yield CopperEvent(EventKind.STATUS, note)
+            for event in final:
                 yield event
         except ToolSessionError as exc:
             raise _tool_error(exc) from exc
         except agent_errors.AgentError as exc:
+            # The failed turn may still have staged edits: let the server apply them.
+            await tools.send_turn_end(turn_id)
             if exc.kind in {agent_errors.PROCESS_EXITED, agent_errors.NOT_INSTALLED}:
                 await self.discard(thread_id)
             raise

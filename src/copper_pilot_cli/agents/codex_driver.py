@@ -538,8 +538,8 @@ class CodexSession(AgentSession):
 
     async def _elicitation(self, broker: LocalToolBroker, params: dict[str, Any]) -> dict[str, Any]:
         if params.get("serverName") == MCP_SERVER_NAME:
-            # Codex asking whether it may call our own tools: they are read-only,
-            # and copperpilot_subagent asks for its own writes.
+            # Codex asking whether it may call our own tools: the ToolProxy
+            # enforces Ask/Plan, and their file writes follow the approval rules.
             return {"action": "accept", "content": _default_content(params)}
         schema = params.get("requestedSchema") if isinstance(params, dict) else None
         properties = (schema or {}).get("properties") if isinstance(schema, dict) else None

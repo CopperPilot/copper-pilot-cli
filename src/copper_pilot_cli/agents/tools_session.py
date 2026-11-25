@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 TOOLS_WS_PATH = "/api/copperpilot/tools/ws"
 PROTOCOL_VERSION = 1
 CAPABILITIES = ("parallel_tool_requests", "cas_writes_v1")
+# Advertised only by owners that send ``turn_end`` when each agent turn ends.
+TURN_END_CAPABILITY = "turn_end_v1"
+# The server may apply staged edits at turn end; never hold the next turn longer.
+TURN_END_TIMEOUT_SECONDS = 60.0
 READY_TIMEOUT_SECONDS = 30.0
 # A dropped socket reconnects; a pending call waits this long for it.
 RECONNECT_WINDOW_SECONDS = 60.0
@@ -136,6 +140,7 @@ class ToolSessionClient:
         on_progress: ProgressCallback | None = None,
         connect: Callable[..., Any] = ws_connect,
         reconnect_window: float = RECONNECT_WINDOW_SECONDS,
+        turn_end: bool = False,
     ) -> None:
         self.credential = credential
         self.workspace = workspace.resolve()
@@ -145,6 +150,10 @@ class ToolSessionClient:
         self.on_progress = on_progress
         self._connect = connect
         self.reconnect_window = reconnect_window
+        # The owner of the turns (the TUI) calls ``send_turn_end``; a standalone
+        # MCP server cannot see turns, so it must not advertise ``turn_end_v1``.
+        self.turn_end = turn_end
+        self._turn_ends: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self.info: ToolSessionInfo | None = None
         self._socket: Any = None
         self._reader: asyncio.Task[None] | None = None
@@ -181,7 +190,7 @@ class ToolSessionClient:
             "initial_file_tree": [line for line in tree.split("\n") if line],
             "eda": detect_eda(self.workspace, context.schematic_path, context.pcb_path),
             "agent": {"client": "cli", "version": __version__, **self.agent},
-            "capabilities": list(CAPABILITIES),
+            "capabilities": [*CAPABILITIES, *((TURN_END_CAPABILITY,) if self.turn_end else ())],
         }
 
     async def start(self) -> ToolSessionInfo:
@@ -292,6 +301,9 @@ class ToolSessionClient:
                 await self._socket.close()
         self._socket = None
         self._fail_pending(ToolSessionError("the tool session closed", retryable=True))
+        for waiting in list(self._turn_ends.values()):
+            if not waiting.done():
+                waiting.set_exception(ToolSessionError("the tool session closed"))
 
     # ---------------------------------------------------------------- calls
 
@@ -345,6 +357,30 @@ class ToolSessionClient:
                     "cached_input_tokens": max(0, int(cached_input_tokens)),
                 }
             )
+
+    async def send_turn_end(self, turn_id: str) -> str | None:
+        """Tell the server the agent's turn ended; the note it answers with, if any.
+
+        The server applies staged edits (Altium) and replies ``turn_end_result``.
+        Waits at most ``TURN_END_TIMEOUT_SECONDS`` and never raises.
+        """
+        if self._socket is None or not self._ready.is_set():
+            return None
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._turn_ends[turn_id] = future
+        try:
+            await self._send({"type": "turn_end", "turn_id": turn_id})
+            async with asyncio.timeout(TURN_END_TIMEOUT_SECONDS):
+                result = await future
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a missing reply must not break the chat
+            logger.info("turn_end got no result (%s)", turn_id)
+            return None
+        finally:
+            self._turn_ends.pop(turn_id, None)
+        note = result.get("note")
+        return sanitize_status(note) if isinstance(note, str) and note.strip() else None
 
     async def _wait_ready(self) -> None:
         if self._failure is not None:
@@ -408,6 +444,10 @@ class ToolSessionClient:
             entry = self._pending.get(call_id)
             if entry is not None and not entry[1].done():
                 entry[1].set_result(frame)
+        elif kind == "turn_end_result":
+            waiting = self._turn_ends.get(str(frame.get("turn_id") or ""))
+            if waiting is not None and not waiting.done():
+                waiting.set_result(frame)
         elif kind == "tool_request":
             task = asyncio.create_task(self._serve_bridge(frame))
             self._bridge.add(task)
@@ -501,6 +541,7 @@ def _frame_error(frame: dict[str, Any]) -> ToolSessionError:
 __all__ = [
     "CAPABILITIES",
     "TOOLS_WS_PATH",
+    "TURN_END_CAPABILITY",
     "ToolSessionClient",
     "ToolSessionError",
     "ToolSessionInfo",

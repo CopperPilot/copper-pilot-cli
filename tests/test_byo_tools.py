@@ -21,8 +21,11 @@ from copper_pilot_cli.agents.mcp_server import (
     RelayServer,
     build_mcp_server,
 )
+from copper_pilot_cli.agents.runtime import BridgeBroker
 from copper_pilot_cli.agents.tool_proxy import (
+    CORE_TOOLS,
     GUIDE_URI,
+    SUBAGENT_DESCRIPTION,
     SUBAGENT_TOOL,
     ToolOutcome,
     ToolProxy,
@@ -31,12 +34,13 @@ from copper_pilot_cli.agents.tool_proxy import (
 )
 from copper_pilot_cli.agents.tools_session import (
     CAPABILITIES,
+    TURN_END_CAPABILITY,
     ToolSessionClient,
     ToolSessionError,
     detect_eda,
     tools_ws_url,
 )
-from copper_pilot_cli.copper_protocol import CopperEvent, EventKind, ToolRequest
+from copper_pilot_cli.copper_protocol import CopperEvent, CopperMode, EventKind, ToolRequest
 from copper_pilot_cli.copper_tools import (
     ApprovalMode,
     LocalToolBroker,
@@ -187,7 +191,11 @@ async def test_tool_session_handshake_call_and_bridge(tmp_path: Path) -> None:
         client.on_progress = lambda _call, message: progress.append(message)
         try:
             info = await client.start()
-            assert [tool["name"] for tool in info.tools] == ["query_design", "run_erc"]
+            assert [tool["name"] for tool in info.tools] == [
+                "query_design",
+                "run_erc",
+                "place_symbol",
+            ]
             assert client.guide == GUIDE
             result = await client.call_tool("query_design", {"query": "U1"})
             await client.send_usage(
@@ -442,7 +450,12 @@ async def test_proxy_lists_server_tools_plus_subagent(tmp_path: Path) -> None:
             guide = await ProxyBackend(proxy).read_guide()
         finally:
             await client.aclose()
-    assert [tool["name"] for tool in tools] == ["query_design", "run_erc", SUBAGENT_TOOL]
+    assert [tool["name"] for tool in tools] == [
+        "query_design",
+        "run_erc",
+        "place_symbol",
+        SUBAGENT_TOOL,
+    ]
     assert tools[0]["inputSchema"]["properties"]["query"]["type"] == "string"
     assert outcome.plain() == "result of run_erc"
     assert guide == GUIDE
@@ -454,3 +467,179 @@ def test_chat_socket_advertises_cas_and_lifts_the_hash() -> None:
     assert "cas_writes_v1" in client_capabilities()
     frame = tool_result_frame("c", "t", {"result": "x", "content_sha256": "ab"})
     assert frame["content_sha256"] == "ab" and frame["result"] == {"result": "x"}
+
+
+# ------------------------------------------------------------ BYOA v2
+
+
+async def test_mcp_annotations_and_core_tools_follow_read_only_flags(tmp_path: Path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    async with tools_server() as fake:
+        client = _client(fake, tmp_path, broker)
+        proxy = ToolProxy(client, workspace=tmp_path, broker=broker)
+        server = build_mcp_server(ProxyBackend(proxy))
+        try:
+            async with create_connected_server_and_client_session(server) as session:
+                tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        finally:
+            await client.aclose()
+    assert tools["query_design"].annotations.readOnlyHint is True  # ty: ignore[unresolved-attribute]
+    assert tools["place_symbol"].annotations.readOnlyHint is False  # ty: ignore[unresolved-attribute]
+    assert tools[SUBAGENT_TOOL].annotations.readOnlyHint is False  # ty: ignore[unresolved-attribute]
+    # Core tools stay loaded in Claude Code; the rest may be deferred to tool search.
+    assert tools["query_design"].meta == {"anthropic/alwaysLoad": True}
+    assert tools["place_symbol"].meta == {"anthropic/alwaysLoad": False}
+    assert tools[SUBAGENT_TOOL].meta == {"anthropic/alwaysLoad": True}
+    assert {"read_copperpilot_playbook", "apply_kicad_schematic_batch", SUBAGENT_TOOL} <= CORE_TOOLS
+
+
+async def test_missing_read_only_flag_means_an_old_server_and_read_only() -> None:
+    backend = StubBackend()  # its specs carry no readOnly key
+    server = build_mcp_server(backend)
+    async with create_connected_server_and_client_session(server) as client:
+        tools = (await client.list_tools()).tools
+    assert all(tool.annotations.readOnlyHint is True for tool in tools)  # ty: ignore[unresolved-attribute]
+
+
+def test_subagent_description_is_optional_and_billed() -> None:
+    assert SUBAGENT_DESCRIPTION.startswith("Optional:")
+    assert "CopperPilot plan" in SUBAGENT_DESCRIPTION and "second opinion" in SUBAGENT_DESCRIPTION
+    assert "edit the design yourself" in SUBAGENT_DESCRIPTION
+
+
+async def test_ask_and_plan_modes_limit_copperpilot_edit_tools(tmp_path: Path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    ran: list[str] = []
+
+    async def runner(**kwargs: Any) -> dict[str, Any]:
+        ran.append(kwargs["mode"].value)
+        return {"ok": True, "text": "done", "changed_files": []}
+
+    async with tools_server() as fake:
+        client = _client(fake, tmp_path, broker)
+        proxy = ToolProxy(client, workspace=tmp_path, broker=broker, subagent_runner=runner)
+        try:
+            await proxy.start()
+            for mode, subagent_modes in (
+                (CopperMode.ASK, {"ask"}),
+                (CopperMode.PLAN, {"ask", "plan"}),
+            ):
+                proxy.mode = mode
+                edit = await proxy.call_tool("place_symbol", {})
+                assert edit.is_error and "can change the design" in edit.plain()
+                assert not (await proxy.call_tool("run_erc", {})).is_error
+                for requested in ("agent", "plan", "ask"):
+                    outcome = await proxy.call_tool(SUBAGENT_TOOL, {"task": "x", "mode": requested})
+                    assert outcome.is_error is (requested not in subagent_modes)
+            ran.clear()
+            proxy.mode = CopperMode.AGENT
+            assert not (await proxy.call_tool("place_symbol", {})).is_error
+            assert not (await proxy.call_tool(SUBAGENT_TOOL, {"task": "x"})).is_error
+            assert ran == ["agent"]
+        finally:
+            await client.aclose()
+    # Refused calls never reached the server; only the Agent-mode one did.
+    assert [f["name"] for f in fake.of_type("tool_call") if f["name"] == "place_symbol"] == [
+        "place_symbol"
+    ]
+
+
+async def test_bridge_design_writes_are_routine_under_auto_inside_the_workspace(
+    tmp_path: Path,
+) -> None:
+    asked: list[Any] = []
+
+    async def approve(request: Any) -> bool:
+        asked.append(request)
+        return False
+
+    parent = LocalToolBroker(tmp_path, mode=ApprovalMode.AUTO, approve=approve)
+    bridge = BridgeBroker(lambda: parent)
+    for name in (
+        "a.kicad_sch",
+        "a.kicad_pcb",
+        "a.kicad_sym",
+        "a.kicad_mod",
+        "a.kicad_pro",
+        "a.SchDoc",
+    ):
+        result = await bridge.execute(
+            ToolRequest(
+                tool_call_id=f"w-{name}",
+                tool_name="write_file",
+                arguments={"file_path": name, "content": "(x)"},
+            )
+        )
+        assert "error" not in result
+        assert (tmp_path / name).read_text() == "(x)"
+    assert not asked
+    # Outside the workspace is unchanged: refused, never a routine write.
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.kicad_sch"
+    with pytest.raises(ToolRejected):
+        await bridge.execute(
+            ToolRequest(
+                tool_call_id="w-out",
+                tool_name="write_file",
+                arguments={"file_path": str(outside), "content": "(x)"},
+            )
+        )
+    assert not outside.exists()
+    # Manual still asks.
+    manual = BridgeBroker(
+        lambda: LocalToolBroker(tmp_path, mode=ApprovalMode.MANUAL, approve=approve)
+    )
+    with pytest.raises(ToolRejected):
+        await manual.execute(
+            ToolRequest(
+                tool_call_id="w-m",
+                tool_name="write_file",
+                arguments={"file_path": "m.kicad_sch", "content": "(x)"},
+            )
+        )
+    assert asked
+
+
+async def test_turn_end_is_advertised_only_by_owners_that_send_it(tmp_path: Path) -> None:
+    broker = LocalToolBroker(tmp_path)
+    async with tools_server() as fake:
+        plain = _client(fake, tmp_path, broker)
+        owner = ToolSessionClient(
+            fake.credential,
+            workspace=tmp_path,
+            conversation_id="c2",
+            executor=broker.execute,
+            agent={"provider": "codex", "model": ""},
+            turn_end=True,
+        )
+        try:
+            await plain.start()
+            await owner.start()
+        finally:
+            await plain.aclose()
+            await owner.aclose()
+    assert TURN_END_CAPABILITY not in fake.starts[0]["capabilities"]
+    assert TURN_END_CAPABILITY in fake.starts[1]["capabilities"]
+    assert TURN_END_CAPABILITY == "turn_end_v1"
+
+
+async def test_send_turn_end_returns_the_note_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = LocalToolBroker(tmp_path)
+    async with tools_server() as fake:
+        client = _client(fake, tmp_path, broker)
+        assert await client.send_turn_end("t0") is None  # not connected: no frame, no error
+        try:
+            await client.start()
+            fake.turn_end_note = "Applied 3 staged Altium edits."
+            assert await client.send_turn_end("t1") == "Applied 3 staged Altium edits."
+            fake.turn_end_note = None
+            assert await client.send_turn_end("t2") is None
+            fake.turn_end_silent = True
+            monkeypatch.setattr(
+                "copper_pilot_cli.agents.tools_session.TURN_END_TIMEOUT_SECONDS", 0.2
+            )
+            assert await client.send_turn_end("t3") is None
+        finally:
+            await client.aclose()
+        assert [f["turn_id"] for f in fake.of_type("turn_end")] == ["t1", "t2", "t3"]

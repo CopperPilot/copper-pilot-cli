@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 RELAY_TOKEN_ENV = "COPPER_PILOT_TOOLS_RELAY_TOKEN"  # noqa: S105 - an env var name
 SERVER_NAME = "copperpilot"
 INSTRUCTIONS = (
-    "CopperPilot electronics tools. Read the guide resource copperpilot://guide. Use "
-    "copperpilot_subagent for schematic, PCB and library edits."
+    "CopperPilot electronics tools. Read the guide resource copperpilot://guide and the "
+    "playbook (read_copperpilot_playbook), then do the design work with these tools. "
+    "copperpilot_subagent (a hosted CopperPilot turn) is optional."
 )
 _MAX_LINE = 64 * 1024 * 1024
 
@@ -95,6 +96,10 @@ def build_mcp_server(backend: ToolBackend) -> Server:
                 name=item["name"],
                 description=item.get("description") or "",
                 inputSchema=item.get("inputSchema") or {"type": "object", "properties": {}},
+                # A missing flag is an old server: its tools were all read-only.
+                annotations=types.ToolAnnotations(readOnlyHint=item.get("readOnly") is not False),
+                # Claude Code's MCP tool search keeps these in context and may defer the rest.
+                _meta={"anthropic/alwaysLoad": item.get("alwaysLoad") is True},
             )
             for item in await backend.list_tools()
         ]

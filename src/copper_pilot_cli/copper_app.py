@@ -803,7 +803,8 @@ class CopperPilotApp(App[None]):
         await self._mount(
             AssistantMessage(
                 f"*This chat now runs on {selection.label()} ({PROVIDER_HELP[provider]}). "
-                "CopperPilot adds its design tools and `copperpilot_subagent` for edits. "
+                "CopperPilot adds its design tools (edits included); "
+                "`copperpilot_subagent` is optional. "
                 "Your agent's tokens are your own and are never billed by CopperPilot; "
                 "CopperPilot tool use is billed as usual.*"
             )

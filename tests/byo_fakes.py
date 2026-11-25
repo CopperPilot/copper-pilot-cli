@@ -20,11 +20,19 @@ TOOLS = [
         "name": "query_design",
         "description": "Query the KiCad design.",
         "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "read_only": True,
     },
     {
         "name": "run_erc",
         "description": "Run ERC.",
         "input_schema": {"type": "object", "properties": {}},
+        "read_only": True,
+    },
+    {
+        "name": "place_symbol",
+        "description": "Place a symbol.",
+        "input_schema": {"type": "object", "properties": {}},
+        "read_only": False,
     },
 ]
 
@@ -45,6 +53,9 @@ class FakeToolsServer:
         self.bridge_read: str | None = None
         self.bridge_write: dict[str, Any] | None = None
         self.connections = 0
+        # What the server answers a ``turn_end`` with; ``turn_end_silent`` never answers.
+        self.turn_end_note: str | None = None
+        self.turn_end_silent = False
 
     @property
     def credential(self) -> DeviceCredential:
@@ -135,6 +146,18 @@ class FakeToolsServer:
                         await socket.close()
                         return
                     asyncio.create_task(serve_call(frame))
+                elif frame.get("type") == "turn_end":
+                    if not self.turn_end_silent:
+                        await socket.send(
+                            json.dumps(
+                                {
+                                    "type": "turn_end_result",
+                                    "turn_id": frame["turn_id"],
+                                    "applied": self.turn_end_note is not None,
+                                    "note": self.turn_end_note,
+                                }
+                            )
+                        )
                 elif frame.get("type") == "tool_result":
                     future = pending.pop(frame["tool_call_id"], None)
                     if future is not None:
