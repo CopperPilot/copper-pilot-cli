@@ -4,6 +4,54 @@ Changelog
 
 (unreleased)
 ------------
+- Merge pull request #81 from
+  CopperPilot/feat/byoa_full_intelligence_25_nov_2026. [Aditya]
+- Tool-socket deletes inside .copperpilot/tmp and .copperpilot/scratch
+  are routine under Auto. [AdityaNG]
+
+  kicad_copy and staging cleanup delete their own scratch files; a live
+  Claude run had kicad_copy refused under -y.
+- Tool-socket writes into CopperPilot work folders (.copperpilot/tmp,
+  scratch, notes, plans, references) are routine under Auto. [AdityaNG]
+
+  Found in a live Claude run: the playbook stages design edits under
+  .copperpilot/tmp/staging, but every .copperpilot path was sensitive, so
+  each staged edit was refused with -y. .copperpilot/skills (code) still asks.
+- Tool session: never replay an edit after a reconnect; send turn_end
+  only to servers that advertise turn_end_v1. [AdityaNG]
+
+  An edit call sent before a drop may already have been applied, so it now
+  fails with a retryable connection_lost error asking the agent to re-read
+  the design; read-only calls are still re-sent. Only calls actually sent
+  are considered (a call still waiting for the socket is sent once, by
+  call_tool). turn_end needs turn_end_v1 in tool_session_ready: older
+  servers ignore it silently, which would hold every turn for 60 s.
+- BYOA v2: full CopperPilot tool set for the user's agent, optional
+  subagent, turn_end. [AdityaNG]
+
+  - Tools: use the server's per-tool read_only flag (MCP readOnlyHint; missing flag
+    = old server = read-only). Core tools carry anthropic/alwaysLoad true, the rest
+    false so Claude Code's MCP tool search can defer them; Codex still gets all.
+  - copperpilot_subagent: description, MCP instructions, README/docs and TUI notice
+    now say it is optional (hosted turn billed to the plan; second opinion).
+  - Permissions: Ask runs only read-only CopperPilot tools, Plan no edit tools
+    (copperpilot_subagent only with a mode that cannot edit), Agent all; enforced in
+    ToolProxy for both Claude and Codex. Bridge writes of design files (KiCad incl.
+    .kicad_mod, Altium docs) inside the workspace are routine under Auto, like the
+    subagent rule; outside the workspace unchanged.
+  - turn_end: tool_session_start advertises turn_end_v1 when the owner of the turns
+    (the TUI's AgentSessions) sends it; after each Claude/Codex turn the CLI sends
+    turn_end on the chat's tool socket, waits up to 60 s for turn_end_result and
+    shows a non-null note as a status line before the turn's final event.
+  - Tests: fakes answer turn_end and carry read_only flags.
+
+
+1.0.4 (2026-11-25)
+------------------
+- Merge pull request #78 from CopperPilot/release/1.0.4. [Aditya]
+
+  release: version 1.0.4
+- Release: version 1.0.4 🚀 [AdityaNG]
 - Merge pull request #71 from
   CopperPilot/fix/stream_budget_skips_tool_requests_24_nov_2026.
   [Aditya]
