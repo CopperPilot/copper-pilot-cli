@@ -1953,6 +1953,52 @@ async def test_models_3d_resolves_paths_and_reports_missing(tmp_path, monkeypatc
     assert result.summary == "4/7 model paths resolve; 2 footprint(s) without a model"
 
 
+def _embedded_files(*names: str) -> str:
+    """A KiCad 9+ (embedded_files ...) block; data is base64 between bars."""
+    files = "".join(
+        f'\n\t\t(file (name "{name}") (type model)'
+        "\n\t\t\t(data\n|KLUv/WBkAJ0AAA+/QUJD\nREVGR0g=|)"
+        '\n\t\t\t(checksum "2C1F6E3A")\n\t\t)'
+        for name in names
+    )
+    return f"\n\t(embedded_files{files}\n\t)"
+
+
+@pytest.mark.asyncio
+async def test_models_3d_resolves_models_embedded_in_the_board_or_footprint(
+    tmp_path, monkeypatch
+) -> None:
+    from copper_pilot_cli.validate import pcb as pcb_module
+
+    make_project(tmp_path)
+    monkeypatch.setattr(pcb_module, "_kicad_config_dirs", lambda: [])
+    monkeypatch.setattr(pcb_module, "_system_model_dirs", lambda _cli: [])
+    pads = [(-0.8, 0.0), (0.8, 0.0)]
+    board = _edge_board(
+        _fp("lib:A", "U1", (5, 5, 0), pads=pads, models=["kicad-embed://Board.step"]),
+        _fp(
+            "lib:B",
+            "U2",
+            (8, 5, 0),
+            pads=pads,
+            models=["kicad-embed://Own.step"],
+            extra=_embedded_files("Own.step"),
+        ),
+        _fp("lib:C", "U3", (11, 5, 0), pads=pads, models=["kicad-embed://Gone.step"]),
+    )
+    _write_pcb(tmp_path, board.replace("\n)\n", _embedded_files("Board.step") + "\n)\n"))
+    parsed = pcb_module.parse_board((tmp_path / "board" / "board.kicad_pcb").read_text())
+    assert parsed.embedded == {"Board.step"}
+    assert [fp.embedded for fp in parsed.footprints] == [set(), {"Own.step"}, set()]
+
+    outcome = await runner_for(tmp_path, options=RunOptions(only=["pcb.models_3d"])).run()
+    result = by_id(outcome.results)["pcb.models_3d"]
+    (missing,) = result.findings
+    assert missing.title == "3D model missing for U3"
+    assert "Gone.step is not in the footprint's or the board's embedded files" in missing.detail
+    assert result.summary == "2/3 model paths resolve"
+
+
 @pytest.mark.asyncio
 async def test_pcb_geometry_checks_run_after_a_stage_gate_halts(tmp_path) -> None:
     make_project(tmp_path)

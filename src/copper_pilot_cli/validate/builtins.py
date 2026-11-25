@@ -28,6 +28,7 @@ from copper_pilot_cli.validate.pcb import (
     Board,
     body_points,
     edge_gaps,
+    embedded_model_name,
     external_connector_kind,
     footprint_needs_model,
     kicad_path_variables,
@@ -851,7 +852,17 @@ def check_models_3d(
             continue
         for model in models:
             total += 1
-            found, tried, unknown = resolve_model(model.path, project_dir, variables, model_dirs)
+            embedded = embedded_model_name(model.path)
+            if embedded is not None:
+                # kicad-embed://<name> lives in the footprint or the board, not on disk.
+                if embedded in footprint.embedded or embedded in board.embedded:
+                    resolved += 1
+                    continue
+                found, tried, unknown = None, [], []
+            else:
+                found, tried, unknown = resolve_model(
+                    model.path, project_dir, variables, model_dirs
+                )
             if found is not None:
                 resolved += 1
                 continue
@@ -864,7 +875,10 @@ def check_models_3d(
     for path, refs in sorted(missing.items(), key=lambda item: item[1][0]):
         unknown = unknown_for[path]
         tried = tried_for[path]
-        if unknown:
+        embedded = embedded_model_name(path)
+        if embedded is not None:
+            why = f"{embedded} is not in the footprint's or the board's embedded files"
+        elif unknown:
             why = f"path variable {', '.join(unknown)} is not defined"
         elif tried:
             why = f"no file at {tried[0]}" + (

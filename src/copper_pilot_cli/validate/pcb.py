@@ -242,6 +242,8 @@ class Footprint:
     # footprint-local text items keyed by layer name: (text, x, y)
     texts: dict[str, list[tuple[str, float, float]]] = field(default_factory=dict)
     models: list[Model] = field(default_factory=list)
+    # names in the footprint's own (embedded_files ...) block (KiCad 9+)
+    embedded: set[str] = field(default_factory=set)
 
     @property
     def name(self) -> str:
@@ -271,6 +273,8 @@ class Board:
     footprints: list[Footprint]
     outline: list[Segment]
     version: str = ""
+    # names in the board-level (embedded_files ...) block (KiCad 9+)
+    embedded: set[str] = field(default_factory=set)
 
     def outline_bbox(self) -> tuple[float, float, float, float] | None:
         if not self.outline:
@@ -282,6 +286,16 @@ class Board:
 
 def _segments(paths: list[list[Point]]) -> list[Segment]:
     return [(path[i], path[i + 1]) for path in paths for i in range(len(path) - 1)]
+
+
+def _embedded_names(node: Sexp) -> set[str]:
+    """File names stored in `(embedded_files (file (name ...) ...))` under `node`."""
+    return {
+        _value(item, "name")
+        for block in children(node, "embedded_files")
+        for item in children(block, "file")
+        if _value(item, "name")
+    }
 
 
 def _parse_footprint(node: Sexp) -> tuple[Footprint, list[Segment]]:
@@ -345,6 +359,7 @@ def _parse_footprint(node: Sexp) -> tuple[Footprint, list[Segment]]:
                 edge.extend(
                     (footprint.to_board(a), footprint.to_board(b)) for a, b in _segments(paths)
                 )
+    footprint.embedded = _embedded_names(node)
     return footprint, edge
 
 
@@ -362,7 +377,12 @@ def parse_board(text: str) -> Board:
             outline.extend(edge)
         elif head and head.startswith("gr_") and _value(item, "layer") == "Edge.Cuts":
             outline.extend(_segments(_shape_paths(item)))
-    return Board(footprints=footprints, outline=outline, version=_value(root, "version"))
+    return Board(
+        footprints=footprints,
+        outline=outline,
+        version=_value(root, "version"),
+        embedded=_embedded_names(root),
+    )
 
 
 def ray_exit(origin: Point, direction: Point, outline: list[Segment]) -> float | None:
@@ -568,6 +588,7 @@ def suggested_rotation(rotation: float, facing: Point, wanted: Point) -> float:
 
 # ----------------------------------------------------------------- 3D models
 
+KICAD_EMBED_PREFIX = "kicad-embed://"
 _VAR_RE = re.compile(r"\$\{([^}]+)\}|\$\(([^)]+)\)")
 _MODEL_DIR_VAR_RE = re.compile(r"^(?:KICAD\d*_3DMODEL_DIR|KISYS3DMOD)$")
 _THIRD_PARTY_VAR_RE = re.compile(r"^KICAD(\d+)_3RD_PARTY$")
@@ -688,6 +709,18 @@ def kicad_path_variables(
         if _MODEL_DIR_VAR_RE.match(name) and value not in model_dirs:
             model_dirs.append(value)
     return variables, model_dirs
+
+
+def embedded_model_name(path: str) -> str | None:
+    """The file name a `kicad-embed://<name>` model path refers to, else None.
+
+    KiCad 9+ can store 3D models inside the board or footprint; the model path then
+    names the embedded file instead of a file on disk.
+    """
+    text = path.strip()
+    if not text.startswith(KICAD_EMBED_PREFIX):
+        return None
+    return text[len(KICAD_EMBED_PREFIX) :]
 
 
 def resolve_model(
