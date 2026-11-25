@@ -690,3 +690,16 @@ def test_tool_socket_writes_to_copperpilot_work_dirs_are_routine(tmp_path: Path)
     assert not ok(".copperpilot/skills/autorouter/SKILL.md")
     assert not ok(".copperpilot/tmp/.env")
     assert not ok(".copperpilot/tmp/staging/u1/board.kicad_sch", kicad_writes=False)
+
+
+def test_tool_socket_deletes_only_in_copperpilot_scratch(tmp_path: Path) -> None:
+    from copper_pilot_cli.deepagents_tools import routine_action
+
+    def ok(path: str, kicad_writes: bool = True) -> bool:
+        return routine_action("delete", {"file_path": path}, tmp_path, kicad_writes=kicad_writes)
+
+    assert ok(".copperpilot/tmp/kicad-copy-x/board.kicad_sch")
+    assert ok(".copperpilot/scratch/u1/REPORT.md")
+    assert not ok(".copperpilot/notes/review.md")
+    assert not ok("board.kicad_sch")
+    assert not ok(".copperpilot/tmp/a.kicad_sch", kicad_writes=False)

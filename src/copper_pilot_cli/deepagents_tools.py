@@ -288,6 +288,14 @@ def _routine_write_allowed(
     return path.suffix.lower() in _ROUTINE_WRITE_SUFFIXES - _SCRIPT_SUFFIXES
 
 
+def _routine_scratch_delete(root: Path, arguments: dict[str, Any]) -> bool:
+    path = _resolve_path(root, arguments.get("file_path"))
+    if path is None or not _is_within(root, path):
+        return False
+    parts = tuple(part.lower() for part in path.relative_to(root).parts)
+    return len(parts) > 2 and parts[0] == ".copperpilot" and parts[1] in {"tmp", "scratch"}
+
+
 def _read_only_git_allowed(command: object, root: Path) -> bool:
     if not isinstance(command, str) or not command.strip() or _SHELL_CONTROL_RE.search(command):
         return False
@@ -362,6 +370,10 @@ def routine_action(
         return True
     if canonical in {"write_file", "edit_file"}:
         return _routine_write_allowed(root, arguments, kicad_writes=kicad_writes)
+    if canonical == "delete" and kicad_writes:
+        # Tool-socket tools (kicad_copy, staging cleanup) delete their own
+        # scratch files; only CopperPilot's tmp and scratch folders qualify.
+        return _routine_scratch_delete(root, arguments)
     if canonical == "execute":
         return _read_only_git_allowed(arguments.get("command"), root)
     return False
