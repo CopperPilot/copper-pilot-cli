@@ -161,13 +161,19 @@ permission rules, hooks, skills and your MCP servers) and native subagents.
 CopperPilot adds, over MCP (in-process for Claude; `copper-pilot mcp
 --tools-session` for Codex):
 
-- the read-only design, check and search tools the server curates for your
-  EDA tool (ERC/DRC, `query_design`, library and reference search,
-  `load_server_skill`, ...), proxied over `WS /api/copperpilot/tools/ws`;
-- `copperpilot_subagent {task, mode, effort}`: one hosted CopperPilot turn (a
-  fresh conversation per call) that makes schematic, PCB and library edits and
-  reports what changed. It shows as a subagent row; its own approvals and
-  questions appear as in a normal turn. `effort: intelligence` needs a paid
+- every design, check, edit and search tool the server offers for your EDA
+  tool (about 150: `query_design`, ERC/DRC, `place_*`, `connect_*`,
+  `apply_*_batch`, library search, `load_server_skill`, ...; no memory tools),
+  proxied over `WS /api/copperpilot/tools/ws`. Each carries a `read_only` flag
+  (MCP `readOnlyHint`; no flag means read-only). CopperPilot's system prompt is
+  served in sections by `read_copperpilot_playbook`. Claude Code keeps a core
+  set loaded and defers the rest to its MCP tool search; Codex gets them all;
+- `copperpilot_subagent {task, mode, effort}`: optional. One hosted CopperPilot
+  turn (a fresh conversation per call), billed to your CopperPilot plan, for
+  when you ask for CopperPilot itself or a second opinion. By default the agent
+  edits designs itself with the tools above and uses its own subagents (Claude
+  Task/Agent, Codex multi_agent). It shows as a subagent row; its own approvals
+  and questions appear as in a normal turn. `effort: intelligence` needs a paid
   plan;
 - a short guide, appended to the agent's prompt and readable as
   `copperpilot://guide`. It and the tool schemas are kept in memory only.
@@ -188,9 +194,16 @@ reaches CopperPilot:
 Codex turns use T3 Code's mapping: Manual → `untrusted` approvals with a
 read-only sandbox, Auto → `on-request` with a workspace-write sandbox, YOLO →
 full access; its approval, permission and user-input requests open the same
-prompts. Under Auto, KiCad design files (`.kicad_sch`, `.kicad_pcb`,
-`.kicad_sym`, `.kicad_pro`) count as routine writes only inside a
-`copperpilot_subagent` turn. Ask mode refuses edits and shell.
+prompts. Under Auto, design files (KiCad `.kicad_sch`, `.kicad_pcb`, `.kicad_sym`,
+`.kicad_mod`, `.kicad_pro`; Altium documents) inside the workspace count as
+routine writes when they come from CopperPilot's edit tools or a
+`copperpilot_subagent` turn; outside the workspace they still ask. Ask mode
+refuses edits and shell and only runs read-only CopperPilot tools; Plan mode
+runs no CopperPilot edit tools.
+
+When a turn ends, the CLI sends `turn_end` on the tool socket so the server can
+apply staged edits (Altium), and shows the note it answers with, if any, as a
+status line.
 
 **Plan mode.** When the agent finishes a plan (Claude `ExitPlanMode`, a Codex
 plan), it is saved as `.copperpilot/plans/<name>.plan.md` and the TUI asks
@@ -313,7 +326,7 @@ copper-pilot mcp --tools-session [--workspace DIR] [--approval auto|yolo] [--pro
 ```
 
 Serves CopperPilot's tools for your own agent instead of the delegating
-conductor: the server's curated tools, `copperpilot_subagent` and the
+conductor: the server's tools (edits included), the optional `copperpilot_subagent` and the
 `copperpilot://guide` resource. It opens `WS /api/copperpilot/tools/ws` with
 the stored login, answers the server's file and shell requests with the local
 tool broker (reads return `content_sha256`; writes carrying `if_match` are

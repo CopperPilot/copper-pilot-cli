@@ -108,9 +108,10 @@ Codex between turns; the new agent gets a capped summary of the chat so far.
 Your agent runs as itself (its own prompt, tools, settings and subagents) with
 your own login (`claude auth login`, `codex login`); CopperPilot never reads
 those credentials and never charges for your agent's tokens. CopperPilot adds
-read-only design tools, a short guide, and `copperpilot_subagent`, which runs a
-hosted CopperPilot turn to make schematic/PCB edits; that tool use is billed as
-usual. Details: [docs/cli.md](docs/cli.md#bring-your-own-agent).
+the design tools (edits included; the agent works on the design itself and uses
+its own subagents), a short guide and the CopperPilot playbook, plus the optional
+`copperpilot_subagent`, a hosted CopperPilot turn for when you ask for CopperPilot
+itself or a second opinion; that tool use is billed as usual. Details: [docs/cli.md](docs/cli.md#bring-your-own-agent).
 
 ## Validate
 

@@ -337,3 +337,85 @@ def test_status_line_shows_the_agent() -> None:
         120, chat_mode="agent", effort="balanced", agent="Claude Agent · low", mode=ColorMode.NONE
     ).plain
     assert "Claude Agent · low" in line and "/provider" in line
+
+
+async def test_turn_end_is_sent_after_each_turn_and_its_note_shown_before_final(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "board"
+    workspace.mkdir()
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.AUTO)
+
+    def factory(selection: AgentSelection, **kwargs: Any) -> FakeSession:
+        return FakeSession(selection, **kwargs)
+
+    async with tools_server() as fake:
+        sessions = AgentSessions(
+            credential=lambda: fake.credential,
+            broker=lambda: broker,
+            factories={Provider.CLAUDE: factory, Provider.CODEX: factory},
+        )
+        selection = AgentSelection(Provider.CLAUDE, "claude-haiku-5-5")
+
+        async def turn(turn_id: str, mode: CopperMode = CopperMode.AGENT) -> list[CopperEvent]:
+            return [
+                event
+                async for event in sessions.stream_turn(
+                    thread_id="chat-te",
+                    selection=selection,
+                    workspace=workspace,
+                    messages=[HumanMessage(content="go")],
+                    mode=mode,
+                    turn_id=turn_id,
+                )
+            ]
+
+        try:
+            first = await turn("turn-1")
+            fake.turn_end_note = "Applied 2 staged Altium edits."
+            second = await turn("turn-2")
+            await sessions.discard("chat-te")
+            fake.turn_end_silent = True
+            fake.turn_end_note = None
+        finally:
+            await sessions.aclose()
+    assert "turn_end_v1" in fake.starts[0]["capabilities"]
+    assert [f["turn_id"] for f in fake.of_type("turn_end")] == ["turn-1", "turn-2"]
+    assert not [e for e in first if e.kind is EventKind.STATUS and "Altium" in str(e.data)]
+    kinds = [e.kind for e in second]
+    note_index = next(
+        i for i, e in enumerate(second) if e.kind is EventKind.STATUS and "Altium" in str(e.data)
+    )
+    assert kinds[-1] is EventKind.FINAL and note_index < len(second) - 1
+
+
+async def test_agent_session_proxy_follows_the_turn_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "board"
+    workspace.mkdir()
+    broker = LocalToolBroker(workspace, mode=ApprovalMode.AUTO)
+    created: list[FakeSession] = []
+
+    def factory(selection: AgentSelection, **kwargs: Any) -> FakeSession:
+        created.append(FakeSession(selection, **kwargs))
+        return created[-1]
+
+    async with tools_server() as fake:
+        sessions = AgentSessions(
+            credential=lambda: fake.credential,
+            broker=lambda: broker,
+            factories={Provider.CLAUDE: factory},
+        )
+        try:
+            async for _ in sessions.stream_turn(
+                thread_id="chat-m",
+                selection=AgentSelection(Provider.CLAUDE, "m"),
+                workspace=workspace,
+                messages=[HumanMessage(content="plan")],
+                mode=CopperMode.ASK,
+                turn_id="t",
+            ):
+                pass
+            refused = await created[0].proxy.call_tool("place_symbol", {})
+        finally:
+            await sessions.aclose()
+    assert refused.is_error and "Ask mode" in refused.plain()

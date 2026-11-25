@@ -496,7 +496,8 @@ class ClaudeSession(AgentSession):
 
         broker = self._broker()
         if tool_name.startswith(MCP_PREFIX):
-            # Our tools: reads are free; the subagent asks for its own writes.
+            # Our tools: Ask/Plan limits are enforced by the ToolProxy; the files
+            # they write go through the bridge broker's approval rules.
             return PermissionResultAllow()
         if tool_name == "AskUserQuestion":
             questions = [

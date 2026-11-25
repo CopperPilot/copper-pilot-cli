@@ -137,11 +137,24 @@ _ROUTINE_WRITE_SUFFIXES = frozenset(
         ".yml",
     }
 )
-# KiCad design files. Auto treats them as routine writes only for writes that
-# come from a ``copperpilot_subagent`` turn (a hosted CopperPilot turn the
-# user's own agent delegated the design edit to); a plain hosted turn under
-# Auto still asks.
-KICAD_DESIGN_SUFFIXES = frozenset({".kicad_sch", ".kicad_pcb", ".kicad_sym", ".kicad_pro"})
+# Design files (KiCad and Altium). Auto treats them as routine writes only for
+# writes that come from the user's own agent: a ``copperpilot_subagent`` turn
+# or a CopperPilot edit tool on the tool socket (the bridge). A plain hosted
+# turn under Auto still asks.
+KICAD_DESIGN_SUFFIXES = frozenset(
+    {
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".kicad_sym",
+        ".kicad_mod",
+        ".kicad_pro",
+        ".schdoc",
+        ".pcbdoc",
+        ".schlib",
+        ".pcblib",
+        ".prjpcb",
+    }
+)
 # Compare-and-swap writes (``cas_writes_v1``): the refusal code a write gets
 # when the file changed since the read whose hash it carries.
 FILE_CHANGED_CODE = "FILE_CHANGED"
@@ -163,6 +176,10 @@ _DEPENDENCY_FILES = frozenset(
         "yarn.lock",
     }
 )
+# CopperPilot work folders whose files are routine for tool-socket writes
+# (``kicad_writes``); ``.copperpilot/skills`` holds code and is not one.
+_COPPERPILOT_WORK_DIRS = frozenset({"tmp", "scratch", "notes", "plans", "references"})
+
 _SENSITIVE_PARTS = frozenset(
     {
         ".agents",
@@ -252,6 +269,16 @@ def _routine_write_allowed(
     if path is None or not _is_within(root, path):
         return False
     relative_parts = tuple(part.lower() for part in path.relative_to(root).parts)
+    if (
+        kicad_writes
+        and len(relative_parts) > 2
+        and relative_parts[0] == ".copperpilot"
+        and relative_parts[1] in _COPPERPILOT_WORK_DIRS
+    ):
+        # The playbook stages design edits under .copperpilot/tmp/staging and
+        # keeps notes and plans there: CopperPilot's own work folders, not
+        # its skills (code), are routine for tool-socket writes.
+        relative_parts = relative_parts[2:]
     if any(part in _SENSITIVE_PARTS for part in relative_parts):
         return False
     if path.name.lower() in _SENSITIVE_NAMES | _DEPENDENCY_FILES:
@@ -259,6 +286,14 @@ def _routine_write_allowed(
     if kicad_writes and path.suffix.lower() in KICAD_DESIGN_SUFFIXES:
         return True
     return path.suffix.lower() in _ROUTINE_WRITE_SUFFIXES - _SCRIPT_SUFFIXES
+
+
+def _routine_scratch_delete(root: Path, arguments: dict[str, Any]) -> bool:
+    path = _resolve_path(root, arguments.get("file_path"))
+    if path is None or not _is_within(root, path):
+        return False
+    parts = tuple(part.lower() for part in path.relative_to(root).parts)
+    return len(parts) > 2 and parts[0] == ".copperpilot" and parts[1] in {"tmp", "scratch"}
 
 
 def _read_only_git_allowed(command: object, root: Path) -> bool:
@@ -335,6 +370,10 @@ def routine_action(
         return True
     if canonical in {"write_file", "edit_file"}:
         return _routine_write_allowed(root, arguments, kicad_writes=kicad_writes)
+    if canonical == "delete" and kicad_writes:
+        # Tool-socket tools (kicad_copy, staging cleanup) delete their own
+        # scratch files; only CopperPilot's tmp and scratch folders qualify.
+        return _routine_scratch_delete(root, arguments)
     if canonical == "execute":
         return _read_only_git_allowed(arguments.get("command"), root)
     return False

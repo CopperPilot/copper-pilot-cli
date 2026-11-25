@@ -56,7 +56,7 @@ copper-pilot --provider codex
 Your agent uses its own login and settings; CopperPilot never handles its
 credentials or bills its tokens. To give another MCP host the same tools
 without the CopperPilot UI, point it at `copper-pilot mcp --tools-session`
-(read-only design tools, `copperpilot_subagent` for edits, and the
+(the design tools including edits, the optional `copperpilot_subagent`, and the
 `copperpilot://guide` resource). See [cli.md](cli.md#bring-your-own-agent).
 
 ## Option 2: MCP conductor (`copper-pilot mcp`)

@@ -239,7 +239,8 @@ def command_parser(command: str) -> argparse.ArgumentParser:
             "--tools-session",
             action="store_true",
             help=(
-                "Serve CopperPilot's tools (read-only design tools plus copperpilot_subagent) "
+                "Serve CopperPilot's tools (design edits included, plus the optional "
+                "copperpilot_subagent) "
                 "for your own agent instead of the delegating conductor"
             ),
         )
