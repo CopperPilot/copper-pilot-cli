@@ -17,7 +17,7 @@ from copper_pilot_cli.copper_auth import DeviceCredential
 from copper_pilot_cli.copper_protocol import CopperEvent, CopperMode, EventKind, ToolRequest
 from copper_pilot_cli.copper_tools import ApprovalRequest, ToolRejected
 from copper_pilot_cli.validate import avalidate
-from copper_pilot_cli.validate.builtins import _library_uri_outside_project
+from copper_pilot_cli.validate.builtins import _items_locator, _library_uri_outside_project
 from copper_pilot_cli.validate.cli import parse_args, render_graph, render_list, run_command
 from copper_pilot_cli.validate.config import (
     CheckResult,
@@ -1277,6 +1277,34 @@ async def test_builtin_findings_group_and_map_severities(tmp_path) -> None:
     assert "Board minimum clearance is not set" in rules
     assert results["release.outputs"].status is Status.PASS
     assert results["release.repo"].status is Status.PASS
+
+
+@pytest.mark.parametrize(
+    ("description", "refs", "nets"),
+    [
+        ("Symbol U3 [ESP32-S3-WROOM-1]", ["U3"], []),
+        ("Symbol U1 Pin 5 [GPIO2, Bidirectional, Line]", ["U1"], []),
+        ("Symbol U1 Hidden pin 7 [VDD, Power input, Line]", ["U1"], []),
+        ("Pad A6 [GND] of Type_C1 on F.Cu", ["Type_C1"], ["GND"]),
+        ("Pad 3 [/GPIO12] of U1 on F.Cu", ["U1"], ["/GPIO12"]),
+        ("PTH pad SH [<no net>] of J2", ["J2"], []),
+        ("NPTH pad of H1", ["H1"], []),
+        ("Pad 199 of Module1 on B.Cu", ["Module1"], []),
+        ("Track [/SDA1] on F.Cu, length 3.2 mm", [], ["/SDA1"]),
+        ("Track (arc) [VBUS] on B.Cu, length 1.0 mm", [], ["VBUS"]),
+        ("Blind via [GND] on F.Cu - In1.Cu", [], ["GND"]),
+        ("Footprint LED1", ["LED1"], []),
+        ("Footprint <no reference designator>", [], []),
+        ("Global Label 'ADC0'", [], ["ADC0"]),
+        ("Text 'U9' on F.Silkscreen", [], []),
+    ],
+)
+def test_report_items_name_refs_and_nets_the_way_kicad_writes_them(
+    description: str, refs: list[str], nets: list[str]
+) -> None:
+    found_refs, found_nets, _x, _y = _items_locator([{"description": description}])
+    assert found_refs == refs
+    assert found_nets == nets
 
 
 @pytest.mark.asyncio
