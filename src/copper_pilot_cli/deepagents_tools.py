@@ -176,6 +176,10 @@ _DEPENDENCY_FILES = frozenset(
         "yarn.lock",
     }
 )
+# CopperPilot work folders whose files are routine for tool-socket writes
+# (``kicad_writes``); ``.copperpilot/skills`` holds code and is not one.
+_COPPERPILOT_WORK_DIRS = frozenset({"tmp", "scratch", "notes", "plans", "references"})
+
 _SENSITIVE_PARTS = frozenset(
     {
         ".agents",
@@ -265,6 +269,16 @@ def _routine_write_allowed(
     if path is None or not _is_within(root, path):
         return False
     relative_parts = tuple(part.lower() for part in path.relative_to(root).parts)
+    if (
+        kicad_writes
+        and len(relative_parts) > 2
+        and relative_parts[0] == ".copperpilot"
+        and relative_parts[1] in _COPPERPILOT_WORK_DIRS
+    ):
+        # The playbook stages design edits under .copperpilot/tmp/staging and
+        # keeps notes and plans there: CopperPilot's own work folders, not
+        # its skills (code), are routine for tool-socket writes.
+        relative_parts = relative_parts[2:]
     if any(part in _SENSITIVE_PARTS for part in relative_parts):
         return False
     if path.name.lower() in _SENSITIVE_NAMES | _DEPENDENCY_FILES:

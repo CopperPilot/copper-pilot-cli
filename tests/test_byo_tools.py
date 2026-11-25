@@ -672,3 +672,21 @@ async def test_send_turn_end_returns_the_note_and_never_raises(
         finally:
             await client.aclose()
         assert [f["turn_id"] for f in fake.of_type("turn_end")] == ["t1", "t2", "t3"]
+
+
+def test_tool_socket_writes_to_copperpilot_work_dirs_are_routine(tmp_path: Path) -> None:
+    from copper_pilot_cli.deepagents_tools import routine_action
+
+    def ok(path: str, kicad_writes: bool = True) -> bool:
+        return routine_action(
+            "write_file", {"file_path": path, "content": "x"}, tmp_path, kicad_writes=kicad_writes
+        )
+
+    assert ok(".copperpilot/tmp/staging/u1/candidate/board.kicad_sch")
+    assert ok(".copperpilot/notes/review.md")
+    assert ok(".copperpilot/plans/led.plan.md")
+    # Skills hold code; secrets stay sensitive; hosted-chat rule unchanged.
+    assert not ok(".copperpilot/skills/autorouter/main.py")
+    assert not ok(".copperpilot/skills/autorouter/SKILL.md")
+    assert not ok(".copperpilot/tmp/.env")
+    assert not ok(".copperpilot/tmp/staging/u1/board.kicad_sch", kicad_writes=False)
