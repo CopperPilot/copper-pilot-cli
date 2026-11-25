@@ -157,6 +157,7 @@ from copper_pilot_cli.copper_widgets import (
     AssistantMessage,
     BtwPanel,
     ChatInput,
+    ComposerTextArea,
     CompletionEntry,
     ErrorMessage,
     ReasoningMessage,
@@ -947,6 +948,18 @@ class CopperPilotApp(App[None]):
             composer.first().hide_tip()
         token, _, remainder = value.partition(" ")
         skill = self._skills.get(token.removeprefix("/").lower())
+        starts_turn = skill is not None or not value.startswith("/")
+        if starts_turn and self._turn_task and not self._turn_task.done():
+            if composer:
+                area = composer.first().query_one(ComposerTextArea)
+                area.text = value
+                area.focus()
+            self.notify(
+                "A turn is already running. Your message was kept in the composer.",
+                severity="warning",
+                markup=False,
+            )
+            return
         if value == "/btw" or value.startswith("/btw "):
             await self._command(value)
         elif skill is not None:
