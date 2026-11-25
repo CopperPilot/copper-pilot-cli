@@ -183,3 +183,45 @@ async def test_graph_persists_hidden_subagent_context_and_plan_handoff(
     )
     assert state.values["copper_mode"] == "plan"
     assert state.values["copper_effort"] == "intelligence"
+
+
+async def _one_turn(runtime, config) -> None:
+    async for _ in runtime.astream({"messages": [HumanMessage(content="hi")]}, config):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_latest_chat_is_listed_first(monkeypatch, tmp_path) -> None:
+    # `--resume` with no id opens list_threads(limit=1); it must be the newest chat,
+    # even when an older chat has an id that sorts first.
+    monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    async with create_copper_graph(FakeAgent()) as runtime:
+        for thread_id in ("a-oldest", "b-middle", "c-newest"):
+            await _one_turn(runtime, runtime.config(thread_id, workspace))
+        await _one_turn(runtime, runtime.config("a-oldest", workspace))
+
+    rows = await list_threads(cwd=str(workspace))
+    assert [row["thread_id"] for row in rows] == ["a-oldest", "c-newest", "b-middle"]
+    assert all(row["updated_at"] for row in rows)
+    latest = await list_threads(cwd=str(workspace), limit=1)
+    assert latest[0]["thread_id"] == "a-oldest"
+
+
+@pytest.mark.asyncio
+async def test_chats_without_a_saved_time_still_list_newest_first(monkeypatch, tmp_path) -> None:
+    # Chats saved before `updated_at` was written fall back to the newest checkpoint.
+    monkeypatch.setenv("COPPER_PILOT_CLI_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("copper_pilot_cli.sessions._db_path", None)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    async with create_copper_graph(FakeAgent()) as runtime:
+        for thread_id in ("a-oldest", "b-newest"):
+            config = runtime.config(thread_id, workspace)
+            config["metadata"].pop("updated_at", None)
+            await _one_turn(runtime, config)
+
+    latest = await list_threads(cwd=str(workspace), limit=1)
+    assert latest[0]["thread_id"] == "b-newest"

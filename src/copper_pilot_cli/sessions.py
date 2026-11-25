@@ -512,7 +512,7 @@ async def list_threads(
             FROM checkpoints
             {where_sql}
             GROUP BY thread_id
-            ORDER BY {order_col} DESC
+            ORDER BY {order_col} DESC, latest_checkpoint_id DESC
             LIMIT ?
         """  # noqa: S608  # where_sql/order_col derived from controlled internal values; user values use ? placeholders
         params: tuple = (*params_list, limit)

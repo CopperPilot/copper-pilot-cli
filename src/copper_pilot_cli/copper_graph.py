@@ -44,6 +44,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -279,6 +280,8 @@ class CopperGraphRuntime:
             "metadata": {
                 "agent_name": "copper-pilot",
                 "cwd": str(workspace.resolve()),
+                # `threads list` and `--resume` sort chats by this.
+                "updated_at": datetime.now(UTC).isoformat(),
             },
         }
 
