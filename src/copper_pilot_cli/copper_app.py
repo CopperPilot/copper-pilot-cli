@@ -960,7 +960,10 @@ class CopperPilotApp(App[None]):
 
     def _prepare_attachments(self, value: str) -> str:
         attachments: list[dict[str, Any]] = []
-        media = list(self._pending_media)
+        # The visible prompt markers are the user's only way to remove a
+        # pasted image before submitting. Don't send media whose marker was
+        # deleted from the composer.
+        media = [item for item in self._pending_media if item.placeholder in value]
         if media:
             root = self.workspace / ".copperpilot" / "attachments"
             root.mkdir(parents=True, exist_ok=True)
@@ -971,7 +974,7 @@ class CopperPilotApp(App[None]):
                 attachments.append(path_first_attachment(file, self.workspace))
             for item in media:
                 value = value.replace(item.placeholder, "", 1).strip()
-            self._pending_media.clear()
+        self._pending_media.clear()
         snippet = value if looks_like_kicad_snippet(value) else None
         self.runtime.agent.runtime_context = encode_runtime_context(
             attachments=attachments,
