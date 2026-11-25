@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,29 @@ def test_workspace_outside_home_still_guards_home() -> None:
         "touches ~/other/x.kicad_sch"
     )
     assert classify("cat /srv/work/board/x.kicad_sch", workspace=workspace) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe runs agent commands on Windows")
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        (r"type C:\Users\maker\other\power.kicad_sch", "touches ~/other/power.kicad_sch"),
+        (r"copy C:\Users\maker\other\lib.kicad_sym .", "touches ~/other/lib.kicad_sym"),
+        (r"type ..\..\other\power.kicad_sch", "touches ~/other/power.kicad_sch"),
+        (r"echo hi > C:\Users\maker\notes.txt", "writes ~/notes.txt"),
+        (r"grep -rn VCC C:\Users\maker", "`grep -r` searches ~"),
+        (r"find C:\ -name kicad-cli.exe", "`find` searches C:\\"),
+        (
+            r'powershell -Command "Get-Content C:\Users\maker\other\x.kicad_sch"',
+            "touches ~/other/x.kicad_sch",
+        ),
+        (r"kicad-cli sch erc C:\Users\maker\projects\board\board.kicad_sch", None),
+        (r"type .\board.kicad_sch", None),
+    ],
+)
+def test_windows_backslash_paths(command: str, reason: str | None) -> None:
+    home = Path(r"C:\Users\maker")
+    assert classify(command, workspace=home / "projects" / "board", home=home) == reason
 
 
 def test_non_string_and_unbalanced_quotes() -> None:
