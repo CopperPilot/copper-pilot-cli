@@ -105,7 +105,7 @@ def _matches_input(relative: str, kind: str) -> bool:
     if kind == "pcb":
         return suffix == ".kicad_pcb"
     if kind == "pro":
-        return suffix == ".kicad_pro"
+        return suffix in {".kicad_pro", ".kicad_dru"}
     if kind == "libs":
         return suffix in _LIB_SUFFIXES or path.name in _LIB_TABLES
     if kind == "intent":

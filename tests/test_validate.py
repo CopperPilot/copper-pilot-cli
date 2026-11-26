@@ -475,6 +475,21 @@ def test_input_hashes_select_by_kind(tmp_path) -> None:
     assert not input_hashes(tmp_path, ["libs"])
 
 
+def test_drc_cache_key_tracks_custom_design_rules(tmp_path) -> None:
+    make_project(tmp_path)
+    runner = runner_for(tmp_path)
+    check = runner.config.check("pcb.drc")
+    rules = tmp_path / "board" / "board.kicad_dru"
+    without_rules = runner.cache_key(check)
+    rules.write_text('(version 1)\n(rule "width" (constraint track_width (min 0.2mm)))\n')
+    with_rules = runner.cache_key(check)
+    assert with_rules != without_rules
+    rules.write_text(rules.read_text().replace("0.2mm", "0.3mm"))
+    assert runner.cache_key(check) != with_rules
+    rules.unlink()
+    assert runner.cache_key(check) == without_rules
+
+
 def test_snapshot_is_read_only_and_excludes_git_and_copperpilot(tmp_path) -> None:
     make_project(tmp_path)
     (tmp_path / ".git").mkdir()
