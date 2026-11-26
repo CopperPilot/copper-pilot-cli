@@ -58,15 +58,14 @@ class OutputBuffer:
 
 
 async def drain(stream: asyncio.StreamReader | None, buffer: OutputBuffer) -> None:
-    """Copy a subprocess stream into the buffer until EOF or the limit."""
+    """Copy a subprocess stream into the buffer until EOF, discarding past the limit."""
     if stream is None:
         return
     while True:
         chunk = await stream.read(65536)
         if not chunk:
             return
-        if not buffer.append(chunk):
-            return
+        buffer.append(chunk)
 
 
 async def kill_process_tree(process: asyncio.subprocess.Process) -> None:
