@@ -1027,6 +1027,39 @@ async def test_run_shell_caps_output(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_output_overflow_does_not_stall_wait_all(tmp_path):
+    manager = BackgroundProcessManager()
+
+    script = (
+        "import sys, time; "
+        "print('started', flush=True); "
+        "time.sleep(0.15); "
+        "sys.stdout.write('x' * 2_000_000); "
+        "sys.stdout.flush()"
+    )
+
+    started = await run_shell(
+        py(script),
+        tmp_path,
+        manager=manager,
+        foreground_seconds=0.03,
+        output_limit=128,
+    )
+
+    assert started["background"] is True
+
+    try:
+        finished = await asyncio.wait_for(manager.wait_all(), timeout=3)
+    finally:
+        await manager.kill_all()
+
+    task = finished[0]
+    assert task["output_truncated"] is True
+    assert len(task["output"]) <= 128
+    assert task["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_broker_execute_uses_the_background_contract(tmp_path) -> None:
     broker = LocalToolBroker(tmp_path, mode=ApprovalMode.YOLO)
     broker.foreground_seconds = 0.1
