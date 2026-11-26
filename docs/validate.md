@@ -177,7 +177,7 @@ for that stage.
 - **Cache.** `.copperpilot/validate/cache/<key>.json`, where the key hashes the
   check spec, preamble, limits, profile, `--context` file hashes, the
   `--repeat`/`--effort` overrides, and the check's `inputs` (`sch` = all
-  sheets, `pcb`, `pro`, `libs` = `.kicad_sym` + `.kicad_mod` + lib tables,
+  sheets, `pcb`, `pro` = project settings and custom design rules, `libs` = `.kicad_sym` + `.kicad_mod` + lib tables,
   `intent` = `.copperpilot/README.md`, `PLANS.md`, `plans/*.md`, `all` = the
   whole tree). A PCB-only change re-runs only PCB-dependent checks. `intake.*`
   checks always run.
