@@ -423,6 +423,7 @@ class Runner:
             "inputs": input_hashes(self.workspace, list(check.inputs)),
             "repeat": self.options.repeat,
             "effort": self.options.effort,
+            "kicad_version": self.design.kicad_version if self.design is not None else None,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 

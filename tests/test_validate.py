@@ -960,6 +960,36 @@ async def test_cache_reuse_and_invalidation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_kicad_version_change_invalidates_cached_erc_and_drc(tmp_path):
+    make_project(tmp_path)
+    options = RunOptions(gate=GateMode.FULL)
+
+    # First validation with KiCad 9.
+    kicad9 = FakeKicad(version="9.0.1")
+    await runner_for(
+        tmp_path,
+        options=options,
+        kicad=kicad9,
+    ).run()
+
+    # Second validation with KiCad 10, without changing the design.
+    kicad10 = FakeKicad(version="10.0.4")
+    second = await runner_for(
+        tmp_path,
+        options=options,
+        kicad=kicad10,
+    ).run()
+
+    results = {result.check_id: result for result in second.results}
+
+    assert results["sch.erc"].cached is False
+    assert results["pcb.drc"].cached is False
+
+    assert "erc" in kicad10.calls
+    assert "drc" in kicad10.calls
+
+
+@pytest.mark.asyncio
 async def test_error_results_are_never_cached(tmp_path) -> None:
     make_project(tmp_path)
     turn = FakeTurn({"sch.ratings": ["nope"] * 3})
